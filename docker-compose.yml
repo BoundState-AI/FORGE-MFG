@@ -1,0 +1,53 @@
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      FORGE_ENV: local
+      FORGE_DEBUG: "true"
+      FORGE_AUTH_MODE: local
+      FORGE_DATABASE_URL: postgresql+asyncpg://forge:forge@db:5432/forge
+      FORGE_CORS_ORIGINS: '["http://localhost:3000"]'
+      FORGE_S3_ENDPOINT_URL: http://localstack:4566
+      FORGE_S3_BUCKET_DOCUMENTS: forge-documents
+      FORGE_S3_BUCKET_EVIDENCE: forge-evidence
+      FORGE_S3_BUCKET_AUDIT: forge-audit
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: forge
+      POSTGRES_PASSWORD: forge
+      POSTGRES_DB: forge
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U forge"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  localstack:
+    image: localstack/localstack:3
+    ports:
+      - "4566:4566"
+    environment:
+      SERVICES: s3
+      DEFAULT_REGION: us-gov-west-1
+    volumes:
+      - localstack:/var/lib/localstack
+
+volumes:
+  pgdata:
+  localstack:
