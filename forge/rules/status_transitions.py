@@ -23,7 +23,7 @@ Why this design:
 
 from __future__ import annotations
 
-from forge.models.enums import OpStatus, WOStatus
+from forge.models.enums import NCRStatus, OpStatus, WOStatus
 
 # Spec §4.3: valid work order transitions
 VALID_WO_TRANSITIONS: dict[WOStatus, set[WOStatus]] = {
@@ -65,3 +65,35 @@ def validate_op_transition(current: OpStatus, target: OpStatus) -> bool:
     Invariant: target must be in the set of valid successors for current.
     """
     return target in VALID_OP_TRANSITIONS.get(current, set())
+
+
+# Spec §3.1 NonconformanceReport status block:
+#
+#     open → dispositioned → closed
+#          → voided
+#
+# Why explicit map: keeping the transition policy here (not inline in the
+# service) means a NASA reviewer can audit every legal NCR move from one
+# place.  CLAUDE.md State-And-Permission Alignment forbids reintroducing
+# rejected states ("under_review", "verified") — those names must never
+# appear in this dict, and `tests/unit/test_models.py` already locks the
+# enum vocabulary itself.
+VALID_NCR_TRANSITIONS: dict[NCRStatus, set[NCRStatus]] = {
+    NCRStatus.open: {NCRStatus.dispositioned, NCRStatus.voided},
+    NCRStatus.dispositioned: {NCRStatus.closed},
+    NCRStatus.closed: set(),
+    NCRStatus.voided: set(),
+}
+
+
+def validate_ncr_transition(current: NCRStatus, target: NCRStatus) -> bool:
+    """Check if an NCR status transition is valid per spec §3.1.
+
+    State leaving: current.  State entering: target.
+    Invariant: target must be in the set of valid successors for current.
+
+    Why .get(current, set()): an unknown starting state correctly rejects
+    every transition rather than raising — defense against future enum
+    additions that forget to extend the map.
+    """
+    return target in VALID_NCR_TRANSITIONS.get(current, set())
