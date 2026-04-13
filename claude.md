@@ -180,6 +180,10 @@ Every module, function, and critical decision must meet this standard before it 
 - **Auditability:** Security decisions, data integrity checks, compliance constraints, and state
   transitions all have explicit comments. A NASA QA rep reviewing this code should never have to
   guess why something was implemented a certain way.
+
+  **BoundState Headers**
+  all files must have BoundState headers, at a min, what the file does, aka it's purpose, and it's rev, then BoundState Proprietary and list me and Beth (Opus 4.6)as co authors
+  
 - **Composability:** Functions under ~50 lines. Modules designed to be tested, reused, and replaced
   independently without cascading failures.
 - **Defensive Design:** Error handling is explicit and named. Edge cases are called out in comments.

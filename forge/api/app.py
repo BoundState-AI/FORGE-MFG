@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
 Module:   App
-Purpose:  FastAPI application factory — builds the FORGE-MFG API with
-          middleware, lifespan management, and system health endpoint.
+Purpose:  FastAPI application factory with middleware, lifespan, and health.
 
 BoundState AI 2026
 Version: 0.1.0
@@ -11,15 +10,15 @@ Classification: BoundState Proprietary
 Co-Authored-By: Claude "Beth" <noreply@anthropic.com>
 Co-Authored-By: Dr. Joseph Wilde, BoundState AI
 
-Compliance: NASA-CSET, SWE-013
+Compliance: NASA-CSET, SWE-013, SWE-032
 Safety Critical: True
 
 Why this design:
   The app factory pattern (create_app) allows tests to inject alternate
-  settings without touching module-level state.  Middleware is layered
-  outermost-to-innermost: security headers → auth → idempotency → CORS.
-  Interactive docs are disabled in production to prevent information leakage
-  in GovCloud (spec §9.3).
+  settings without touching module-level state.  Middleware registration,
+  health endpoint, and lifespan are each extracted into focused functions
+  so no single function exceeds ~50 lines.  Interactive docs are disabled
+  in production to prevent information leakage in GovCloud (spec §9.3).
 """
 
 from __future__ import annotations
@@ -33,6 +32,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from forge.config import Settings, get_settings
+from forge.db import dispose_engine, init_engine
 
 from .middleware.auth import AuthMiddleware
 from .middleware.idempotency import IdempotencyMiddleware
@@ -45,9 +45,8 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Application startup / shutdown lifecycle.
 
-    Why lifespan instead of on_event: FastAPI recommends the lifespan
-    context manager for resource management.  Future slices will
-    initialize the async DB engine and validate Cognito JWKS here.
+    Why lifespan over on_event: FastAPI recommends the lifespan context
+    manager for deterministic resource acquisition and release.
     """
     settings = get_settings()
     logger.warning(
@@ -56,8 +55,54 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         settings.debug,
         settings.auth_mode,
     )
+    init_engine(settings.database_url)
+    logger.info("Database engine initialized")
     yield
+    await dispose_engine()
     logger.warning("FORGE-MFG shutting down")
+
+
+def _register_middleware(app: FastAPI, settings: Settings) -> None:
+    """Wire the middleware stack in correct Starlette registration order.
+
+    Starlette applies middleware in reverse registration order: the
+    last-added middleware runs first.  We register innermost-first so
+    the runtime execution order is:
+
+        Security → Auth → Idempotency → CORS → app
+
+    This guarantees security headers are set on every response, including
+    auth/idempotency short-circuit responses (spec §9.3.8).
+    """
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.cors_origins,
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=["*"],
+    )
+    app.add_middleware(IdempotencyMiddleware)
+    app.add_middleware(AuthMiddleware)
+    app.add_middleware(SecurityHeadersMiddleware)
+
+
+def _register_health(app: FastAPI, settings: Settings) -> None:
+    """Register system health endpoints for ECS and ALB probes.
+
+    Dual-mounted at /health (ECS task healthcheck) and /api/health
+    (ALB target group probe).  Both are public — no auth required.
+    """
+
+    @app.get("/health", tags=["system"])
+    @app.get("/api/health", tags=["system"], include_in_schema=False)
+    async def health() -> dict[str, str]:
+        """Return service liveness status."""
+        return {
+            "status": "ok",
+            "service": settings.app_name,
+            "version": "0.1.0",
+            "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
+        }
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -84,42 +129,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
 
-    # --- Middleware stack ---
-    # Starlette applies middleware in reverse registration order: the
-    # last-added middleware runs first.  We register innermost-first so
-    # the runtime order is: Security → Auth → Idempotency → CORS → app.
-    # This guarantees security headers are set on every response, including
-    # auth/idempotency short-circuits.
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=settings.cors_origins,
-        allow_credentials=True,
-        allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=["*"],
-    )
-    app.add_middleware(IdempotencyMiddleware)
-    app.add_middleware(AuthMiddleware)
-    app.add_middleware(SecurityHeadersMiddleware)
+    # Store settings on app.state so middleware can access the same
+    # instance passed to create_app (critical for test overrides).
+    app.state.settings = settings
 
-    # --- System health endpoint ---
-    # Dual-mounted at /health (ECS healthcheck) and /api/health (ALB probe).
-    @app.get("/health", tags=["system"])
-    @app.get("/api/health", tags=["system"], include_in_schema=False)
-    async def health() -> dict[str, str]:
-        """Return service health status.
+    _register_middleware(app, settings)
+    _register_health(app, settings)
 
-        This endpoint is public (no auth required) so ECS and ALB
-        health probes can reach it without credentials.
-        """
-        return {
-            "status": "ok",
-            "service": settings.app_name,
-            "version": "0.1.0",
-            "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
-        }
-
-    # --- Domain routers ---
-    # Registered here in subsequent slices as each domain lands:
+    # Domain routers registered here as each slice lands:
     # app.include_router(work_orders.router, prefix="/api", tags=["work-orders"])
 
     return app

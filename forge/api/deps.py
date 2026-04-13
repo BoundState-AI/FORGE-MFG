@@ -15,16 +15,25 @@ Safety Critical: False
 
 Why this design:
   Centralizing dependency providers here keeps route files thin and makes
-  it trivial to swap implementations in tests.  Database session, service
-  factories, and authenticated-user dependencies will be added as their
-  respective slices land.
+  it trivial to swap implementations in tests.
 """
 
 from __future__ import annotations
 
+from collections.abc import AsyncGenerator
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from forge.config import Settings, get_settings
+from forge.db import get_session
 
 
 def get_config() -> Settings:
     """Provide application settings to route handlers."""
     return get_settings()
+
+
+async def get_db() -> AsyncGenerator[AsyncSession]:
+    """Provide an async database session to route handlers."""
+    async for session in get_session():
+        yield session

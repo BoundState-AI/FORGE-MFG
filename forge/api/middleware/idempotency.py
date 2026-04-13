@@ -23,8 +23,8 @@ Why this design:
   - Same key + different request hash → 409 Conflict.
   - Missing key on mutating POST → 400 Bad Request.
 
-  Slice 0A ships the shell only.  Full enforcement (backed by the
-  IdempotencyRecord model) lands when the database layer is wired.
+  Slice 1A: pass-through shell.  Full enforcement (backed by the
+  IdempotencyRecord model) lands in slice 1C.
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ from starlette.responses import Response
 class IdempotencyMiddleware(BaseHTTPMiddleware):
     """Idempotency-Key enforcement for mutating endpoints.
 
-    Slice 0A: pass-through.  Full implementation will intercept POST
+    Slice 1A: pass-through.  Slice 1C will intercept POST
     requests, hash the body, and check the IdempotencyRecord table.
     """
 

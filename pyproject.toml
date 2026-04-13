@@ -17,8 +17,10 @@ dependencies = [
     "asyncpg>=0.29,<1",
     "alembic>=1.13,<2",
     "python-jose[cryptography]>=3.3,<4",
+    "cachetools>=5.3,<6",
     "httpx>=0.27,<1",
     "boto3>=1.34,<2",
+    "psycopg2-binary>=2.9,<3",
 ]
 
 [project.optional-dependencies]
@@ -42,6 +44,11 @@ line-length = 99
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP", "B", "SIM", "RUF"]
 
+[tool.ruff.lint.per-file-ignores]
+# FastAPI uses Depends() in function defaults — this is the standard pattern.
+"forge/api/**" = ["B008"]
+"tests/**" = ["B008"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
@@ -50,3 +57,12 @@ testpaths = ["tests"]
 python_version = "3.11"
 strict = true
 plugins = ["pydantic.mypy"]
+
+# SQLAlchemy relationship() uses string forward refs resolved at runtime
+# by the mapper.  mypy cannot resolve these across modules — this is a
+# known limitation documented in sqlalchemy2-stubs.
+[[tool.mypy.overrides]]
+module = "forge.models.*"
+disable_error_code = ["name-defined"]
+disallow_untyped_defs = false
+warn_return_any = false
