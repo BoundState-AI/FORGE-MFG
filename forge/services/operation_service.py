@@ -35,6 +35,13 @@ from forge.models.enums import ActorType, OpStatus, WOStatus
 from forge.models.labor import LaborEntry
 from forge.models.operation import Operation
 from forge.models.work_order import WorkOrder
+from forge.rules.compliance_checks import (
+    ComplianceViolation,
+    InspectionSnapshot,
+    SignOffSnapshot,
+    check_comp_001_inspection_hold,
+    check_comp_003_signoffs_complete,
+)
 from forge.rules.status_transitions import validate_op_transition
 from forge.schemas.labor import LaborCreate, LaborUpdate
 from forge.schemas.operation import OperationCreate, OperationUpdate
@@ -396,9 +403,23 @@ async def complete_operation(
 ) -> Operation:
     """Complete: in_progress → complete.
 
-    COMP-001 (inspection hold) and COMP-003 (sign-off) checks
-    are deferred to slice 2B where inspection/sign-off logic lands.
+    State leaving: in_progress.  State entering: complete.
+    Invariants (in order):
+      1. Op exists and caller has program scope.
+      2. Version matches.
+      3. Status transition is valid per spec §4.3.
+      4. COMP-001: if inspection_hold, an accepted inspection from the
+         current execution_cycle must exist.
+      5. COMP-003: every required sign-off role has at least one event
+         from the current execution_cycle, and (if safety_critical) the
+         signers are distinct users (SOD-005 distinctness).
+
+      The compliance gates run BEFORE the transition so a failed
+      completion leaves no audit residue from a half-applied transition.
     """
+    op = await _get_op(session, op_id, program_codes=program_codes)
+    await _enforce_completion_gates(session, op)
+
     op = await _transition_op(
         session, op_id, OpStatus.complete, version, user_id,
         program_codes=program_codes,
@@ -406,6 +427,79 @@ async def complete_operation(
     op.completed_at = datetime.now(UTC)
     await session.flush()
     return op
+
+
+def _completion_violation(violation: ComplianceViolation) -> HTTPException:
+    """Convert a compliance violation into the §5.15 422 RULE_VIOLATION."""
+    return HTTPException(
+        status_code=422,
+        detail={
+            "code": "RULE_VIOLATION",
+            "message": violation.message,
+            "violations": [{
+                "rule_id": violation.rule_id,
+                "rule_name": violation.rule_name,
+                "severity": violation.severity,
+                "message": violation.message,
+                "context": violation.context,
+            }],
+        },
+    )
+
+
+async def _enforce_completion_gates(
+    session: AsyncSession, op: Operation
+) -> None:
+    """Run COMP-001 and COMP-003 against the live event set.
+
+    Loads inspection and sign-off events explicitly (rather than
+    relying on relationship cache) because the cycle filter must apply
+    to every event on the op, not whatever happens to be loaded in the
+    session.  Cycle filtering is then done inside the rule evaluator so
+    "what counts in the current cycle" has exactly one definition.
+    """
+    from forge.models.inspection import InspectionEvent, SignOffEvent
+
+    inspections_raw = await session.execute(
+        select(InspectionEvent).where(InspectionEvent.operation_id == op.id)
+    )
+    signoffs_raw = await session.execute(
+        select(SignOffEvent).where(SignOffEvent.operation_id == op.id)
+    )
+
+    inspection_snapshots = [
+        InspectionSnapshot(
+            inspector_id=i.inspector_id,
+            execution_cycle=i.execution_cycle,
+            result=i.result.value,
+        )
+        for i in inspections_raw.scalars().all()
+    ]
+    signoff_snapshots = [
+        SignOffSnapshot(
+            user_id=s.user_id,
+            role=s.role,
+            execution_cycle=s.execution_cycle,
+        )
+        for s in signoffs_raw.scalars().all()
+    ]
+
+    comp1 = check_comp_001_inspection_hold(
+        inspection_hold=op.inspection_hold,
+        current_cycle=op.execution_cycle,
+        inspections=inspection_snapshots,
+    )
+    if comp1 is not None:
+        raise _completion_violation(comp1)
+
+    comp3 = check_comp_003_signoffs_complete(
+        sign_off_roles_required=op.sign_off_roles_required,
+        safety_critical=op.safety_critical,
+        current_cycle=op.execution_cycle,
+        sign_offs=signoff_snapshots,
+    )
+    if comp3 is not None:
+        raise _completion_violation(comp3)
 
 
 async def hold_operation(
