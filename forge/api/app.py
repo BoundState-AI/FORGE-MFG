@@ -36,6 +36,7 @@ from forge.db import dispose_engine, init_engine
 
 from .middleware.auth import AuthMiddleware
 from .middleware.idempotency import IdempotencyMiddleware
+from .middleware.rate_limit import RateLimitMiddleware
 from .middleware.security import SecurityHeadersMiddleware
 
 logger = logging.getLogger(__name__)
@@ -69,10 +70,11 @@ def _register_middleware(app: FastAPI, settings: Settings) -> None:
     last-added middleware runs first.  We register innermost-first so
     the runtime execution order is:
 
-        Security → Auth → Idempotency → CORS → app
+        Security → RateLimit → Auth → Idempotency → CORS → app
 
     This guarantees security headers are set on every response, including
-    auth/idempotency short-circuit responses (spec §9.3.8).
+    auth/idempotency short-circuit responses (spec §9.3.8).  Rate limit
+    runs after auth so user identity is available for per-user scoping.
     """
     app.add_middleware(
         CORSMiddleware,
@@ -82,6 +84,7 @@ def _register_middleware(app: FastAPI, settings: Settings) -> None:
         allow_headers=["*"],
     )
     app.add_middleware(IdempotencyMiddleware)
+    app.add_middleware(RateLimitMiddleware)
     app.add_middleware(AuthMiddleware)
     app.add_middleware(SecurityHeadersMiddleware)
 
@@ -135,11 +138,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     _register_middleware(app, settings)
     _register_health(app, settings)
-
-    # Domain routers registered here as each slice lands:
-    # app.include_router(work_orders.router, prefix="/api", tags=["work-orders"])
+    _register_domain_routers(app)
 
     return app
+
+
+def _register_domain_routers(app: FastAPI) -> None:
+    """Register domain route modules as they land in each slice.
+
+    Routes are already prefixed (e.g. /api/work-orders) in each
+    router module, so no additional prefix is needed here.
+    """
+    from .routes.operations import router as operations_router
+    from .routes.work_orders import router as work_orders_router
+
+    app.include_router(work_orders_router)
+    app.include_router(operations_router)
 
 
 # Module-level app instance for uvicorn/gunicorn: `forge.api.app:app`

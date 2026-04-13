@@ -68,9 +68,30 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # propagate correctly; fall back to the env-loaded singleton.
         settings = getattr(request.app.state, "settings", None) or get_settings()
 
-        # In local/test mode, skip auth enforcement entirely.
-        # This allows development without a live Cognito user pool.
+        # If a test auth override is set on app.state, use it instead
+        # of the normal auth flow.  This allows tests to impersonate
+        # different users without creating separate app instances.
+        auth_override = getattr(request.app.state, "auth_override", None)
+        if auth_override is not None:
+            request.state.auth = auth_override
+            return await call_next(request)
+
+        # In local/test mode, set a fully-permissioned dev auth context
+        # so route-level permission checks pass without a Cognito token.
+        # The SYSTEM user ID is used as the identity.
         if settings.auth_mode != "cognito":
+            from forge.api.auth import ROLE_PERMISSIONS, AuthContext
+
+            all_perms: set[str] = set()
+            for perms in ROLE_PERMISSIONS.values():
+                all_perms |= perms
+            request.state.auth = AuthContext(
+                sub="00000000-0000-0000-0000-000000000001",
+                username="local-dev",
+                roles=["admin", "engineer", "operator", "inspector"],
+                programs=["*"],  # wildcard — local dev has all programs
+                permissions=frozenset(all_perms),
+            )
             return await call_next(request)
 
         # Extract Bearer token from Authorization header

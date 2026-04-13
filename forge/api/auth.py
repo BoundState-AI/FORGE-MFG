@@ -84,8 +84,11 @@ class AuthContext:
         return permission in self.permissions
 
     def has_program_access(self, program_code: str) -> bool:
-        """Check if this user belongs to the given program."""
-        return program_code in self.programs
+        """Check if this user belongs to the given program.
+
+        The wildcard "*" grants access to all programs (local dev only).
+        """
+        return "*" in self.programs or program_code in self.programs
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,566 @@
+#!/usr/bin/env python3
+"""
+Module:   Operation Service
+Purpose:  Business logic for operation authoring, execution, and labor capture.
+
+BoundState AI 2026
+Version: 0.1.0
+Classification: BoundState Proprietary
+
+Co-Authored-By: Claude "Beth" <noreply@anthropic.com>
+Co-Authored-By: Dr. Joseph Wilde, BoundState AI
+
+Compliance: NASA-CSET, SWE-013
+Safety Critical: True
+
+Why this design:
+  Operation authoring is restricted to draft WOs.  Execution transitions
+  follow spec §4.3.  Rework increments execution_cycle so prior
+  inspection/sign-off events remain for audit but no longer satisfy
+  hold enforcement.  Labor entries are created by op start and can be
+  independently added/updated.
+"""
+
+from __future__ import annotations
+
+import uuid as _uuid
+from datetime import UTC, datetime
+
+from fastapi import HTTPException
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from forge.audit.logger import create_audit_record
+from forge.models.enums import ActorType, OpStatus, WOStatus
+from forge.models.labor import LaborEntry
+from forge.models.operation import Operation
+from forge.models.work_order import WorkOrder
+from forge.rules.status_transitions import validate_op_transition
+from forge.schemas.labor import LaborCreate, LaborUpdate
+from forge.schemas.operation import OperationCreate, OperationUpdate
+from forge.services.versioning import (
+    VersionConflictError,
+    check_version,
+    increment_version,
+    version_conflict_response,
+)
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+async def _get_wo(
+    session: AsyncSession, wo_id: _uuid.UUID,
+    program_codes: list[str] | None = None,
+) -> WorkOrder:
+    """Load WO with program-scope enforcement.
+
+    Delegates to work_order_service.get_work_order which handles
+    the program-scope check (spec §5.0.3).
+    """
+    from forge.services.work_order_service import get_work_order
+
+    return await get_work_order(session, wo_id, program_codes=program_codes)
+
+
+async def _get_op(
+    session: AsyncSession, op_id: _uuid.UUID,
+    program_codes: list[str] | None = None,
+) -> Operation:
+    """Load operation with program-scope enforcement via parent WO.
+
+    The operation's program scope is determined by its parent work
+    order's program (spec §5.0.3).
+    """
+    op = await session.get(Operation, op_id)
+    if op is None:
+        raise HTTPException(status_code=404, detail="Operation not found")
+    # Enforce scope via parent WO
+    if program_codes is not None:
+        await _get_wo(session, op.work_order_id, program_codes=program_codes)
+    return op
+
+
+def _require_draft_wo(wo: WorkOrder) -> None:
+    """Enforce that the WO is in draft status for authoring operations."""
+    if wo.status != WOStatus.draft:
+        raise HTTPException(
+            status_code=422,
+            detail="Operations can only be modified on draft work orders",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Operation authoring (draft WOs only)
+# ---------------------------------------------------------------------------
+
+
+async def create_operation(
+    session: AsyncSession,
+    wo_id: _uuid.UUID,
+    data: OperationCreate,
+    user_id: _uuid.UUID,
+    program_codes: list[str] | None = None,
+) -> Operation:
+    """Create operation on a draft WO."""
+    wo = await _get_wo(session, wo_id, program_codes=program_codes)
+    _require_draft_wo(wo)
+
+    op = Operation(
+        work_order_id=wo_id,
+        sequence=data.sequence,
+        description=data.description,
+        tooling_required=data.tooling_required,
+        inspection_hold=data.inspection_hold,
+        safety_critical=data.safety_critical,
+        sign_off_roles_required=data.sign_off_roles_required,
+        estimated_hours=data.estimated_hours,
+        constraint_type=data.constraint_type,
+        constraint_date=data.constraint_date,
+        status=OpStatus.pending,
+        execution_cycle=1,
+        created_by=user_id,
+        updated_by=user_id,
+    )
+    session.add(op)
+    await session.flush()
+    return op
+
+
+async def update_operation(
+    session: AsyncSession,
+    op_id: _uuid.UUID,
+    data: OperationUpdate,
+    user_id: _uuid.UUID,
+    program_codes: list[str] | None = None,
+) -> Operation:
+    """Update operation fields (draft WO only)."""
+    op = await _get_op(session, op_id, program_codes=program_codes)
+    wo = await _get_wo(session, op.work_order_id, program_codes=program_codes)
+    _require_draft_wo(wo)
+
+    try:
+        check_version(op, data.version, entity_type="Operation")
+    except VersionConflictError as e:
+        raise version_conflict_response(e) from e
+
+    for field in (
+        "description", "sequence", "tooling_required", "inspection_hold",
+        "safety_critical", "sign_off_roles_required", "estimated_hours",
+        "constraint_type", "constraint_date",
+    ):
+        val = getattr(data, field)
+        if val is not None:
+            setattr(op, field, val)
+
+    op.updated_by = user_id
+    increment_version(op)
+    await session.flush()
+    return op
+
+
+async def delete_operation(
+    session: AsyncSession, op_id: _uuid.UUID, version: int,
+    program_codes: list[str] | None = None,
+) -> None:
+    """Delete operation (draft WO only, version check)."""
+    op = await _get_op(session, op_id, program_codes=program_codes)
+
+    try:
+        check_version(op, version, entity_type="Operation")
+    except VersionConflictError as e:
+        raise version_conflict_response(e) from e
+    wo = await _get_wo(session, op.work_order_id, program_codes=program_codes)
+    _require_draft_wo(wo)
+    await session.delete(op)
+    await session.flush()
+
+
+async def reorder_operations(
+    session: AsyncSession,
+    wo_id: _uuid.UUID,
+    operation_ids: list[_uuid.UUID],
+    user_id: _uuid.UUID,
+    version: int,
+    program_codes: list[str] | None = None,
+) -> list[Operation]:
+    """Reorder operations by reassigning sequence numbers.
+
+    Version check is on the parent WO since reordering is a logical
+    mutation of the WO's operation structure.
+    """
+    wo = await _get_wo(session, wo_id, program_codes=program_codes)
+    _require_draft_wo(wo)
+
+    try:
+        check_version(wo, version, entity_type="WorkOrder")
+    except VersionConflictError as e:
+        raise version_conflict_response(e) from e
+
+    result = await session.execute(
+        select(Operation).where(Operation.work_order_id == wo_id)
+    )
+    ops = {op.id: op for op in result.scalars().all()}
+
+    for seq, op_id in enumerate(operation_ids, start=1):
+        op = ops.get(op_id)
+        if op is None:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Operation {op_id} not found in work order",
+            )
+        op.sequence = seq
+        op.updated_by = user_id
+
+    await session.flush()
+    return sorted(ops.values(), key=lambda o: o.sequence)
+
+
+# ---------------------------------------------------------------------------
+# Operation execution
+# ---------------------------------------------------------------------------
+
+
+async def _transition_op(
+    session: AsyncSession,
+    op_id: _uuid.UUID,
+    target: OpStatus,
+    version: int,
+    user_id: _uuid.UUID,
+    program_codes: list[str] | None = None,
+) -> Operation:
+    """Apply an operation state transition with version check and audit.
+
+    State leaving: op.status.  State entering: target.
+    Invariant: transition must be in VALID_OP_TRANSITIONS.
+    """
+    op = await _get_op(session, op_id, program_codes=program_codes)
+
+    try:
+        check_version(op, version, entity_type="Operation")
+    except VersionConflictError as e:
+        raise version_conflict_response(e) from e
+
+    if not validate_op_transition(op.status, target):
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid transition: {op.status.value} → {target.value}",
+        )
+
+    before = op.status.value
+    op.status = target
+    op.updated_by = user_id
+    increment_version(op)
+    await session.flush()
+
+    await create_audit_record(
+        session,
+        event_id=_uuid.uuid4(),
+        actor_type=ActorType.human,
+        user_id=user_id,
+        user_role=None,
+        action_type=f"operation.{target.value}",
+        entity_type="operation",
+        entity_id=op.id,
+        before_state={"status": before},
+        after_state={"status": target.value},
+    )
+    return op
+
+
+async def start_operation(
+    session: AsyncSession,
+    op_id: _uuid.UUID,
+    version: int,
+    user_id: _uuid.UUID,
+    role: str,
+    shift: str,
+    program_codes: list[str] | None = None,
+) -> Operation:
+    """Start operation: pending|rework|hold → in_progress, create labor entry.
+
+    State leaving: pending, rework, or hold.  State entering: in_progress.
+    Invariant: valid transition per spec §4.3.  Also transitions WO to
+    in_progress if it is currently released (first op start drives WO state).
+
+    If resuming from rework, execution_cycle is incremented per spec §3.1:
+    "execution_cycle is incremented on each rework → in_progress transition."
+    """
+    # Capture pre-transition status to detect rework → in_progress
+    op = await _get_op(session, op_id, program_codes=program_codes)
+    was_rework = op.status == OpStatus.rework
+
+    op = await _transition_op(
+        session, op_id, OpStatus.in_progress, version, user_id,
+        program_codes=program_codes,
+    )
+    now = datetime.now(UTC)
+    if not was_rework:
+        op.started_at = now
+
+    # Spec §3.1: increment execution_cycle on rework → in_progress
+    if was_rework:
+        op.execution_cycle += 1
+
+    # Create labor entry for the starting operator
+    labor = LaborEntry(
+        operation_id=op_id,
+        user_id=user_id,
+        role=role,
+        started_at=now,
+        hours=0.0,
+        shift=shift,
+        created_by=user_id,
+        updated_by=user_id,
+    )
+    session.add(labor)
+
+    # Auto-transition WO from released → in_progress on first op start.
+    # State leaving: released.  State entering: in_progress.
+    # Invariant: WO must be in released status (first op start drives
+    # the WO into active execution).  This is implicit from the WO
+    # lifecycle — released means "ready to execute."
+    wo = await _get_wo(session, op.work_order_id, program_codes=program_codes)
+    if wo.status == WOStatus.released:
+        wo.status = WOStatus.in_progress
+        wo.updated_by = user_id
+        increment_version(wo)
+
+        await create_audit_record(
+            session,
+            event_id=_uuid.uuid4(),
+            actor_type=ActorType.human,
+            user_id=user_id,
+            user_role=None,
+            action_type="work_order.in_progress",
+            entity_type="work_order",
+            entity_id=wo.id,
+            before_state={"status": "released"},
+            after_state={"status": "in_progress"},
+        )
+
+    await session.flush()
+    return op
+
+
+async def stop_operation(
+    session: AsyncSession,
+    op_id: _uuid.UUID,
+    version: int,
+    user_id: _uuid.UUID,
+    program_codes: list[str] | None = None,
+) -> Operation:
+    """Stop the active labor entry for the current user on this operation.
+
+    Does not transition the operation status — just ends the labor entry.
+    """
+    op = await _get_op(session, op_id, program_codes=program_codes)
+
+    try:
+        check_version(op, version, entity_type="Operation")
+    except VersionConflictError as e:
+        raise version_conflict_response(e) from e
+
+    # Find the user's open labor entry on this operation
+    result = await session.execute(
+        select(LaborEntry).where(
+            LaborEntry.operation_id == op_id,
+            LaborEntry.user_id == user_id,
+            LaborEntry.stopped_at.is_(None),
+        )
+    )
+    labor = result.scalar_one_or_none()
+    if labor is None:
+        raise HTTPException(
+            status_code=422,
+            detail="No active labor entry found for this user on this operation",
+        )
+
+    now = datetime.now(UTC)
+    labor.stopped_at = now
+    elapsed = (now - labor.started_at).total_seconds() / 3600.0
+    labor.hours = round(elapsed, 2)
+    labor.updated_by = user_id
+    increment_version(labor)
+
+    op.updated_by = user_id
+    increment_version(op)
+    await session.flush()
+    return op
+
+
+async def complete_operation(
+    session: AsyncSession, op_id: _uuid.UUID, version: int, user_id: _uuid.UUID,
+    program_codes: list[str] | None = None,
+) -> Operation:
+    """Complete: in_progress → complete.
+
+    COMP-001 (inspection hold) and COMP-003 (sign-off) checks
+    are deferred to slice 2B where inspection/sign-off logic lands.
+    """
+    op = await _transition_op(
+        session, op_id, OpStatus.complete, version, user_id,
+        program_codes=program_codes,
+    )
+    op.completed_at = datetime.now(UTC)
+    await session.flush()
+    return op
+
+
+async def hold_operation(
+    session: AsyncSession, op_id: _uuid.UUID, version: int, user_id: _uuid.UUID,
+    program_codes: list[str] | None = None,
+) -> Operation:
+    """Hold: in_progress → hold.
+
+    State leaving: in_progress.  State entering: hold.
+    Invariant: valid transition per spec §4.3.
+    """
+    return await _transition_op(
+        session, op_id, OpStatus.hold, version, user_id,
+        program_codes=program_codes,
+    )
+
+
+async def rework_operation(
+    session: AsyncSession, op_id: _uuid.UUID, version: int, user_id: _uuid.UUID,
+    program_codes: list[str] | None = None,
+) -> Operation:
+    """Rework: in_progress → rework.
+
+    State leaving: in_progress.  State entering: rework.
+    Invariant: valid transition per spec §4.3.
+    Does NOT increment execution_cycle here — that happens on the
+    subsequent rework → in_progress transition (resume after rework).
+    """
+    return await _transition_op(
+        session, op_id, OpStatus.rework, version, user_id,
+        program_codes=program_codes,
+    )
+
+
+async def resume_operation(
+    session: AsyncSession, op_id: _uuid.UUID, version: int, user_id: _uuid.UUID,
+    role: str, shift: str,
+) -> Operation:
+    """Resume from hold or rework → in_progress.
+
+    State leaving: hold or rework.  State entering: in_progress.
+    Invariant: valid transition per spec §4.3.  If resuming from
+    rework, execution_cycle is incremented per spec §3.1 before any
+    new inspection/sign-off events are recorded against the operation.
+    A new labor entry is created for the resuming operator.
+    """
+    op = await _get_op(session, op_id)
+    was_rework = op.status == OpStatus.rework
+
+    op = await _transition_op(session, op_id, OpStatus.in_progress, version, user_id)
+
+    if was_rework:
+        # Spec §3.1: "execution_cycle is incremented on each
+        # rework → in_progress transition"
+        op.execution_cycle += 1
+
+    now = datetime.now(UTC)
+    labor = LaborEntry(
+        operation_id=op_id,
+        user_id=user_id,
+        role=role,
+        started_at=now,
+        hours=0.0,
+        shift=shift,
+        created_by=user_id,
+        updated_by=user_id,
+    )
+    session.add(labor)
+    await session.flush()
+    return op
+
+
+# ---------------------------------------------------------------------------
+# Labor
+# ---------------------------------------------------------------------------
+
+
+async def create_labor_entry(
+    session: AsyncSession,
+    op_id: _uuid.UUID,
+    data: LaborCreate,
+    user_id: _uuid.UUID,
+    program_codes: list[str] | None = None,
+) -> LaborEntry:
+    """Create a labor entry on an operation."""
+    op = await _get_op(session, op_id, program_codes=program_codes)
+    if op.status not in (OpStatus.in_progress, OpStatus.hold):
+        raise HTTPException(
+            status_code=422,
+            detail="Labor can only be added to in-progress or held operations",
+        )
+
+    now = datetime.now(UTC)
+    labor = LaborEntry(
+        operation_id=op_id,
+        user_id=user_id,
+        role=data.role,
+        started_at=now,
+        hours=0.0,
+        shift=data.shift,
+        notes=data.notes,
+        created_by=user_id,
+        updated_by=user_id,
+    )
+    session.add(labor)
+    await session.flush()
+    return labor
+
+
+async def update_labor_entry(
+    session: AsyncSession,
+    labor_id: _uuid.UUID,
+    data: LaborUpdate,
+    user_id: _uuid.UUID,
+    can_update_any: bool,
+    program_codes: list[str] | None = None,
+) -> LaborEntry:
+    """Update a labor entry (own or any, per permission).
+
+    labor:update_own: can only update entries where user_id matches.
+    labor:update_any: can update any entry.
+
+    Program scope (spec §5.0.3): the labor entry's parent operation's
+    work order must be in the caller's program_memberships.
+    Enforcement via _get_op which walks to the parent WO.
+    """
+    labor = await session.get(LaborEntry, labor_id)
+    if labor is None:
+        raise HTTPException(status_code=404, detail="Labor entry not found")
+
+    # Enforce program scope via parent operation's WO.
+    # Raises 403 if caller is not in the WO's program.
+    await _get_op(session, labor.operation_id, program_codes=program_codes)
+
+    if not can_update_any and labor.user_id != user_id:
+        raise HTTPException(
+            status_code=403,
+            detail="Cannot update another user's labor entry",
+        )
+
+    try:
+        check_version(labor, data.version, entity_type="LaborEntry")
+    except VersionConflictError as e:
+        raise version_conflict_response(e) from e
+
+    if data.stopped_at is not None:
+        labor.stopped_at = data.stopped_at
+    if data.hours is not None:
+        labor.hours = data.hours
+    if data.shift is not None:
+        labor.shift = data.shift
+    if data.notes is not None:
+        labor.notes = data.notes
+
+    labor.updated_by = user_id
+    increment_version(labor)
+    await session.flush()
+    return labor

@@ -158,6 +158,9 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
             )
 
         user_id = _extract_user_id(request)
+        # Read and cache the request body for hashing.  Starlette's
+        # BaseHTTPMiddleware caches it on request._body so the route
+        # handler can still access it via Pydantic body parsing.
         body = await request.body()
         request_hash = hashlib.sha256(body).hexdigest()
 
