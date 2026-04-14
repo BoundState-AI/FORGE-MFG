@@ -71,6 +71,37 @@ class DomainEvent(Base):
     sequence_number: Mapped[int] = mapped_column(Integer, nullable=False)
 
 
+class WormReplicationAttempt(Base):
+    """Durable per-audit-row retry tracker for WORM replication (spec §7.2).
+
+    The AuditRecord schema (spec §3.1) is deliberately minimal and
+    append-only — the only fields the replicator mutates on the audit
+    row itself are s3_replicated + s3_replicated_at.  Attempt state
+    lives in this sidecar so a process restart cannot reset the
+    max-attempts ceiling: if a row has been tried 9 times before a
+    deploy, the next worker respects that history.
+
+    Primary key is audit_record_id so an upsert by audit row is a
+    single ON CONFLICT statement.
+    """
+
+    __tablename__ = "worm_replication_attempts"
+
+    audit_record_id: Mapped[_uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True,
+    )
+    attempt_count: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=False,
+    )
+    next_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    last_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    last_error: Mapped[str | None] = mapped_column(String(4000), nullable=True)
+
+
 class DomainEventDelivery(Base):
     """Delivery tracking for outbox consumer processing.
 

@@ -150,6 +150,7 @@ def _register_domain_routers(app: FastAPI) -> None:
     router module, so no additional prefix is needed here.
     """
     from .routes.admin import router as admin_router
+    from .routes.admin_dead_letters import router as admin_dl_router
     from .routes.calendars import router as calendars_router
     from .routes.documents import router as documents_router
     from .routes.inspections import router as inspections_router
@@ -171,6 +172,7 @@ def _register_domain_routers(app: FastAPI) -> None:
     app.include_router(calendars_router)
     app.include_router(schedule_router)
     app.include_router(admin_router)
+    app.include_router(admin_dl_router)
     app.include_router(users_router)
 
 

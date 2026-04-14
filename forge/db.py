@@ -23,9 +23,11 @@ Why this design:
 
 from __future__ import annotations
 
+import os
 from collections.abc import AsyncGenerator
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
 
 # Module-level references — populated by init_engine(), cleared by dispose_engine()
 _engine = None
@@ -35,16 +37,30 @@ _session_factory: async_sessionmaker[AsyncSession] | None = None
 def init_engine(database_url: str) -> None:
     """Create the async engine and session factory.
 
-    Called once during app startup (lifespan).
+    Called once during app startup (lifespan).  Integration test
+    harnesses call this once per test class via the app's lifespan
+    (create_app → lifespan → init_engine).  Under a default pooled
+    engine, each class would allocate a new pool while prior pools
+    stay alive until Python GC, exhausting Postgres's max_connections
+    across a long suite run.
+
+    When FORGE_ENV=test we switch to NullPool: every session opens
+    and closes its own connection, so no idle connections linger
+    between test classes.  Production still uses the default pool.
     """
     global _engine, _session_factory
-    _engine = create_async_engine(
-        database_url,
-        echo=False,
-        pool_size=10,
-        max_overflow=20,
-        pool_pre_ping=True,
-    )
+    if os.environ.get("FORGE_ENV") == "test":
+        _engine = create_async_engine(
+            database_url, echo=False, poolclass=NullPool,
+        )
+    else:
+        _engine = create_async_engine(
+            database_url,
+            echo=False,
+            pool_size=10,
+            max_overflow=20,
+            pool_pre_ping=True,
+        )
     _session_factory = async_sessionmaker(
         bind=_engine,
         class_=AsyncSession,

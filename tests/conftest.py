@@ -16,11 +16,20 @@ Safety Critical: False
 
 from __future__ import annotations
 
+import os
 from collections.abc import AsyncGenerator
 
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+
+# forge.db reads FORGE_ENV at init_engine() to decide between pooled
+# and NullPool engines.  Integration tests re-init the engine per
+# class via create_app's lifespan; under a pool each class would
+# leak connections into Postgres's max_connections budget.  Setting
+# this env var at test-collection time makes every test run against
+# a NullPool engine so connections close immediately on session exit.
+os.environ.setdefault("FORGE_ENV", "test")
 
 from forge.api.app import create_app
 from forge.config import Settings

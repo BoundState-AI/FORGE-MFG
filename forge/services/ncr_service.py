@@ -321,6 +321,23 @@ async def disposition_ncr(
             "disposition": ncr.disposition.value,
         },
     )
+
+    # Spec §8.2: NCR status changes trigger CPM recalculation via the
+    # outbox.  Aggregate is the NCR itself; the handler walks up to
+    # the parent WO to find the schedule.
+    from forge.events.bus import emit_event
+    from forge.models.enums import EventType
+
+    await emit_event(
+        session,
+        event_type=EventType.ncr_status_changed,
+        aggregate_type="ncr",
+        aggregate_id=str(ncr.id),
+        payload={
+            "before": before_status,
+            "after": ncr.status.value,
+        },
+    )
     return ncr
 
 
@@ -362,7 +379,7 @@ async def close_ncr(
             ),
         )
 
-    before_status = ncr.status.value
+    before_status_close = ncr.status.value
     ncr.status = NCRStatus.closed
     if data.root_cause is not None:
         ncr.root_cause = data.root_cause
@@ -379,7 +396,22 @@ async def close_ncr(
         action_type="ncr.close",
         entity_type="ncr",
         entity_id=ncr.id,
-        before_state={"status": before_status},
+        before_state={"status": before_status_close},
         after_state={"status": ncr.status.value},
+    )
+
+    # Spec §8.2: NCR status change triggers CPM recalc via outbox.
+    from forge.events.bus import emit_event
+    from forge.models.enums import EventType
+
+    await emit_event(
+        session,
+        event_type=EventType.ncr_status_changed,
+        aggregate_type="ncr",
+        aggregate_id=str(ncr.id),
+        payload={
+            "before": before_status_close,
+            "after": ncr.status.value,
+        },
     )
     return ncr

@@ -24,6 +24,7 @@ Why this design:
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 
 from pydantic import BaseModel, Field
 
@@ -111,3 +112,26 @@ class ProgramUpdate(BaseModel):
 
     name: str | None = None
     active: bool | None = None
+
+
+class DeadLetterOut(BaseModel):
+    """Dead-letter delivery projection for the admin UI (spec §5.13).
+
+    event_type and aggregate_* come from the DomainEvent row (resolved
+    by the service).  attempt_count / last_error / last_attempt_at
+    surface why the delivery ended up here so an operator can decide
+    whether to retry or escalate.
+    """
+
+    delivery_id: uuid.UUID
+    event_id: uuid.UUID
+    event_type: str
+    aggregate_type: str
+    aggregate_id: str
+    consumer_name: str
+    attempt_count: int
+    max_attempts: int
+    last_error: str | None
+    last_attempt_at: datetime | None
+
+    model_config = {"from_attributes": True}

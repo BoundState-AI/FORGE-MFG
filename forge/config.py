@@ -102,6 +102,32 @@ class Settings(BaseSettings):
     rate_limit_chat: int = 20
     rate_limit_admin: int = 60
 
+    # --- Outbox worker (spec §2.3, §4.5, §8.2) ---
+    # Poll every N seconds.  Spec §8.2 implies prompt CPM recalc on
+    # OperationStatusChanged / NCRStatusChanged; 5s is tight enough for
+    # manual QA to observe propagation without hammering the DB.
+    outbox_poll_interval_seconds: float = 5.0
+    # Maximum deliveries claimed per poll iteration (spec does not set
+    # this; 50 is a pragmatic batch that fits in one txn without
+    # starving other claimants).
+    outbox_batch_size: int = 50
+    # Exponential-backoff base + cap, in seconds.  attempt N waits
+    # min(base * 2**(N-1), cap).  Cap at 5 minutes so a transient
+    # upstream outage does not push next_attempt_at beyond the window
+    # that matters for scheduling reactivity.
+    outbox_backoff_base_seconds: float = 5.0
+    outbox_backoff_cap_seconds: float = 300.0
+
+    # --- WORM replication worker (spec §7.2) ---
+    # Spec §7.2: "Worker polls every 30 seconds.  Exponential backoff
+    # retry (max 10 attempts).  Escalation alerts at 15-minute
+    # unreplicated threshold."
+    worm_poll_interval_seconds: float = 30.0
+    worm_batch_size: int = 100
+    worm_backoff_base_seconds: float = 5.0
+    worm_backoff_cap_seconds: float = 300.0
+    worm_max_attempts: int = 10
+
     @model_validator(mode="after")
     def _enforce_production_safety(self) -> Settings:
         """Block unsafe configuration in production.

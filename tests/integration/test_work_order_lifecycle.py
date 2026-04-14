@@ -436,31 +436,42 @@ class TestWorkOrderLifecycle:
         to exceed the 120/min default limit for general endpoints.
         Verifies at least one 429 response with Retry-After header.
         """
-        from forge.api.middleware.rate_limit import DEFAULT_LIMIT, _request_log
+        from forge.api.middleware import rate_limit as rl
 
         # Enable rate limiting for this test
         self.app.state.enable_rate_limit = True
-        _request_log.clear()
+        rl._request_log.clear()
 
-        async with await self._client() as client:
-            wo = await self._create_wo(client)
-            last_version = wo["version"]
-            got_429 = False
+        # Tighten the limit and extend the window for deterministic tests.
+        # This avoids false negatives if the loop takes >60s on a slow DB.
+        old_limit = rl.DEFAULT_LIMIT
+        old_window = rl.WINDOW_SECONDS
+        rl.DEFAULT_LIMIT = 10
+        rl.WINDOW_SECONDS = 3600
 
-            # Fire requests until we hit the limit
-            for i in range(DEFAULT_LIMIT + 5):
-                resp = await client.patch(
-                    f"/api/work-orders/{wo['id']}",
-                    json={"version": last_version, "module": f"Mod-{i}"},
-                )
-                if resp.status_code == 429:
-                    got_429 = True
-                    assert "Retry-After" in resp.headers
-                    break
-                if resp.status_code == 200:
-                    last_version = resp.json()["version"]
+        try:
+            async with await self._client() as client:
+                wo = await self._create_wo(client)
+                last_version = wo["version"]
+                got_429 = False
 
-            assert got_429, "Rate limiter did not trigger 429"
+                # Fire requests until we hit the limit
+                for i in range(rl.DEFAULT_LIMIT + 5):
+                    resp = await client.patch(
+                        f"/api/work-orders/{wo['id']}",
+                        json={"version": last_version, "module": f"Mod-{i}"},
+                    )
+                    if resp.status_code == 429:
+                        got_429 = True
+                        assert "Retry-After" in resp.headers
+                        break
+                    if resp.status_code == 200:
+                        last_version = resp.json()["version"]
+
+                assert got_429, "Rate limiter did not trigger 429"
+        finally:
+            rl.DEFAULT_LIMIT = old_limit
+            rl.WINDOW_SECONDS = old_window
 
         _request_log.clear()
         self.app.state.enable_rate_limit = False

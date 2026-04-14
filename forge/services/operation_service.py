@@ -273,6 +273,24 @@ async def _transition_op(
         before_state={"status": before},
         after_state={"status": target.value},
     )
+
+    # Spec §8.2: op status changes trigger CPM recalculation via the
+    # outbox.  We publish against the parent work order so handler
+    # routing lands on the right schedule.
+    from forge.events.bus import emit_event
+    from forge.models.enums import EventType
+
+    await emit_event(
+        session,
+        event_type=EventType.operation_status_changed,
+        aggregate_type="work_order",
+        aggregate_id=str(op.work_order_id),
+        payload={
+            "operation_id": str(op.id),
+            "before": before,
+            "after": target.value,
+        },
+    )
     return op
 
 

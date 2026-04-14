@@ -153,6 +153,14 @@ class Test3BWorkflows:
                 conn.execute(text(
                     "DELETE FROM controlled_document_refs"
                 ))
+                # NCRs FK-reference work_orders; must be cleared before WO
+                # delete.  Test slices before 4B did not clean NCRs here
+                # because no prior slice in this file creates them, but
+                # in a cross-slice full-suite run NCR rows can survive
+                # from test_ncr_workflow.py if its own cleanup misses a
+                # case — belt-and-suspenders delete keeps 3B runnable
+                # in any test ordering.
+                conn.execute(text("DELETE FROM nonconformance_reports"))
                 conn.execute(text("DELETE FROM labor_entries"))
                 conn.execute(text("DELETE FROM operations"))
                 conn.execute(text("DELETE FROM work_orders"))
