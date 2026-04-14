@@ -472,8 +472,8 @@ class TestWorkOrderLifecycle:
         finally:
             rl.DEFAULT_LIMIT = old_limit
             rl.WINDOW_SECONDS = old_window
-
-        _request_log.clear()
+            self.app.state.enable_rate_limit = False
+            rl._request_log.clear()
         self.app.state.enable_rate_limit = False
 
     @pytest.mark.asyncio
