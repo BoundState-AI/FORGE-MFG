@@ -61,6 +61,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from fastapi import HTTPException
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -73,6 +74,7 @@ from forge.schemas.admin_health import (
     ComponentOut,
     ComponentStatus,
 )
+from forge.services.admin_service import _require_admin_manage
 from forge.services.audit_service import get_integrity_summary
 
 # Spec §7.2 thresholds — named constants so a future spec change
@@ -154,11 +156,24 @@ async def _audit_chain_component(
     disagree on whether the chain is valid.  A failure here is
     always `error` severity — a broken audit chain is the highest-
     severity invariant in the system.
+
+    IMPORTANT: the except block deliberately does NOT catch
+    HTTPException.  get_integrity_summary re-runs the live-DB
+    admin:manage check, and a 403 from that path must propagate so
+    the route returns 403 — swallowing it would mask a
+    zero-drift auth failure as a degraded audit-chain tile.
+    summarize() already runs the admin check up-front so this is
+    defense in depth, but it is the defense that matters: a future
+    refactor that loses the up-front check would otherwise leave
+    this broad-except as the silent hole.
     """
     try:
         result, last_verified_at, last_hash, last_record_id = (
             await get_integrity_summary(session, actor_id=actor_id)
         )
+    except HTTPException:
+        # Zero-drift auth rejection — propagate, do not degrade.
+        raise
     except Exception as exc:  # verifier raising is itself a failure
         return ComponentOut(
             status="error",
@@ -402,7 +417,16 @@ async def summarize(
     `settings` is injectable so tests can exercise the
     bucket-configured branch without mutating global state; in
     production, `get_settings()` returns the cached singleton.
+
+    Live-DB admin:manage check runs UP FRONT (zero-drift posture,
+    build spec §5.0.4).  A stale JWT claim cannot reach the
+    component probes — the health endpoint 403s before any DB
+    probe runs, matching the posture of /api/audit/* and every
+    admin_service write path.  The check happens here (service
+    layer) rather than only in the route so a future internal
+    caller that skips the route dependency cannot bypass it.
     """
+    await _require_admin_manage(session, actor_id)
     settings = settings or get_settings()
     now = datetime.now(UTC)
 

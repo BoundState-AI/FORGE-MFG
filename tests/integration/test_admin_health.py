@@ -407,6 +407,40 @@ class TestAdminHealth:
         assert resp.status_code == 403
 
     @pytest.mark.asyncio
+    async def test_stale_jwt_with_revoked_db_role_rejected(self) -> None:
+        """Zero-drift regression: JWT `admin:manage` + no DB role -> 403.
+
+        Simulates the "admin was removed from the DB but their JWT
+        hasn't rotated yet" case.  Pre-fix, the service would
+        complete the probe and return 200 with a red audit_chain
+        tile (the live-DB rejection inside get_integrity_summary
+        was silently swallowed by a broad except).  Correct
+        behavior is that summarize() runs _require_admin_manage
+        UP FRONT and lets the 403 propagate — no component probe
+        runs, no data leaks.
+
+        Builds the AuthContext directly with admin:manage in the
+        claim set but uses NON_ADMIN_USER_ID, which has no admin
+        role assignment in the roles table (stripped by teardown).
+        """
+        from forge.api.auth import AuthContext
+
+        self.app.state.auth_override = AuthContext(
+            sub=NON_ADMIN_USER_ID,
+            username="stale-admin",
+            roles=["admin"],            # claim-level admin
+            programs=["*"],
+            permissions=frozenset({"admin:manage"}),
+        )
+        async with await self._client() as client:
+            resp = await client.get("/api/admin/health")
+        self._clear_override()
+        assert resp.status_code == 403, (
+            f"stale-JWT admin bypassed the zero-drift check; got "
+            f"{resp.status_code}: {resp.text[:200]}"
+        )
+
+    @pytest.mark.asyncio
     async def test_no_program_header_required(self) -> None:
         """Admin namespace is exempt from X-Program-Id.
 
