@@ -139,19 +139,21 @@ def _ensure_program(code: str, threshold_hours: int) -> str:
     return prog_id
 
 
-def _backdate_op_started_at(op_id: str, hours_ago: int) -> None:
-    """Rewrite operations.started_at to a point in the past.
+def _backdate_op_active_since(op_id: str, hours_ago: int) -> None:
+    """Rewrite operations.active_since to a point in the past.
 
     Direct SQL because the public API never exposes a "start in the
     past" escape hatch by design — overdue rows must come from the
-    server's own clock.  Writing the timestamp with AT TIME ZONE 'UTC'
-    keeps the comparison honest under any DB session TZ.
+    server's own clock.  We also rewrite started_at to match so the
+    two timestamps stay coherent (the start routes set both to the
+    same `now`), which keeps the sort-order test's assumptions valid.
     """
     cutoff = datetime.now(UTC) - timedelta(hours=hours_ago)
     engine = create_engine(_SYNC_URL)
     with engine.connect() as conn:
         conn.execute(text(
-            "UPDATE operations SET started_at = :ts "
+            "UPDATE operations "
+            "SET active_since = :ts, started_at = :ts "
             "WHERE id = CAST(:id AS uuid)"
         ).bindparams(ts=cutoff, id=op_id))
         conn.commit()
@@ -468,7 +470,7 @@ class TestInspectionQueue:
         _wo, op = await self._seed_op(inspection_hold=True)
         # 1-hour threshold on PROG_A; backdate to 2 hours ago so the
         # op is unambiguously over.
-        _backdate_op_started_at(op["id"], hours_ago=2)
+        _backdate_op_active_since(op["id"], hours_ago=2)
 
         body = await self._list(state="overdue")
         row = next(
@@ -540,6 +542,64 @@ class TestInspectionQueue:
         # Suppress unused-variable warnings — `wo` and `insp` clarify
         # the fixture setup for readers.
         del wo, insp
+
+    # ------------------------------------------------------------------
+    # Per-cycle overdue reset — guard against started_at regression
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_rework_restart_resets_overdue_clock(self) -> None:
+        """active_since must reset on rework → in_progress (§5.1).
+
+        Seeds an op, backdates active_since to 3h ago → overdue.
+        Then rework + restart.  The start_operation service sets
+        active_since = now(), so the fresh cycle MUST bucket as
+        pending, not overdue.  Using started_at as the clock (the
+        pre-fix behavior) would fail this test because started_at
+        is not reset on rework restart.
+        """
+        _wo, op = await self._seed_op(inspection_hold=True)
+        _backdate_op_active_since(op["id"], hours_ago=3)
+
+        body = await self._list(state="overdue")
+        assert op["id"] in [r["operation_id"] for r in body["items"]], (
+            "Pre-condition: backdated op must start as overdue"
+        )
+
+        # Drive rework → restart.
+        self._clear_override()
+        async with await self._client() as client:
+            resp = await client.get(f"/api/operations/{op['id']}")
+            assert resp.status_code == 200
+            op_now = resp.json()
+
+            resp = await client.post(
+                f"/api/operations/{op['id']}/rework",
+                json={"version": op_now["version"]},
+                headers={"Idempotency-Key": str(uuid.uuid4())},
+            )
+            assert resp.status_code == 200
+            op_now = resp.json()
+
+            resp = await client.post(
+                f"/api/operations/{op['id']}/start",
+                json={
+                    "version": op_now["version"],
+                    "role": "operator",
+                    "shift": "day",
+                },
+                headers={"Idempotency-Key": str(uuid.uuid4())},
+            )
+            assert resp.status_code == 200
+
+        # Fresh cycle → active_since reset by start_operation → pending.
+        body_pending = await self._list(state="pending")
+        assert op["id"] in [r["operation_id"] for r in body_pending["items"]], (
+            "active_since failed to reset — overdue clock leaked from "
+            "prior cycle.  Regression of §5.1 per-cycle semantics."
+        )
+        body_overdue = await self._list(state="overdue")
+        assert op["id"] not in [r["operation_id"] for r in body_overdue["items"]]
 
     # ------------------------------------------------------------------
     # safety_critical filter
@@ -615,16 +675,20 @@ class TestInspectionQueue:
         )
         _wo3, op_mid = await self._seed_op(inspection_hold=True)
 
-        # Set deterministic started_at values so sort order is stable.
-        # Oldest: op_old at 3h ago.  The two "mid" ops share identical
-        # started_at so the safety_critical tiebreaker decides order.
-        _backdate_op_started_at(op_old["id"], hours_ago=3)
+        # Set deterministic active_since/started_at values so sort
+        # order is stable.  Oldest: op_old at 3h ago.  The two "mid"
+        # ops share identical timestamps so the safety_critical
+        # tiebreaker decides order.  active_since drives the overdue
+        # clock; the sort primary key is started_at.  We rewrite both
+        # to keep them coherent with the live start routes.
+        _backdate_op_active_since(op_old["id"], hours_ago=3)
         mid_ts = datetime.now(UTC) - timedelta(minutes=10)
         engine = create_engine(_SYNC_URL)
         with engine.connect() as conn:
             for op_id in (op_mid_sc["id"], op_mid["id"]):
                 conn.execute(text(
-                    "UPDATE operations SET started_at = :ts "
+                    "UPDATE operations "
+                    "SET active_since = :ts, started_at = :ts "
                     "WHERE id = CAST(:id AS uuid)"
                 ).bindparams(ts=mid_ts, id=op_id))
             conn.commit()

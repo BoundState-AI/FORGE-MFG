@@ -74,6 +74,16 @@ class Operation(AuditableMixin, Base):
     started_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Per-cycle "currently in_progress since" timestamp (UX spec v1.5.1 §5.1).
+    # Unlike started_at (set once, on first entry to in_progress), this field
+    # resets on every rework → in_progress transition so the overdue clock
+    # measures the CURRENT cycle's time under hold, not the operation's
+    # original age.  Nullable because pending/unstarted ops have no active
+    # cycle — the overdue computation treats a null active_since as "not
+    # started" and returns is_overdue=False.
+    active_since: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     completed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

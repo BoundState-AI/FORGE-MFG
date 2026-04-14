@@ -507,6 +507,13 @@ async def start_operation(
     if was_rework:
         op.execution_cycle += 1
 
+    # UX spec v1.5.1 §5.1: active_since is the overdue-clock source and
+    # MUST reset on every entry into in_progress (including rework and
+    # hold resumes), unlike started_at which is set once.  Setting it
+    # unconditionally here covers first start, rework restart, and hold
+    # resume via this route.
+    op.active_since = now
+
     # Create labor entry for the starting operator
     labor = LaborEntry(
         operation_id=op_id,
@@ -754,6 +761,12 @@ async def resume_operation(
         op.execution_cycle += 1
 
     now = datetime.now(UTC)
+    # Spec §5.1: reset active_since on every entry into in_progress so
+    # the overdue clock measures the CURRENT cycle.  Mirror of the
+    # start_operation path; both routes must stay in sync or an op
+    # resumed via this endpoint would keep a stale active_since.
+    op.active_since = now
+
     labor = LaborEntry(
         operation_id=op_id,
         user_id=user_id,

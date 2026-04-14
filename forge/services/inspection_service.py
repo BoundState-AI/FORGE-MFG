@@ -386,20 +386,25 @@ def _compute_overdue(
     An inspection is overdue when BOTH:
       1. The op is in_progress with an unsatisfied hold — that is,
          hold_point_status ∈ {pending, conditionally_satisfied}.
-      2. The op has been in_progress for longer than the program's
-         overdue_threshold_hours.
+      2. The op has been in_progress (in its current execution_cycle)
+         for longer than the program's overdue_threshold_hours.
+
+    The clock is `operation.active_since`, which resets on every entry
+    into in_progress (first start, hold resume, rework restart).  Using
+    started_at instead would inherit the original-cycle start after
+    rework and re-surface the op as "overdue" the instant it enters its
+    second cycle — the exact bug §5.1's wording avoids.
 
     overdue_since is the moment the threshold was crossed
-    (started_at + threshold), stable across polls so the client can
+    (active_since + threshold), stable across polls so the client can
     render "X hours overdue."
 
-    KNOWN CARRY-FORWARD: the spec names an `operation.active_since`
-    timestamp.  The current schema only has `started_at`, which does
-    not reset on rework → in_progress re-entry.  Using `started_at`
-    means an operation that has been reworked and restarted will show
-    an overdue clock from its ORIGINAL start, not the latest cycle.
-    Tracking a per-cycle active-since is its own schema change;
-    documenting here so the inaccuracy is explicit and grep-able.
+    Backfill edge case: ops that existed before migration
+    c4a7d2e91b38 had active_since copied from started_at, so the
+    first-cycle overdue clock matches.  Reworked-before-migration
+    ops carry the original-start bias until the next rework →
+    in_progress transition resets active_since to now().  Documented
+    in the migration docstring.
     """
     if op.status != OpStatus.in_progress:
         return False, None
@@ -407,10 +412,10 @@ def _compute_overdue(
         HoldPointStatus.pending, HoldPointStatus.conditionally_satisfied,
     ):
         return False, None
-    if op.started_at is None:
+    if op.active_since is None:
         return False, None
     threshold = timedelta(hours=program.overdue_threshold_hours)
-    overdue_at = op.started_at + threshold
+    overdue_at = op.active_since + threshold
     if now < overdue_at:
         return False, None
     return True, overdue_at
