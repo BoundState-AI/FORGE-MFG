@@ -324,6 +324,24 @@ class TestProgramScopeHeader:
             )
 
     @pytest.mark.asyncio
+    async def test_audit_namespace_bypasses_program_header(
+        self, client: Any,
+    ) -> None:
+        """/api/audit/* is program-agnostic by design (cross-program by
+        nature) — must not require X-Program-Id even in cognito mode.
+
+        Without this bypass a headerless production audit GET would
+        return MISSING_PROGRAM_CONTEXT before reaching the route.
+        """
+        for path in ("/api/audit/events", "/api/audit/integrity"):
+            resp = await client.get(path)
+            if resp.status_code == 400:
+                assert (
+                    resp.json().get("error", {}).get("code")
+                    != "MISSING_PROGRAM_CONTEXT"
+                ), f"{path} unexpectedly required X-Program-Id"
+
+    @pytest.mark.asyncio
     async def test_entity_detail_get_skips_membership_check(
         self, client: Any
     ) -> None:

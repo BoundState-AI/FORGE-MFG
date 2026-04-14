@@ -99,11 +99,16 @@ logger = logging.getLogger(__name__)
 # production deployments.
 # /api/admin/ is program-agnostic per UX spec v1.5.1 §6.7 (R5-R2-ISSUE-008):
 # admin endpoints manage cross-program identity and configuration and the
-# header would be meaningless on them.  Admin role authority is enforced
-# by the route's permission dependency, not by program scope.
+# header would be meaningless on them.  /api/audit/ is in the same bucket —
+# audit reads cross program boundaries by design (the integrity check covers
+# the entire chain; an admin filtering by entity_id has no use for a single
+# program scope).  Admin role authority for both is enforced by the route's
+# permission dependency + the live-DB admin:manage check in the service
+# layer (build spec §5.0.4 zero-drift posture), not by program scope.
 PUBLIC_PREFIXES: Final[tuple[str, ...]] = (
     "/api/auth/",
     "/api/admin/",
+    "/api/audit/",
     "/test/",
 )
 PUBLIC_PATHS: Final[frozenset[str]] = frozenset({

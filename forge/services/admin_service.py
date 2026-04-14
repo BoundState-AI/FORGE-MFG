@@ -2,13 +2,19 @@
 """
 Module:   Admin Service
 Purpose:  Business logic for admin user management — list, detail, update,
-          role assign/remove, program assign/remove (spec §5.13).  Every
-          role or program mutation triggers an immediate Cognito
-          attribute sync (spec §5.0.4); deactivation and admin-role
-          removal additionally trigger a global sign-out.
+          role assign/remove, program assign/remove — and admin program
+          CRUD — list (with member count), detail, create, update with
+          optimistic concurrency (spec §5.13, UX spec v1.5.1 §5.10).
+
+          Every user-level role or program mutation triggers an immediate
+          Cognito attribute sync (spec §5.0.4); deactivation and admin-
+          role removal additionally trigger a global sign-out.  Program
+          CRUD does NOT trigger Cognito sync — programs do not appear
+          in custom:programs claims directly; only user-program
+          membership changes propagate to Cognito.
 
 BoundState AI 2026
-Version: 0.1.0
+Version: 0.2.0
 Classification: BoundState Proprietary
 
 Co-Authored-By: Claude "Beth" <noreply@anthropic.com>
@@ -48,9 +54,15 @@ from forge.audit.logger import create_audit_record
 from forge.config import Settings
 from forge.models.enums import ActorType
 from forge.models.program import Program
-from forge.models.user import Role, User
-from forge.schemas.admin import UserUpdate
+from forge.models.user import Role, User, user_programs
+from forge.schemas.admin import ProgramCreate, ProgramUpdate, UserUpdate
 from forge.services import cognito_sync
+from forge.services.versioning import (
+    VersionConflictError,
+    check_version,
+    increment_version,
+    version_conflict_response,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -520,3 +532,188 @@ def effective_permissions(user: User) -> list[str]:
     for role in user.roles:
         perms |= set(role.permissions or [])
     return sorted(perms)
+
+
+# ---------------------------------------------------------------------------
+# Programs CRUD (UX spec v1.5.1 §5.10 admin Programs surface)
+# ---------------------------------------------------------------------------
+#
+# Programs CRUD lives in admin_service so it shares the
+# `_require_admin_manage` zero-drift guard with the user surface.
+# Cognito sync is NOT triggered by program CRUD — programs do not
+# appear in custom:programs claims directly; user-program membership
+# changes (add_program / remove_program above) are what propagate to
+# Cognito.  Renaming a program or toggling its active flag does not
+# change any user's claim set.
+
+
+async def list_programs(
+    session: AsyncSession,
+    *,
+    page: int = 1,
+    page_size: int = 50,
+    actor_id: _uuid.UUID,
+) -> tuple[list[tuple[Program, int]], int]:
+    """Admin read: paginated program list with per-row member count.
+
+    Returns (rows, total) where each row is (Program, member_count).
+    The member_count is computed via a single LEFT JOIN aggregate so
+    a program with N members costs one row, not N+1 lookups.
+
+    No program-scope filter — admin:manage implies cross-program
+    visibility (build spec §5.0.2).  The list is sorted by code so
+    the admin sees a stable A→Z ordering regardless of insertion
+    order.
+    """
+    await _require_admin_manage(session, actor_id)
+
+    total_result = await session.execute(select(func.count(Program.id)))
+    total = total_result.scalar() or 0
+
+    member_count_col = func.count(user_programs.c.user_id).label("member_count")
+    offset = (page - 1) * page_size
+    stmt = (
+        select(Program, member_count_col)
+        .outerjoin(user_programs, user_programs.c.program_id == Program.id)
+        .group_by(Program.id)
+        .order_by(Program.code)
+        .offset(offset)
+        .limit(page_size)
+    )
+    rows = list((await session.execute(stmt)).all())
+    return [(row[0], int(row[1])) for row in rows], total
+
+
+async def get_program(
+    session: AsyncSession, program_id: _uuid.UUID, actor_id: _uuid.UUID,
+) -> Program:
+    """Admin read: load a single program detail."""
+    await _require_admin_manage(session, actor_id)
+    return await _get_program(session, program_id)
+
+
+async def create_program(
+    session: AsyncSession,
+    data: ProgramCreate,
+    actor_id: _uuid.UUID,
+) -> Program:
+    """Create a new program with optional feature-flag overrides.
+
+    State leaving: (program does not exist).
+    State entering: (program exists, active=True).
+    Invariant: caller has admin:manage; the unique constraint on
+    `code` rejects duplicates at the DB level.
+
+    Feature flags omitted from the body fall back to model server
+    defaults (schedule_enabled=true, oracle_access=false,
+    overdue_threshold_hours=24) — set during the slice 5B-1 program
+    flag migration.
+    """
+    await _require_admin_manage(session, actor_id)
+
+    program = Program(
+        code=data.code,
+        name=data.name,
+        active=True,
+        created_by=actor_id,
+        updated_by=actor_id,
+    )
+    # Apply any optional flag overrides.  Pydantic exposes
+    # model_fields_set so we can distinguish "not provided" from
+    # "explicitly set to default".
+    if "schedule_enabled" in data.model_fields_set:
+        program.schedule_enabled = bool(data.schedule_enabled)
+    if "oracle_access" in data.model_fields_set:
+        program.oracle_access = bool(data.oracle_access)
+    if "overdue_threshold_hours" in data.model_fields_set:
+        program.overdue_threshold_hours = int(
+            data.overdue_threshold_hours or 24,
+        )
+
+    session.add(program)
+    await session.flush()
+    await create_audit_record(
+        session,
+        event_id=_uuid.uuid4(),
+        actor_type=ActorType.human,
+        user_id=actor_id,
+        user_role=None,
+        action_type="admin.program.create",
+        entity_type="program",
+        entity_id=program.id,
+        after_state={
+            "code": program.code,
+            "name": program.name,
+            "active": program.active,
+            "schedule_enabled": program.schedule_enabled,
+            "oracle_access": program.oracle_access,
+            "overdue_threshold_hours": program.overdue_threshold_hours,
+        },
+    )
+    return program
+
+
+async def update_program(
+    session: AsyncSession,
+    program_id: _uuid.UUID,
+    data: ProgramUpdate,
+    actor_id: _uuid.UUID,
+) -> Program:
+    """Update mutable program fields with optimistic concurrency.
+
+    State leaving: (current name/active/flags).
+    State entering: (data-supplied name/active/flags).
+    Invariant: caller has admin:manage; the version assertion catches
+    a concurrent admin edit and produces 409 with the standard
+    envelope (UX spec §6.3.2).
+
+    `code` is intentionally immutable — the program code is the
+    stable identifier referenced by Cognito custom:programs claims
+    and renaming it would orphan every user's existing membership.
+    """
+    await _require_admin_manage(session, actor_id)
+    program = await _get_program(session, program_id)
+
+    try:
+        check_version(program, data.version, entity_type="Program")
+    except VersionConflictError as exc:
+        raise version_conflict_response(exc) from exc
+
+    before_state = {
+        "name": program.name,
+        "active": program.active,
+        "schedule_enabled": program.schedule_enabled,
+        "oracle_access": program.oracle_access,
+        "overdue_threshold_hours": program.overdue_threshold_hours,
+    }
+
+    # exclude_unset preserves the "leave unchanged" semantics on
+    # any field the client did not supply.
+    payload = data.model_dump(exclude_unset=True, exclude={"version"})
+    for field_name, value in payload.items():
+        setattr(program, field_name, value)
+
+    program.updated_by = actor_id
+    increment_version(program)
+    await session.flush()
+
+    after_state = {
+        "name": program.name,
+        "active": program.active,
+        "schedule_enabled": program.schedule_enabled,
+        "oracle_access": program.oracle_access,
+        "overdue_threshold_hours": program.overdue_threshold_hours,
+    }
+    await create_audit_record(
+        session,
+        event_id=_uuid.uuid4(),
+        actor_type=ActorType.human,
+        user_id=actor_id,
+        user_role=None,
+        action_type="admin.program.update",
+        entity_type="program",
+        entity_id=program.id,
+        before_state=before_state,
+        after_state=after_state,
+    )
+    return program

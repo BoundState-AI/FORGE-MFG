@@ -43,12 +43,17 @@ class ProgramOut(BaseModel):
     """Program summary for access-scoping display (build spec §5.0.3).
 
     Feature flags are exposed alongside identity fields because the
-    frontend consumes them on every render path (UX spec v1.4.2 §1.4
+    frontend consumes them on every render path (UX spec v1.5.1 §1.4
     drives navigation visibility off schedule_enabled and oracle_access;
-    §5.3 derives the dashboard overdue rule off overdue_threshold_hours).
+    §5.1 derives the dashboard overdue rule off overdue_threshold_hours).
     Embedding them in the standard Program payload removes a second
     round-trip and keeps the wire shape identical wherever a Program
     is returned (admin programs CRUD, user.program_memberships, etc.).
+
+    `version` is exposed because admin program updates use the standard
+    optimistic-locking contract (§6.3) — clients must echo the version
+    they observed on the next PATCH so a concurrent edit by another
+    admin produces a 409 instead of silently overwriting.
     """
 
     id: uuid.UUID
@@ -58,8 +63,22 @@ class ProgramOut(BaseModel):
     schedule_enabled: bool
     oracle_access: bool
     overdue_threshold_hours: int
+    version: int
 
     model_config = {"from_attributes": True}
+
+
+class ProgramListItemOut(ProgramOut):
+    """Program list item — extends ProgramOut with member_count.
+
+    Admin Programs page (UX spec v1.5.1 §5.10) renders a list with
+    "member count" alongside flags.  Computing the count once per row
+    in the list service avoids N+1 follow-up queries when the admin
+    has many programs.  The detail GET returns the lighter ProgramOut
+    because the detail page does not display the count.
+    """
+
+    member_count: int
 
 
 class UserOut(BaseModel):
@@ -135,12 +154,19 @@ class ProgramCreate(BaseModel):
 class ProgramUpdate(BaseModel):
     """Request body for PATCH /api/admin/programs/{id}.
 
-    All fields optional — admin can toggle a single flag without
-    re-sending the whole record.  None means "leave unchanged" at the
-    service layer (model_dump(exclude_unset=True) is the canonical
-    pattern in admin_service).
+    All mutable fields are optional — admin can toggle a single flag
+    without re-sending the whole record.  None means "leave unchanged"
+    at the service layer (model_dump(exclude_unset=True) is the
+    canonical pattern in admin_service).
+
+    `version` is REQUIRED for optimistic locking per UX spec v1.5.1
+    §6.3 (composite-field shape uses body version, not the If-Match
+    header, because admin updates are typically composite — name +
+    flags in one request).  A stale version produces 409 with the
+    standard envelope.
     """
 
+    version: int
     name: str | None = None
     active: bool | None = None
     schedule_enabled: bool | None = None
