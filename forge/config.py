@@ -68,6 +68,12 @@ class Settings(BaseSettings):
     cognito_user_pool_id: str = ""
     cognito_region: str = "us-gov-west-1"
     cognito_app_client_id: str = ""
+    # Spec §5.0.4: "Atlas must provision and verify the Cognito Pre Token
+    # Generation trigger before declaring auth complete."  The trigger
+    # Lambda's ARN is recorded here so the admin:manage health check can
+    # confirm it is wired to the user pool.  Empty string disables the
+    # provisioning check (local / test environments).
+    cognito_pre_token_gen_lambda_arn: str = ""
     auth_mode: str = Field(
         default="local",
         description="local (no auth) | cognito (JWKS validation)",

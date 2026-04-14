@@ -27,10 +27,13 @@ Why this design:
   JWKS keys are cached with a 1-hour TTL to avoid per-request network
   calls.  On key rotation, a cache miss triggers a fresh fetch.
 
-  Claim sync from admin writes (Cognito attribute update after DB role
-  change) is NOT complete until slice 3C.  Until then, claims are seeded
-  or manually set in Cognito.  The 30-minute drift window (spec §5.0.4)
-  is a deliberate tradeoff for normal actions.
+  Claim sync from admin writes is live as of slice 3C: admin endpoints
+  that change a user's role or program set call Cognito
+  AdminUpdateUserAttributes immediately, and deactivation or admin-role
+  removal additionally calls AdminUserGlobalSignOut (spec §5.0.4).
+  Updated claims take effect on the next token refresh; the 30-minute
+  drift window for normal actions is a deliberate tradeoff (spec
+  §5.0.4).  See forge.services.cognito_sync.
 """
 
 from __future__ import annotations

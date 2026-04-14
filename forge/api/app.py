@@ -149,6 +149,7 @@ def _register_domain_routers(app: FastAPI) -> None:
     Routes are already prefixed (e.g. /api/work-orders) in each
     router module, so no additional prefix is needed here.
     """
+    from .routes.admin import router as admin_router
     from .routes.calendars import router as calendars_router
     from .routes.documents import router as documents_router
     from .routes.inspections import router as inspections_router
@@ -157,6 +158,7 @@ def _register_domain_routers(app: FastAPI) -> None:
     from .routes.operations import router as operations_router
     from .routes.parts import router as parts_router
     from .routes.schedule import router as schedule_router
+    from .routes.users import router as users_router
     from .routes.work_orders import router as work_orders_router
 
     app.include_router(work_orders_router)
@@ -168,6 +170,8 @@ def _register_domain_routers(app: FastAPI) -> None:
     app.include_router(documents_router)
     app.include_router(calendars_router)
     app.include_router(schedule_router)
+    app.include_router(admin_router)
+    app.include_router(users_router)
 
 
 # Module-level app instance for uvicorn/gunicorn: `forge.api.app:app`
