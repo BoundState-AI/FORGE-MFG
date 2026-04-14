@@ -23,7 +23,14 @@ Why this design:
 
 from __future__ import annotations
 
-from forge.models.enums import CertStatus, NCRStatus, OpStatus, PartStatus, WOStatus
+from forge.models.enums import (
+    CertStatus,
+    NCRStatus,
+    OpStatus,
+    PartStatus,
+    ScheduleStatus,
+    WOStatus,
+)
 
 # Spec §4.3: valid work order transitions
 VALID_WO_TRANSITIONS: dict[WOStatus, set[WOStatus]] = {
@@ -179,3 +186,32 @@ def validate_part_transition(
     Invariant: target must be in the set of valid successors for current.
     """
     return target in VALID_PART_TRANSITIONS.get(current, set())
+
+
+# Spec §3.1 BuildSchedule lifecycle (enum given; transitions implicit):
+#
+#     draft ─► baselined ─► in_progress ─► complete
+#
+# Why explicit map: baseline freezes the schedule for execution — a
+# baselined schedule must not slip back to draft (editing history would
+# break the audit trail).  `in_progress` and `complete` are reached via
+# outbox-driven recalculation in 4B; 4A only exposes the draft→baselined
+# transition (`POST /api/schedules/{id}/baseline`).  The transitions are
+# defined here now so 4B can plug in without reshaping the policy.
+VALID_SCHEDULE_TRANSITIONS: dict[ScheduleStatus, set[ScheduleStatus]] = {
+    ScheduleStatus.draft: {ScheduleStatus.baselined},
+    ScheduleStatus.baselined: {ScheduleStatus.in_progress},
+    ScheduleStatus.in_progress: {ScheduleStatus.complete},
+    ScheduleStatus.complete: set(),
+}
+
+
+def validate_schedule_transition(
+    current: ScheduleStatus, target: ScheduleStatus,
+) -> bool:
+    """Check if a BuildSchedule transition is valid.
+
+    State leaving: current.  State entering: target.
+    Invariant: target must be in the set of valid successors for current.
+    """
+    return target in VALID_SCHEDULE_TRANSITIONS.get(current, set())
