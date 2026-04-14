@@ -1,0 +1,30 @@
+{
+  "id": "MSFC-STD-3012A",
+  "name": "MSFC Technical Standard 3012A — Nonconformance Reporting and Disposition",
+  "version": "A",
+  "source": "MSFC-STD-3012A",
+  "description": "Marshall Space Flight Center standard governing the reporting, disposition, and closure of manufacturing nonconformances.",
+  "rules": [
+    {
+      "id": "MSFC-STD-3012A-2.1",
+      "section": "2.1",
+      "title": "NCR creation timing",
+      "text": "Nonconformances shall be recorded in an NCR within the operating shift in which they are discovered; delayed recording is itself a nonconformance.",
+      "keywords": ["ncr", "timing", "shift", "record"]
+    },
+    {
+      "id": "MSFC-STD-3012A-3.4",
+      "section": "3.4",
+      "title": "Disposition authority",
+      "text": "Use-as-is and repair dispositions require Material Review Board concurrence; return-to-vendor and scrap may be dispositioned by QA alone but shall be recorded with engineering cognizance.",
+      "keywords": ["disposition", "mrb", "use-as-is", "repair", "scrap"]
+    },
+    {
+      "id": "MSFC-STD-3012A-4.2",
+      "section": "4.2",
+      "title": "Separation of duties for closure",
+      "text": "The qualified QA approver who closes an NCR shall not be the same individual who dispositioned it; this separation is a mandatory control and cannot be overridden.",
+      "keywords": ["sod", "separation", "closure", "ncr", "qa"]
+    }
+  ]
+}

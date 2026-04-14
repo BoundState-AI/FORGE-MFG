@@ -1,0 +1,30 @@
+{
+  "id": "NPR-8735.2C",
+  "name": "NASA Procedural Requirements 8735.2C — Management of Government Property in the Possession of Contractors",
+  "version": "C",
+  "source": "NASA NPR 8735.2C",
+  "description": "Property management, traceability, and disposition controls applicable to manufacturing and contractor-held hardware.",
+  "rules": [
+    {
+      "id": "NPR-8735.2C-3.2.1",
+      "section": "3.2.1",
+      "title": "Serialized item traceability",
+      "text": "Each serialized property item shall be traceable by unique identifier from receipt through disposition, with custody transfers recorded.",
+      "keywords": ["trace", "traceability", "serial", "part", "custody", "disposition"]
+    },
+    {
+      "id": "NPR-8735.2C-4.1.2",
+      "section": "4.1.2",
+      "title": "Material certification retention",
+      "text": "Certifications of conformance for material lots shall be retained and associated with every consumed quantity until disposition of the finished item.",
+      "keywords": ["material", "cert", "certification", "lot", "consumption"]
+    },
+    {
+      "id": "NPR-8735.2C-5.3.4",
+      "section": "5.3.4",
+      "title": "Nonconforming property segregation",
+      "text": "Nonconforming property shall be identified, segregated where practicable, and dispositioned by authorized personnel before further processing.",
+      "keywords": ["ncr", "nonconform", "disposition", "segregation"]
+    }
+  ]
+}

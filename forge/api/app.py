@@ -152,6 +152,7 @@ def _register_domain_routers(app: FastAPI) -> None:
     from .routes.admin import router as admin_router
     from .routes.admin_dead_letters import router as admin_dl_router
     from .routes.calendars import router as calendars_router
+    from .routes.chat import router as chat_router
     from .routes.documents import router as documents_router
     from .routes.inspections import router as inspections_router
     from .routes.materials import router as materials_router
@@ -171,6 +172,7 @@ def _register_domain_routers(app: FastAPI) -> None:
     app.include_router(documents_router)
     app.include_router(calendars_router)
     app.include_router(schedule_router)
+    app.include_router(chat_router)
     app.include_router(admin_router)
     app.include_router(admin_dl_router)
     app.include_router(users_router)

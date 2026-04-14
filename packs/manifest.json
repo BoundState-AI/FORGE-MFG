@@ -1,0 +1,35 @@
+{
+  "manifest_version": "1",
+  "generated_at": "2026-04-13T00:00:00Z",
+  "description": "Manufacturing Authority Packs (spec §1.2, §15.2). Each entry names a pack file on disk and its SHA-256 digest over the raw file bytes. The pack loader validates every digest on load; a mismatch is a pack-governance failure and the loader raises rather than serving possibly-tampered rules.",
+  "packs": [
+    {
+      "id": "NPR-8735.2C",
+      "file": "npr-8735-2c.json",
+      "version": "C",
+      "description": "Management of Government Property in the Possession of Contractors",
+      "sha256": "fa78f54fac0f129eff7a045f6451b0c0aea96c93271aebd3dcd6778aa1828da7"
+    },
+    {
+      "id": "NASA-STD-6016C",
+      "file": "nasa-std-6016c.json",
+      "version": "C",
+      "description": "Standard Materials and Processes Requirements for Spacecraft",
+      "sha256": "199107d0ecb2020cc4a07b36fe1d35c49df97db85b21c8d335a81f71c2bee834"
+    },
+    {
+      "id": "NASA-STD-5009C",
+      "file": "nasa-std-5009c.json",
+      "version": "C",
+      "description": "Nondestructive Evaluation Requirements for Fracture Critical Metallic Components",
+      "sha256": "883cd3473c7465547a7502725ff06a36d8f17064138fdbef9538f5644e92d25c"
+    },
+    {
+      "id": "MSFC-STD-3012A",
+      "file": "msfc-std-3012a.json",
+      "version": "A",
+      "description": "Nonconformance Reporting and Disposition",
+      "sha256": "7ab5de85a064e7bc9ba2cd49eefc876ef0bb02a667059abaa83c27e5345e3a3e"
+    }
+  ]
+}

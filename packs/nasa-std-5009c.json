@@ -1,0 +1,23 @@
+{
+  "id": "NASA-STD-5009C",
+  "name": "NASA Technical Standard 5009C — Nondestructive Evaluation Requirements for Fracture Critical Metallic Components",
+  "version": "C",
+  "source": "NASA-STD-5009C",
+  "description": "Nondestructive evaluation (NDE) requirements applicable to fracture-critical metallic components.",
+  "rules": [
+    {
+      "id": "NASA-STD-5009C-3.1.1",
+      "section": "3.1.1",
+      "title": "Fracture-critical classification",
+      "text": "Components designated fracture-critical shall be identified on the work order and inspected per the applicable NDE method; this designation cannot be waived by operations.",
+      "keywords": ["fracture", "critical", "nde", "inspection", "waiver"]
+    },
+    {
+      "id": "NASA-STD-5009C-4.2.5",
+      "section": "4.2.5",
+      "title": "Inspector certification",
+      "text": "NDE inspectors shall hold current certification for the method being applied; sign-off records shall include inspector certification reference.",
+      "keywords": ["inspector", "certification", "sign-off"]
+    }
+  ]
+}

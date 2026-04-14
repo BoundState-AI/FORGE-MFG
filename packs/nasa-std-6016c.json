@@ -1,0 +1,30 @@
+{
+  "id": "NASA-STD-6016C",
+  "name": "NASA Technical Standard 6016C — Standard Materials and Processes Requirements for Spacecraft",
+  "version": "C",
+  "source": "NASA-STD-6016C",
+  "description": "Standard materials and processes requirements applicable to spacecraft hardware manufacture and assembly.",
+  "rules": [
+    {
+      "id": "NASA-STD-6016C-4.2.1",
+      "section": "4.2.1",
+      "title": "Approved material list",
+      "text": "Materials used in flight hardware shall be drawn from the program-approved materials list; substitutions require engineering approval and reconciliation of cert lot data.",
+      "keywords": ["material", "approved", "substitution", "engineering"]
+    },
+    {
+      "id": "NASA-STD-6016C-5.1.3",
+      "section": "5.1.3",
+      "title": "Process qualification",
+      "text": "Special processes shall be performed by qualified personnel using qualified procedures; qualification records shall be traceable to the operation executed.",
+      "keywords": ["process", "qualification", "operation", "special"]
+    },
+    {
+      "id": "NASA-STD-6016C-6.4.2",
+      "section": "6.4.2",
+      "title": "Inspection hold points",
+      "text": "Critical inspection hold points shall not be bypassed; sign-off by a qualified inspector is required before the downstream operation may start.",
+      "keywords": ["inspection", "hold", "sign-off", "gate"]
+    }
+  ]
+}

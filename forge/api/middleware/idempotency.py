@@ -55,7 +55,16 @@ from forge.models.idempotency import IdempotencyRecord
 logger = logging.getLogger(__name__)
 
 # Paths exempt from idempotency enforcement.
-EXEMPT_PATHS: set[str] = {"/health", "/api/health"}
+#
+# /api/chat and /api/chat/stream are advisory read-oriented queries.
+# They emit a ChatQueried audit event but never change domain state,
+# so spec §5.15's "mutating POST" language does not apply.  The
+# streaming variant is additionally incompatible with body-capture
+# replay — reading the response body would force buffering of an SSE
+# stream that the client expects to flush incrementally.
+EXEMPT_PATHS: set[str] = {
+    "/health", "/api/health", "/api/chat", "/api/chat/stream",
+}
 
 # TTL for idempotency records (spec §5.15)
 IDEMPOTENCY_TTL = timedelta(hours=24)
