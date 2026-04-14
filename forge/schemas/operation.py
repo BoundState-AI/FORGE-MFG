@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
 Module:   Operation Schemas
-Purpose:  Pydantic request/response models for operation endpoints (spec §5.2).
+Purpose:  Pydantic request/response models for operation endpoints, including
+          the enriched detail surface required by UX spec v1.5.1 §5.4.8.
 
 BoundState AI 2026
-Version: 0.1.0
+Version: 0.2.0
 Classification: BoundState Proprietary
 
 Co-Authored-By: Claude "Beth" <noreply@anthropic.com>
@@ -18,6 +19,16 @@ Why this design:
   layer) and status (always starts as pending).  inspection_hold and
   safety_critical default to False — the engineer sets them explicitly
   when the operation requires quality gates.
+
+  OperationDetailOut is a separate, richer shape (not an extension of
+  OperationOut) because:
+  - hold_point_status requires a server-side scan of inspection history
+  - predecessor_summaries requires sibling-operation lookup
+  - stop_requests requires a future cross-table join (StopRequest model
+    arrives in slice 5B-12; this PR exposes the field as an empty list
+    against the spec contract)
+  Keeping the list shape (OperationOut) lighter avoids paying that
+  enrichment cost on every list response.
 """
 
 from __future__ import annotations
@@ -27,7 +38,12 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
-from forge.models.enums import OpStatus, ScheduleConstraint
+from forge.models.enums import (
+    HoldPointStatus,
+    OpStatus,
+    ScheduleConstraint,
+    WOStatus,
+)
 
 
 class OperationCreate(BaseModel):
@@ -95,3 +111,104 @@ class OperationOut(BaseModel):
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class PredecessorSummary(BaseModel):
+    """Minimal predecessor data per UX spec v1.5.1 §5.4.8.
+
+    Drives the disabled [Start Timer] tooltip ("Waiting for: Op N —
+    description (status)") without requiring the client to fetch each
+    predecessor in a follow-up call.  Field set is intentionally
+    minimal so the response stays small for operations with many
+    predecessors.
+
+    `sequence_number` is the spec wire name; the underlying model
+    column is named `sequence`.  The service layer maps that on
+    construction so this schema stays spec-accurate without renaming
+    the database column in this PR.
+    """
+
+    id: uuid.UUID
+    sequence_number: int
+    description: str
+    status: OpStatus
+
+
+class StopRequestSummary(BaseModel):
+    """Pending stop-request summary per UX spec v1.5.1 §5.4.8 / §5.4.9.
+
+    NOTE (PR2 boundary): the StopRequest entity itself does not yet
+    exist in the backend — it is queued for slice 5B-12 along with the
+    POST /api/labor-entries/{id}/stop-request and force-stop endpoints.
+    The schema is defined now so the wire contract on
+    GET /api/operations/{op_id} is stable; the field is populated as
+    an empty list until 5B-12 lands.
+
+    Only `pending` requests are surfaced here per spec §5.4.8 —
+    fulfilled and expired entries live in the audit trail (§6.6).
+    """
+
+    request_id: uuid.UUID
+    labor_entry_id: uuid.UUID
+    status: str
+    requested_by: dict[str, str]
+    note: str
+    created_at: datetime
+
+
+class OperationDetailOut(BaseModel):
+    """Enriched operation detail response (UX spec v1.5.1 §5.4.8).
+
+    Used by both the engineer Operation Detail page (§5.4.11) and the
+    operator Operation Execution SSE reconnect contract (§6.5.2 — the
+    client refetches this endpoint as the authoritative reconciliation
+    surface on every reconnect, regardless of any best-effort SSE
+    replay).
+
+    `program_id` is required so the client auto-switch behavior
+    (§3.2 / §6.7.4) can identify the entity's owning program after a
+    deep-link fetch where the caller's currently-selected program may
+    differ from the entity's program.
+
+    `hold_point_status` is server-derived (spec §5.4.3 explicitly
+    forbids client-side traversal of inspection history).  See the
+    KNOWN CONTRACT MISMATCH note in
+    forge.services.operation_service._derive_hold_point_status — the
+    `conditionally_satisfied` value is exposed per spec but COMP-001
+    completion enforcement still requires `accept`; aligning the two
+    is a separate slice item.
+
+    `predecessor_summaries` carries enough data for the disabled
+    [Start Timer] tooltip in one round-trip.  The current backend is
+    sequence-based default-sequential; explicit predecessor edges
+    arrive with the graph APIs in 5B-10/11.
+
+    `stop_requests` is wire-stable but always empty until 5B-12 (see
+    StopRequestSummary docstring).
+    """
+
+    id: uuid.UUID
+    work_order_id: uuid.UUID
+    # Parent WO status — required by §6.5.2 reconnect contract so the
+    # client can render the work-order-on-hold banner (§5.3, §5.4.10)
+    # and gate operation actions against parent state in a single
+    # round-trip.  Without this field a reconnect would require a
+    # second fetch of the parent WO before any UI is safe to render.
+    work_order_status: WOStatus
+    program_id: uuid.UUID
+    sequence_number: int
+    description: str
+    status: OpStatus
+    execution_cycle: int
+    inspection_hold: bool
+    safety_critical: bool
+    estimated_hours: float
+    started_at: datetime | None
+    completed_at: datetime | None
+    hold_point_status: HoldPointStatus
+    predecessors: list[uuid.UUID]
+    predecessor_summaries: list[PredecessorSummary]
+    stop_requests: list[StopRequestSummary]
+    version: int
+    created_at: datetime
+    updated_at: datetime

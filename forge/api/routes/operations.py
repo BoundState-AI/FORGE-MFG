@@ -1,22 +1,30 @@
 #!/usr/bin/env python3
 """
 Module:   Operation Routes
-Purpose:  HTTP endpoints for operation authoring, execution, and labor (spec §5.2-§5.3).
+Purpose:  HTTP endpoints for operation authoring, execution, labor, and the
+          enriched detail read surface (UX spec v1.5.1 §5.4.8).
 
 BoundState AI 2026
-Version: 0.1.0
+Version: 0.2.0
 Classification: BoundState Proprietary
 
 Co-Authored-By: Claude "Beth" <noreply@anthropic.com>
 Co-Authored-By: Dr. Joseph Wilde, BoundState AI
 
-Compliance: NASA-CSET, SWE-013
+Compliance: NASA-CSET, SWE-013, SWE-032
 Safety Critical: True
 
 Why this design:
   Routes delegate to operation_service for all business logic.
   Operation start requires role and shift for the labor entry.
   Labor update checks labor:update_own vs labor:update_any.
+
+  GET /api/operations/{op_id} (5B-6) returns the enriched
+  OperationDetailOut shape required by the engineer Operation Detail
+  page (§5.4.11) and the SSE reconnect contract (§6.5.2 — every SSE
+  reconnect refetches this endpoint as the authoritative
+  reconciliation surface).  Authorization rides on the §6.7.4
+  entity-detail GET exception in PR1's program-scope middleware.
 """
 
 from __future__ import annotations
@@ -32,6 +40,7 @@ from forge.api.deps import get_db
 from forge.schemas.labor import LaborCreate, LaborOut, LaborUpdate
 from forge.schemas.operation import (
     OperationCreate,
+    OperationDetailOut,
     OperationOut,
     OperationReorder,
     OperationTransition,
@@ -74,6 +83,30 @@ async def create_operation(
     await session.commit()
     await session.refresh(op)
     return OperationOut.model_validate(op)
+
+
+@router.get("/api/operations/{op_id}", response_model=OperationDetailOut)
+async def get_operation(
+    op_id: uuid.UUID,
+    auth: AuthContext = Depends(require_permission("op:read")),
+    session: AsyncSession = Depends(get_db),
+) -> OperationDetailOut:
+    """Enriched operation detail per UX spec v1.5.1 §5.4.8.
+
+    Drives the engineer Operation Detail page (§5.4.11) and the SSE
+    reconnect contract (§6.5.2 — clients refetch this endpoint on every
+    reconnect as the authoritative state-reconciliation surface,
+    regardless of any best-effort SSE replay).
+
+    Authorization (§6.7.4 entity-detail GET exception): the X-Program-Id
+    middleware skips header membership comparison on this route; service-
+    layer enforcement against entity.program_id (via parent WO) returns
+    404 on cross-program per the §3.2 existence-leak rule.
+    """
+    detail = await op_svc.get_operation_detail(
+        session, op_id, program_codes=auth.programs,
+    )
+    return OperationDetailOut.model_validate(detail)
 
 
 @router.patch("/api/operations/{op_id}", response_model=OperationOut)

@@ -88,6 +88,22 @@ class InspectionResult(enum.StrEnum):
     conditional = "conditional"
 
 
+class HoldPointStatus(enum.StrEnum):
+    """Server-derived inspection hold-point status (UX spec v1.5.1 §5.4.3).
+
+    Computed from an operation's inspection_hold flag and the latest
+    InspectionResult in the current execution_cycle.  Surfaced on the
+    operation detail response so the frontend never has to traverse
+    inspection history client-side (spec §5.4.3 explicit prohibition).
+    """
+
+    none = "none"
+    pending = "pending"
+    satisfied = "satisfied"
+    conditionally_satisfied = "conditionally_satisfied"
+    blocked = "blocked"
+
+
 class SignOffAction(enum.StrEnum):
     """Role-based sign-off decision on an operation (spec §3.1 SignOffEvent)."""
 

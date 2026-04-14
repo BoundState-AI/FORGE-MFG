@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
 Module:   Operation Service
-Purpose:  Business logic for operation authoring, execution, and labor capture.
+Purpose:  Business logic for operation authoring, execution, labor capture,
+          and the enriched detail read surface (UX spec v1.5.1 §5.4.8).
 
 BoundState AI 2026
-Version: 0.1.0
+Version: 0.2.0
 Classification: BoundState Proprietary
 
 Co-Authored-By: Claude "Beth" <noreply@anthropic.com>
@@ -19,6 +20,13 @@ Why this design:
   inspection/sign-off events remain for audit but no longer satisfy
   hold enforcement.  Labor entries are created by op start and can be
   independently added/updated.
+
+  The read-detail helpers near the top of the module (5B-6) compose
+  three independent derivations — server-side hold_point_status,
+  sequence-based predecessor summaries, and a wire-stable empty
+  stop_requests list — into the OperationDetailOut shape required by
+  the engineer Operation Detail page (§5.4.11) and the SSE reconnect
+  contract (§6.5.2).
 """
 
 from __future__ import annotations
@@ -31,7 +39,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from forge.audit.logger import create_audit_record
-from forge.models.enums import ActorType, OpStatus, WOStatus
+from forge.models.enums import (
+    ActorType,
+    HoldPointStatus,
+    InspectionResult,
+    OpStatus,
+    WOStatus,
+)
 from forge.models.labor import LaborEntry
 from forge.models.operation import Operation
 from forge.models.work_order import WorkOrder
@@ -96,6 +110,171 @@ def _require_draft_wo(wo: WorkOrder) -> None:
             status_code=422,
             detail="Operations can only be modified on draft work orders",
         )
+
+
+# ---------------------------------------------------------------------------
+# Read-detail helpers — UX spec v1.5.1 §5.4.8 (enriched OperationDetailOut)
+# ---------------------------------------------------------------------------
+
+
+def _derive_hold_point_status(op: Operation) -> HoldPointStatus:
+    """Derive server-side hold_point_status per UX spec v1.5.1 §5.4.3.
+
+    Mapping (latest InspectionResult in the current execution_cycle):
+    - none: operation has no inspection hold (inspection_hold=False)
+    - pending: hold exists, no inspection in current cycle
+    - satisfied: latest result == accept
+    - conditionally_satisfied: latest result == conditional
+    - blocked: latest result == reject (NCR auto-created)
+
+    Why filter by execution_cycle: rework increments the cycle so prior
+    inspections remain in audit but no longer count for the current
+    hold gate — mirrors COMP-001 (forge.rules.compliance_checks).
+
+    Spec §5.4.3 explicitly forbids client-side derivation, so this
+    function is the single source of truth for the UI's hold-point
+    badge.
+
+    KNOWN CONTRACT MISMATCH (carry-forward):
+    Spec §5.3 (WO Complete preconditions) and §5.4.10 (Operation
+    Complete tooltip) treat `conditionally_satisfied` as Complete-
+    eligible alongside `satisfied`.  The current COMP-001 check in
+    forge.rules.compliance_checks accepts ONLY `result == accept`,
+    so a frontend that allows the [Complete Operation] click on a
+    `conditionally_satisfied` op will receive a 422 from the server.
+    Aligning COMP-001 to also accept `conditional` is its own slice
+    item (tracked alongside the resolve-conditional flow in §5.5.5).
+    Documenting here so the asymmetry is grep-able and so PR2 does
+    not silently bake the contradiction in.
+    """
+    if not op.inspection_hold:
+        return HoldPointStatus.none
+
+    cycle_inspections = [
+        i for i in op.inspection_events
+        if i.execution_cycle == op.execution_cycle
+    ]
+    if not cycle_inspections:
+        return HoldPointStatus.pending
+
+    latest = max(cycle_inspections, key=lambda i: i.inspected_at)
+    if latest.result == InspectionResult.accept:
+        return HoldPointStatus.satisfied
+    if latest.result == InspectionResult.conditional:
+        return HoldPointStatus.conditionally_satisfied
+    # InspectionResult.reject is the only remaining case; an NCR is
+    # created in the same atomic transaction (spec §5.5.4).
+    return HoldPointStatus.blocked
+
+
+async def _load_predecessor_summaries(
+    session: AsyncSession, op: Operation,
+) -> list[Operation]:
+    """Load predecessor operations for the §5.4.8 summaries field.
+
+    The Operation model has no explicit predecessor edges today;
+    ordering is by `sequence`.  UX spec §5.4.7 names this "default-
+    sequential" mode: the predecessor of an operation is the
+    immediately-prior operation in the same WO when its siblings are
+    sorted by `sequence`.
+
+    Why we sort siblings rather than `WHERE sequence == op.sequence - 1`:
+    `Operation.sequence` is not guaranteed unique or gap-free across the
+    schema (e.g. an engineer may delete the middle op in a draft WO
+    and leave the sequence numbers as-is).  A literal `sequence - 1`
+    lookup misses the predecessor in that case and silently inverts
+    the [Start Timer] tooltip.  Sorting the actual sibling set is the
+    only honest "previous sibling" semantics until explicit
+    predecessor edges land in 5B-10/11.
+
+    When the explicit predecessor-graph model lands, this becomes a
+    join over a predecessor edge table and the return shape stays
+    the same.
+    """
+    result = await session.execute(
+        select(Operation)
+        .where(Operation.work_order_id == op.work_order_id)
+        .order_by(Operation.sequence.asc(), Operation.id.asc())
+    )
+    siblings = list(result.scalars().all())
+    # Locate this operation by id (sequence may collide); the
+    # predecessor is the entry immediately before it in sorted order.
+    for index, sibling in enumerate(siblings):
+        if sibling.id == op.id:
+            return [siblings[index - 1]] if index > 0 else []
+    # Defensive — `op` should always be present in its own WO's
+    # operation set.  Fall back to "no predecessor" rather than raise
+    # so the read endpoint never 500s on a transient race.
+    return []
+
+
+def _serialize_predecessor_summary(pred: Operation) -> dict[str, object]:
+    """Build the §5.4.8 summary dict for a single predecessor.
+
+    `sequence_number` is the spec wire name; the model column is
+    `sequence`.  Mapping happens here so the schema stays spec-named
+    without requiring a database column rename.
+    """
+    return {
+        "id": pred.id,
+        "sequence_number": pred.sequence,
+        "description": pred.description,
+        "status": pred.status,
+    }
+
+
+async def get_operation_detail(
+    session: AsyncSession,
+    op_id: _uuid.UUID,
+    *,
+    program_codes: list[str] | None = None,
+) -> dict[str, object]:
+    """Load enriched operation detail per UX spec v1.5.1 §5.4.8.
+
+    Returns a dict ready to feed `OperationDetailOut.model_validate`.
+    Combines:
+    - operation core fields
+    - parent WO `program_id` (entity-route auto-switch — §3.2 / §6.7.4)
+    - server-derived `hold_point_status` (§5.4.3)
+    - sequence-based predecessor summaries (§5.4.8)
+    - empty `stop_requests` (StopRequest model arrives in 5B-12;
+      the field is wire-stable and always returned as `[]` until then)
+
+    Authorization: `_get_wo` returns 404 on cross-program per UX spec
+    §3.2 / §6.7.4 (existence-leak rule).  The caller route relies on
+    that 404 for the entity-detail GET exception flow.
+    """
+    op = await _get_op(session, op_id, program_codes=program_codes)
+    wo = await _get_wo(session, op.work_order_id, program_codes=program_codes)
+
+    predecessors = await _load_predecessor_summaries(session, op)
+    return {
+        "id": op.id,
+        "work_order_id": op.work_order_id,
+        "work_order_status": wo.status,
+        "program_id": wo.program_id,
+        "sequence_number": op.sequence,
+        "description": op.description,
+        "status": op.status,
+        "execution_cycle": op.execution_cycle,
+        "inspection_hold": op.inspection_hold,
+        "safety_critical": op.safety_critical,
+        "estimated_hours": op.estimated_hours,
+        "started_at": op.started_at,
+        "completed_at": op.completed_at,
+        "hold_point_status": _derive_hold_point_status(op),
+        "predecessors": [p.id for p in predecessors],
+        "predecessor_summaries": [
+            _serialize_predecessor_summary(p) for p in predecessors
+        ],
+        # Empty until 5B-12: StopRequest model + force-stop / stop-request
+        # write endpoints land together.  Keeping the field present (not
+        # absent) makes the OpenAPI contract stable across slices.
+        "stop_requests": [],
+        "version": op.version,
+        "created_at": op.created_at,
+        "updated_at": op.updated_at,
+    }
 
 
 # ---------------------------------------------------------------------------
