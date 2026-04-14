@@ -23,7 +23,7 @@ Why this design:
 
 from __future__ import annotations
 
-from forge.models.enums import NCRStatus, OpStatus, WOStatus
+from forge.models.enums import CertStatus, NCRStatus, OpStatus, PartStatus, WOStatus
 
 # Spec §4.3: valid work order transitions
 VALID_WO_TRANSITIONS: dict[WOStatus, set[WOStatus]] = {
@@ -97,3 +97,85 @@ def validate_ncr_transition(current: NCRStatus, target: NCRStatus) -> bool:
     additions that forget to extend the map.
     """
     return target in VALID_NCR_TRANSITIONS.get(current, set())
+
+
+# Spec §3.1 MaterialCertification lifecycle (implicit — enum given, flow
+# inferred from the receive/accept/consume endpoints and spec §4.4 COMP-002
+# "status must be accepted and not past shelf_life_expiry").
+#
+#     quarantine ─► accepted ─► consumed
+#                │           └► expired
+#                ├► rejected (terminal)
+#                └► expired  (terminal; shelf-life)
+#
+# Why explicit map: reviewers should see the whole cert lifecycle in one
+# place.  `rejected`, `expired`, and `consumed` are terminal — a rejected
+# lot must never be resurrected, and once consumed (fully exhausted) the
+# lot is closed.  Expiry is reached via shelf_life_expiry elapse and is
+# typically set by a background job; for Phase 1 the transition target is
+# reachable administratively via status updates if needed, but consume
+# itself treats past-expiry as blocked whether or not the row says so.
+VALID_CERT_TRANSITIONS: dict[CertStatus, set[CertStatus]] = {
+    CertStatus.quarantine: {
+        CertStatus.accepted, CertStatus.rejected, CertStatus.expired,
+    },
+    CertStatus.accepted: {CertStatus.consumed, CertStatus.expired},
+    CertStatus.rejected: set(),
+    CertStatus.expired: set(),
+    CertStatus.consumed: set(),
+}
+
+
+def validate_cert_transition(
+    current: CertStatus, target: CertStatus
+) -> bool:
+    """Check if a material-certification transition is valid.
+
+    State leaving: current.  State entering: target.
+    Invariant: target must be in the set of valid successors for current.
+    """
+    return target in VALID_CERT_TRANSITIONS.get(current, set())
+
+
+# Spec §3.1 PartInstance lifecycle (SPEC AMBIGUITY: enum defined, no
+# explicit transition map given).  This map reflects the physically
+# meaningful flow for a serialized manufactured part:
+#
+#     raw ─► in_process ─► completed ─► installed
+#       │              └─────────────┬─► scrapped
+#       └─► quarantined ◄────────────┘
+#                │
+#                └─► in_process  (quarantine release)
+#                └─► scrapped
+#
+# Why this map: a raw part may go into production, be scrapped for
+# material/gauge failures, or be quarantined pending review.  A
+# quarantined part may be released back to in_process or condemned.
+# `scrapped` is terminal.  `installed` → `scrapped` is allowed for
+# post-install tear-downs (engine disassembly / field returns) but no
+# other transition out of installed is permitted without a new assembly.
+VALID_PART_TRANSITIONS: dict[PartStatus, set[PartStatus]] = {
+    PartStatus.raw: {
+        PartStatus.in_process, PartStatus.scrapped, PartStatus.quarantined,
+    },
+    PartStatus.in_process: {
+        PartStatus.completed, PartStatus.scrapped, PartStatus.quarantined,
+    },
+    PartStatus.completed: {
+        PartStatus.installed, PartStatus.scrapped, PartStatus.quarantined,
+    },
+    PartStatus.installed: {PartStatus.scrapped},
+    PartStatus.quarantined: {PartStatus.in_process, PartStatus.scrapped},
+    PartStatus.scrapped: set(),
+}
+
+
+def validate_part_transition(
+    current: PartStatus, target: PartStatus
+) -> bool:
+    """Check if a part-instance status transition is valid.
+
+    State leaving: current.  State entering: target.
+    Invariant: target must be in the set of valid successors for current.
+    """
+    return target in VALID_PART_TRANSITIONS.get(current, set())
