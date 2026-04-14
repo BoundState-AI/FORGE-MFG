@@ -155,6 +155,7 @@ def _register_domain_routers(app: FastAPI) -> None:
     """
     from .routes.admin import router as admin_router
     from .routes.admin_dead_letters import router as admin_dl_router
+    from .routes.admin_health import router as admin_health_router
     from .routes.admin_programs import router as admin_programs_router
     from .routes.audit import router as audit_router
     from .routes.calendars import router as calendars_router
@@ -184,6 +185,7 @@ def _register_domain_routers(app: FastAPI) -> None:
     app.include_router(admin_router)
     app.include_router(admin_programs_router)
     app.include_router(admin_dl_router)
+    app.include_router(admin_health_router)
     app.include_router(audit_router)
     app.include_router(users_router)
 
