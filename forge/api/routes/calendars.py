@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from forge.api.auth import AuthContext, require_permission
 from forge.api.deps import get_db
+from forge.api.program_scope import require_feature
 from forge.schemas.calendar import (
     CalendarCreate,
     CalendarOut,
@@ -34,7 +35,14 @@ from forge.schemas.calendar import (
 )
 from forge.services import calendar_service as cal_svc
 
-router = APIRouter(prefix="/api/calendars", tags=["calendars"])
+# Calendars are part of the schedule surface (UX spec §5.7) and share
+# the schedule_enabled feature flag.  Router-level dependency keeps
+# the gate consistent across every calendar handler.
+router = APIRouter(
+    prefix="/api/calendars",
+    tags=["calendars"],
+    dependencies=[Depends(require_feature("schedule_enabled"))],
+)
 
 
 @router.post("", response_model=CalendarOut, status_code=201)

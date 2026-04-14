@@ -36,6 +36,7 @@ from forge.db import dispose_engine, init_engine
 
 from .middleware.auth import AuthMiddleware
 from .middleware.idempotency import IdempotencyMiddleware
+from .middleware.program_scope import ProgramScopeMiddleware
 from .middleware.rate_limit import RateLimitMiddleware
 from .middleware.security import SecurityHeadersMiddleware
 
@@ -70,11 +71,13 @@ def _register_middleware(app: FastAPI, settings: Settings) -> None:
     last-added middleware runs first.  We register innermost-first so
     the runtime execution order is:
 
-        Security → RateLimit → Auth → Idempotency → CORS → app
+        Security → Auth → RateLimit → ProgramScope → Idempotency → CORS → app
 
     This guarantees security headers are set on every response, including
-    auth/idempotency short-circuit responses (spec §9.3.8).  Rate limit
-    runs after auth so user identity is available for per-user scoping.
+    auth/program-scope short-circuit responses (spec §9.3.8).  Rate limit
+    runs after auth so user identity is available for per-user scoping;
+    program-scope runs after rate limit so an attacker spamming bad
+    X-Program-Id headers still consumes their per-user budget.
     """
     app.add_middleware(
         CORSMiddleware,
@@ -84,6 +87,7 @@ def _register_middleware(app: FastAPI, settings: Settings) -> None:
         allow_headers=["*"],
     )
     app.add_middleware(IdempotencyMiddleware)
+    app.add_middleware(ProgramScopeMiddleware)
     app.add_middleware(RateLimitMiddleware)
     app.add_middleware(AuthMiddleware)
     app.add_middleware(SecurityHeadersMiddleware)

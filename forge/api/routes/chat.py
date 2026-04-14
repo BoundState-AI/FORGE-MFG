@@ -41,6 +41,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from forge.api.auth import AuthContext, require_permission
 from forge.api.deps import get_db
+from forge.api.program_scope import require_feature
 from forge.chat import adapter as chat_adapter
 from forge.chat.packs import PackIntegrityError
 from forge.chat.query_templates import TemplateValidationError
@@ -80,7 +81,11 @@ def _user_id_from(auth: AuthContext) -> uuid.UUID | None:
         return None
 
 
-@router.post("", response_model=ChatResponseModel)
+@router.post(
+    "",
+    response_model=ChatResponseModel,
+    dependencies=[Depends(require_feature("oracle_access"))],
+)
 async def chat_query(
     body: ChatRequest,
     auth: AuthContext = Depends(require_permission("chat:query")),
@@ -168,7 +173,10 @@ async def _sse_iterator(
         yield f"event: error\ndata: {err}\n\n".encode()
 
 
-@router.post("/stream")
+@router.post(
+    "/stream",
+    dependencies=[Depends(require_feature("oracle_access"))],
+)
 async def chat_stream(
     body: ChatRequest,
     auth: AuthContext = Depends(require_permission("chat:query")),

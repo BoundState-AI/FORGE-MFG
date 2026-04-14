@@ -35,6 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from forge.api.auth import AuthContext, require_permission
 from forge.api.deps import get_db
+from forge.api.program_scope import require_feature
 from forge.schemas.schedule import (
     CpmNodeOut,
     CriticalPathOut,
@@ -52,7 +53,15 @@ from forge.schemas.schedule import (
 )
 from forge.services import schedule_service as sched_svc
 
-router = APIRouter(prefix="/api/schedules", tags=["schedules"])
+# Router-level dependency: every schedule route is gated by the
+# program's schedule_enabled flag (UX spec v1.4.2 §5.7, §6.7).  Putting
+# the gate on the router rather than each handler ensures a new endpoint
+# added later cannot accidentally bypass the flag.
+router = APIRouter(
+    prefix="/api/schedules",
+    tags=["schedules"],
+    dependencies=[Depends(require_feature("schedule_enabled"))],
+)
 
 
 # ---------------------------------------------------------------------------

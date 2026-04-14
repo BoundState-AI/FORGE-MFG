@@ -40,12 +40,24 @@ class RoleOut(BaseModel):
 
 
 class ProgramOut(BaseModel):
-    """Program summary for access-scoping display (spec §5.0.3)."""
+    """Program summary for access-scoping display (build spec §5.0.3).
+
+    Feature flags are exposed alongside identity fields because the
+    frontend consumes them on every render path (UX spec v1.4.2 §1.4
+    drives navigation visibility off schedule_enabled and oracle_access;
+    §5.3 derives the dashboard overdue rule off overdue_threshold_hours).
+    Embedding them in the standard Program payload removes a second
+    round-trip and keeps the wire shape identical wherever a Program
+    is returned (admin programs CRUD, user.program_memberships, etc.).
+    """
 
     id: uuid.UUID
     code: str
     name: str
     active: bool
+    schedule_enabled: bool
+    oracle_access: bool
+    overdue_threshold_hours: int
 
     model_config = {"from_attributes": True}
 
@@ -101,17 +113,39 @@ class ProgramAssign(BaseModel):
 
 
 class ProgramCreate(BaseModel):
-    """Request body for POST /api/admin/programs."""
+    """Request body for POST /api/admin/programs.
+
+    Feature flags are optional on create and fall back to the model /
+    DB defaults (schedule_enabled=true, oracle_access=false,
+    overdue_threshold_hours=24).  This matches the rollout intent: a
+    new program ships with schedule visible, chat opted out, and the
+    standard 24-hour overdue threshold.
+    """
 
     code: str = Field(max_length=50)
     name: str = Field(max_length=200)
+    schedule_enabled: bool | None = None
+    oracle_access: bool | None = None
+    # Bound at 1..720 hours (1 hour to 30 days) — anything beyond a
+    # month is functionally "never overdue" and almost certainly a
+    # data-entry mistake on the admin form.
+    overdue_threshold_hours: int | None = Field(default=None, ge=1, le=720)
 
 
 class ProgramUpdate(BaseModel):
-    """Request body for PATCH /api/admin/programs/{id}."""
+    """Request body for PATCH /api/admin/programs/{id}.
+
+    All fields optional — admin can toggle a single flag without
+    re-sending the whole record.  None means "leave unchanged" at the
+    service layer (model_dump(exclude_unset=True) is the canonical
+    pattern in admin_service).
+    """
 
     name: str | None = None
     active: bool | None = None
+    schedule_enabled: bool | None = None
+    oracle_access: bool | None = None
+    overdue_threshold_hours: int | None = Field(default=None, ge=1, le=720)
 
 
 class DeadLetterOut(BaseModel):
