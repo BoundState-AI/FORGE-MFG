@@ -104,6 +104,30 @@ class HoldPointStatus(enum.StrEnum):
     blocked = "blocked"
 
 
+class InspectionQueueState(enum.StrEnum):
+    """Server-derived Inspection Queue bucket (UX spec v1.5.1 §5.5.5).
+
+    The queue is a read-model over operations with an inspection hold.
+    State is derived from (a) current-cycle inspection history and
+    (b) the overdue-threshold clock on the parent program.  Buckets:
+
+    - pending: hold_point_status == pending (no current-cycle inspection).
+      These are the rows at the top of an inspector's worklist.
+    - conditional: hold_point_status == conditionally_satisfied.  Latest
+      current-cycle inspection was conditional; post-completion
+      resolution is allowed (spec §5.5.5).
+    - overdue: pending or conditional AND op has been in_progress longer
+      than the program's overdue_threshold_hours (spec §5.1).
+    - completed: hold_point_status == satisfied.  Historical — used by
+      qa_manager drill-through and audit review.
+    """
+
+    pending = "pending"
+    conditional = "conditional"
+    overdue = "overdue"
+    completed = "completed"
+
+
 class SignOffAction(enum.StrEnum):
     """Role-based sign-off decision on an operation (spec §3.1 SignOffEvent)."""
 

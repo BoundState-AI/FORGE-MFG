@@ -2,10 +2,11 @@
 """
 Module:   Inspection Schemas
 Purpose:  Pydantic request/response models for inspection and sign-off
-          endpoints (spec §5.4).
+          endpoints plus the Inspection Queue read-model row
+          (UX spec v1.5.1 §5.4, §5.5.5).
 
 BoundState AI 2026
-Version: 0.1.0
+Version: 0.2.0
 Classification: BoundState Proprietary
 
 Co-Authored-By: Claude "Beth" <noreply@anthropic.com>
@@ -23,6 +24,13 @@ Why this design:
   Keeping execution_cycle off the request body is a deliberate safety
   invariant: the client cannot forge a stale cycle to satisfy a hold
   that no longer applies.
+
+  InspectionQueueRowOut is an explicit read-model — one row per
+  inspection hold-point that currently has queue-relevant state —
+  NOT a serialized InspectionEvent.  The frontend queue renders from
+  this shape; raw events are still available via operation detail
+  (§5.4.8).  The read-model keeps event-shape concerns out of queue
+  UI code and lets the server own overdue / hold-point derivation.
 """
 
 from __future__ import annotations
@@ -32,7 +40,13 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
-from forge.models.enums import InspectionResult, SignOffAction
+from forge.models.enums import (
+    HoldPointStatus,
+    InspectionQueueState,
+    InspectionResult,
+    OpStatus,
+    SignOffAction,
+)
 
 
 class InspectionCreate(BaseModel):
@@ -89,3 +103,54 @@ class SignOffOut(BaseModel):
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class InspectionQueueRowOut(BaseModel):
+    """Single row in the Inspection Queue read-model (UX spec §5.5.5).
+
+    Keyed by operation_id — one row per operation with queue-relevant
+    hold-point state.  The row mixes the operation, its parent WO,
+    and (for conditional rows) the latest current-cycle conditional
+    inspection the inspector is being asked to resolve.
+
+    Field notes:
+    - program_id: pulled through the WO join; enables the §3.2 auto-
+      switch behavior in the frontend when a cross-program deep-link
+      lands on a conditional row.
+    - state: the server-assigned queue bucket per §5.5.5 (pending /
+      conditional / overdue / completed).  The frontend does not
+      re-derive this.
+    - hold_point_status: the §5.4.3 operation-level hold status; kept
+      alongside `state` so queue rows carry the same vocabulary the
+      operation detail surface uses (prevents drift between queue
+      copy and detail page copy).
+    - is_overdue / overdue_since: null when the op has not crossed
+      the program's overdue_threshold_hours.  overdue_since is the
+      moment the op became overdue, computed server-side from
+      started_at + overdue_threshold_hours — stable across polls so
+      "time overdue" can be rendered by the client.
+    - conditional_inspection_id: present ONLY on state=conditional
+      rows.  The frontend passes this as `?resolves=<id>` on the
+      Inspection Form link (§5.5.5, R5-R2-ISSUE-006).  Null for all
+      other states.
+    - inspected_at: the timestamp of the inspection that drove the
+      row's current hold_point_status (pending → null).
+    """
+
+    operation_id: uuid.UUID
+    work_order_id: uuid.UUID
+    program_id: uuid.UUID
+    work_order_number: str
+    sequence_number: int
+    description: str
+    operation_status: OpStatus
+    hold_point_status: HoldPointStatus
+    state: InspectionQueueState
+    safety_critical: bool
+    is_overdue: bool
+    overdue_since: datetime | None
+    conditional_inspection_id: uuid.UUID | None
+    inspected_at: datetime | None
+    updated_at: datetime
+
+    model_config = {"from_attributes": False}

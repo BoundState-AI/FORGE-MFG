@@ -32,6 +32,7 @@ from .enums import (  # noqa: F401
     DocumentType,
     EventType,
     HoldPointStatus,
+    InspectionQueueState,
     InspectionResult,
     LinkType,
     MilestoneStatus,

@@ -251,7 +251,8 @@ ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
         "part:read", "doc:read", "sched:read", "dash:read", "chat:query",
     }),
     "inspector": frozenset({
-        "inspect:create", "inspect:sign_off", "mat:receive", "mat:accept",
+        "inspect:create", "inspect:sign_off", "inspect:read",
+        "mat:receive", "mat:accept",
         "ncr:create", "doc:read", "doc:upload", "wo:read", "op:read",
         "ncr:read", "part:read", "sched:read", "dash:read", "chat:query",
     }),
@@ -270,6 +271,11 @@ ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
         "sched:create", "sched:baseline", "sched:what_if", "labor:update_any",
         "doc:create", "doc:read", "doc:upload", "doc:finalize", "wo:read",
         "op:read", "ncr:read", "part:read", "sched:read", "dash:read",
+        # inspect:read: drill-through read-only per UX spec v1.5.1 §3.1
+        # footnote 4.  qa_manager cannot record inspections (no
+        # inspect:create) but must see the queue to resolve Dashboard
+        # tiles.  Added alongside the §5.5.5 queue surface.
+        "inspect:read",
         "chat:query",
     }),
     "program_manager": frozenset({
