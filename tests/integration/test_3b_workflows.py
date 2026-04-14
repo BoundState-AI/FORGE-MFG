@@ -309,6 +309,7 @@ class Test3BWorkflows:
 
     @pytest.mark.asyncio
     async def test_cross_program_receive_denied(self) -> None:
+        """Cross-program receive returns 404 per UX spec §3.2 / §6.7.4."""
         doc = await self._make_doc()
         self._override_as(
             RECEIVER_USER_ID, roles=["inspector"], programs=["OTHER-PROG"],
@@ -329,7 +330,7 @@ class Test3BWorkflows:
                 headers={"Idempotency-Key": str(uuid.uuid4())},
             )
         self._clear_override()
-        assert r.status_code == 403
+        assert r.status_code == 404
 
     # ------------------------------------------------------------------
     # Materials — accept + SOD-003
@@ -710,6 +711,7 @@ class Test3BWorkflows:
 
     @pytest.mark.asyncio
     async def test_cross_program_part_create_denied(self) -> None:
+        """Cross-program create returns 404 per UX spec §3.2 / §6.7.4."""
         self._override_as(
             OPERATOR_USER_ID, roles=["operator"], programs=["OTHER-PROG"],
         )
@@ -724,7 +726,7 @@ class Test3BWorkflows:
                 headers={"Idempotency-Key": str(uuid.uuid4())},
             )
         self._clear_override()
-        assert r.status_code == 403
+        assert r.status_code == 404
 
     @pytest.mark.asyncio
     async def test_update_part_status(self) -> None:

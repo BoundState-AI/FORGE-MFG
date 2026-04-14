@@ -105,20 +105,26 @@ async def get_work_order(
 ) -> WorkOrder:
     """Load a work order by ID, enforcing program scope.
 
-    Spec §5.0.3: program-scope filtering is enforced at the service
-    layer.  If the user's programs don't include the WO's program,
-    it appears as 403.  Wildcard "*" bypasses (local dev only).
+    UX spec v1.5.1 §3.2 / §6.7.4: cross-program access returns **404,
+    not 403** — surfacing 403 would confirm the entity exists in a
+    program the caller cannot see and leak cross-program metadata.
+    The shape is intentionally indistinguishable from "no such record."
+
+    Wildcard "*" in the caller's claim bypasses the membership check
+    (local-dev parity).  Build spec §5.0.3 keeps program-scope
+    enforcement at the service layer.
     """
     wo = await session.get(WorkOrder, wo_id)
     if wo is None:
         raise HTTPException(status_code=404, detail="Work order not found")
     if program_codes is not None and "*" not in program_codes:
-        # Need to check the program code — load the program relationship
+        # Load the program relationship to compare against the caller's
+        # claim values (today: program codes; eventually: program UUIDs
+        # per the auth-claim-shape migration).
         await session.refresh(wo, ["program"])
         if wo.program.code not in program_codes:
             raise HTTPException(
-                status_code=403,
-                detail="No access to this work order's program",
+                status_code=404, detail="Work order not found",
             )
     return wo
 

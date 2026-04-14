@@ -251,7 +251,11 @@ class TestNCRWorkflow:
 
     @pytest.mark.asyncio
     async def test_cross_program_create_denied(self) -> None:
-        """Program scope: cannot create an NCR against a WO in another program."""
+        """Program scope: cannot create an NCR against a WO in another program.
+
+        UX spec v1.5.1 §3.2 / §6.7.4: cross-program access returns 404
+        (not 403) to prevent existence leaks across programs.
+        """
         wo = await self._make_wo()
 
         # Switch to a user with a different program
@@ -268,7 +272,7 @@ class TestNCRWorkflow:
                 headers={"Idempotency-Key": str(uuid.uuid4())},
             )
         self._clear_override()
-        assert resp.status_code == 403
+        assert resp.status_code == 404
 
     # ------------------------------------------------------------------
     # Read
@@ -300,6 +304,7 @@ class TestNCRWorkflow:
 
     @pytest.mark.asyncio
     async def test_cross_program_get_denied(self) -> None:
+        """Cross-program detail GET returns 404 per UX spec §3.2 / §6.7.4."""
         wo = await self._make_wo()
         ncr = await self._create_ncr(wo["id"])
 
@@ -309,7 +314,7 @@ class TestNCRWorkflow:
         async with await self._client() as client:
             resp = await client.get(f"/api/ncrs/{ncr['id']}")
         self._clear_override()
-        assert resp.status_code == 403
+        assert resp.status_code == 404
 
     # ------------------------------------------------------------------
     # Disposition + SOD-002

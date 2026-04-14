@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
 Module:   Program Scope Middleware
-Purpose:  Enforce the X-Program-Id wire contract from UX spec v1.4.2 §6.7
+Purpose:  Enforce the X-Program-Id wire contract from UX spec v1.5.1 §6.7
           on every non-bypass request, populating request.state.program_id
           for downstream feature-flag and service-layer enforcement.
 
 BoundState AI 2026
-Version: 0.1.0
+Version: 0.2.0
 Classification: BoundState Proprietary
 
 Co-Authored-By: Claude "Beth" <noreply@anthropic.com>
@@ -34,9 +34,27 @@ Why this design:
     FEATURE_DISABLED             403  per-program feature flag off
                                        (raised by require_feature, not here)
 
+  Two R5 exceptions to the basic contract:
+
+  - Admin namespace bypass (§6.7, R5-R2-ISSUE-008): /api/admin/* is
+    program-agnostic and exempt from the header entirely.  Admin
+    routes manage cross-program identity/configuration; the header
+    would be meaningless on them.  Authorization for admin routes is
+    the route's `Depends(require_permission("admin:manage"))`.
+
+  - Entity-detail GET exception (§6.7.4): GET /api/<resource>/<uuid>
+    skips the header membership comparison so a deep-link auto-switch
+    (header carries the user's currently-selected program; entity
+    lives in a different assigned program) reaches the service layer.
+    Authorization there checks entity.program_id ∈ memberships and
+    returns 404-not-403 on cross-program (§3.2 existence-leak rule).
+
+  Admin role implicitly satisfies any membership check (§6.7.2,
+  R5-R1-ISSUE-011) so admins do not require explicit memberships.
+
   Local-dev mode (auth_mode != "cognito") is a pass-through: the
   header is parsed if present so the frontend can develop against the
-  contract, but absence is not a 4xx.  This keeps the existing 301-
+  contract, but absence is not a 4xx.  This keeps the pre-existing
   test suite green — none of those tests send the header — while
   letting the new contract tests opt in by setting auth_mode="cognito".
 
@@ -53,7 +71,6 @@ from __future__ import annotations
 
 import logging
 import uuid
-from collections.abc import Iterable
 from typing import Final
 
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
@@ -80,7 +97,15 @@ logger = logging.getLogger(__name__)
 # to thread the program-scope contract through every probe.  The
 # prefix is dev-only — the route registry never exposes /test/* in
 # production deployments.
-PUBLIC_PREFIXES: Final[tuple[str, ...]] = ("/api/auth/", "/test/")
+# /api/admin/ is program-agnostic per UX spec v1.5.1 §6.7 (R5-R2-ISSUE-008):
+# admin endpoints manage cross-program identity and configuration and the
+# header would be meaningless on them.  Admin role authority is enforced
+# by the route's permission dependency, not by program scope.
+PUBLIC_PREFIXES: Final[tuple[str, ...]] = (
+    "/api/auth/",
+    "/api/admin/",
+    "/test/",
+)
 PUBLIC_PATHS: Final[frozenset[str]] = frozenset({
     "/health",
     "/api/health",
@@ -110,8 +135,44 @@ MULTI_PROGRAM_ENDPOINTS: Final[frozenset[tuple[str, str]]] = frozenset({
 })
 
 
+# ---------------------------------------------------------------------------
+# Entity-detail GET exception (UX spec v1.5.1 §6.7.4).
+# ---------------------------------------------------------------------------
+# Spec §6.7.4: "Entity-detail GET endpoints — those that fetch a single
+# entity by its ID from the URL — authorize by checking whether the
+# entity's program_id is in the caller's program_memberships, not by
+# checking whether X-Program-Id matches the entity's program."
+#
+# Rationale: a deep-link to an entity in a non-current program (with
+# the auto-switch UX in §3.2) sends the user's CURRENT selector as the
+# header, which won't match the entity's program.  The header still
+# stamps request.state.program_id for logging and audit, but the
+# membership comparison against the header is skipped — service-layer
+# entity.program_id checks become the authorization gate (with 404 on
+# cross-program per §3.2 to prevent existence leaks).
+#
+# Match shape: GET request whose path is exactly
+#   /api/<resource>/<uuid-segment>
+# where <resource> is an enumerated entity-detail surface and there
+# are no further path segments.  Sub-paths (`/audit`, `/traceability`,
+# `/operations`) are intentionally excluded — they may carry their own
+# authorization rules.
+ENTITY_DETAIL_RESOURCES: Final[frozenset[str]] = frozenset({
+    "work-orders",
+    "operations",
+    "ncrs",
+    "parts",
+    "material-certs",
+    "documents",
+    "calendars",
+    "schedules",
+    "inspections",
+})
+
+
 PROGRAM_HEADER: Final[str] = "X-Program-Id"
 WILDCARD: Final[str] = "*"
+ADMIN_ROLE: Final[str] = "admin"
 
 
 def _is_bypass(path: str, method: str) -> bool:
@@ -131,6 +192,29 @@ def _is_bypass(path: str, method: str) -> bool:
 def _supports_multi_program(method: str, path: str) -> bool:
     """Whether the route accepts X-Program-Id: * per spec §5.2."""
     return (method, path) in MULTI_PROGRAM_ENDPOINTS
+
+
+def _is_entity_detail_get(method: str, path: str) -> bool:
+    """Whether the request is a §6.7.4 entity-detail GET.
+
+    Entity-detail GETs match exactly `GET /api/<resource>/<uuid>` with
+    no further path segments and a known resource name.  They are
+    exempt from header-based membership comparison; the service layer
+    is responsible for verifying entity.program_id ∈ caller memberships
+    and returning 404 on cross-program (spec §3.2 / §6.7.4).
+    """
+    if method != "GET":
+        return False
+    parts = path.strip("/").split("/")
+    if len(parts) != 3:
+        return False
+    if parts[0] != "api" or parts[1] not in ENTITY_DETAIL_RESOURCES:
+        return False
+    try:
+        uuid.UUID(parts[2])
+    except (ValueError, AttributeError):
+        return False
+    return True
 
 
 def _error(code: str, status: int, message: str) -> JSONResponse:
@@ -164,19 +248,75 @@ def _parse_program_id(raw: str) -> str | None:
         return None
 
 
-def _membership_includes(programs: Iterable[str], program_id: str) -> bool:
-    """Membership check that tolerates wildcard claims (local dev only).
+def _membership_includes(
+    auth: AuthContext, program_id: str,
+) -> bool:
+    """Membership check honoring wildcard claims and the admin exemption.
 
-    The Cognito Pre Token Generation trigger emits custom:programs as
-    a list of program UUIDs.  Local-dev mode injects ["*"] so a single
-    auth context can act on every program in tests.  The wildcard
-    short-circuit preserves that ergonomics while real Cognito users
-    are still required to have an explicit membership for the
-    requested program.
+    Three accept paths:
+
+    1. Admin role — UX spec v1.5.1 §6.7.2 (R5-R1-ISSUE-011): "Users with
+       the admin role are implicitly authorized for all programs."  No
+       explicit membership entry is required.
+    2. Wildcard claim ("*" in custom:programs) — local-dev path so a
+       single auth context can act on every program in tests.
+    3. Explicit membership — the requested UUID appears in the caller's
+       custom:programs claim.
     """
-    if WILDCARD in programs:
+    if ADMIN_ROLE in auth.roles:
         return True
-    return program_id in programs
+    if WILDCARD in auth.programs:
+        return True
+    return program_id in auth.programs
+
+
+def _authorize_parsed_program(
+    request: Request, program_id: str, auth: AuthContext | None,
+) -> JSONResponse | None:
+    """Authorize a successfully-parsed X-Program-Id value.
+
+    Returns a JSONResponse on rejection (the dispatcher returns it
+    directly) or None on success (the dispatcher stamps state and
+    proceeds).  Split out from `dispatch` so each function stays
+    under the Tier-1 ~50-line guideline while preserving the linear
+    "guard chain" reading order that matches the spec §6.7 contract.
+    """
+    # Wildcard scope — only valid on the multi-program allowlist (§5.2).
+    if program_id == WILDCARD:
+        if not _supports_multi_program(request.method, request.url.path):
+            return _error(
+                "MULTI_PROGRAM_NOT_SUPPORTED", 400,
+                "This endpoint requires a single program scope",
+            )
+        request.state.program_id = WILDCARD
+        return None
+
+    # Single-program scope: AuthContext must already be populated by
+    # AuthMiddleware.  Its absence on a non-bypass route signals an
+    # auth-chain misorder that should already have been a 401 upstream;
+    # treat as MISSING_PROGRAM_CONTEXT defensively rather than 500.
+    if auth is None:
+        return _error(
+            "MISSING_PROGRAM_CONTEXT", 400,
+            "Auth context unavailable for program-scope check",
+        )
+
+    # §6.7.4 entity-detail exemption: stamp the header for logging/audit
+    # but skip header-vs-membership comparison so deep-link auto-switch
+    # (current selector ≠ entity's program, both assigned) reaches the
+    # service layer where entity.program_id authorization is enforced.
+    if _is_entity_detail_get(request.method, request.url.path):
+        request.state.program_id = program_id
+        return None
+
+    if not _membership_includes(auth, program_id):
+        return _error(
+            "PROGRAM_NOT_ASSIGNED", 403,
+            "Caller is not assigned to the requested program",
+        )
+
+    request.state.program_id = program_id
+    return None
 
 
 class ProgramScopeMiddleware(BaseHTTPMiddleware):
@@ -185,7 +325,8 @@ class ProgramScopeMiddleware(BaseHTTPMiddleware):
     Enforces the four-state error contract from spec §6.7 in cognito
     mode; in local/test mode it parses the header opportunistically
     but never rejects on absence.  See module docstring for the full
-    state machine.
+    state machine, the admin-namespace bypass, and the §6.7.4
+    entity-detail GET exception.
     """
 
     async def dispatch(
@@ -201,12 +342,11 @@ class ProgramScopeMiddleware(BaseHTTPMiddleware):
             getattr(request.app.state, "settings", None) or get_settings()
         )
         # Enforcement gate: full contract in cognito mode, opportunistic
-        # parsing in local/test so the existing 301-test suite (none of
+        # parsing in local/test so the pre-existing test suite (none of
         # which send the header) keeps passing without modification.
         enforce = settings.auth_mode == "cognito"
 
         raw = request.headers.get(PROGRAM_HEADER)
-
         if raw is None:
             if enforce:
                 return _error(
@@ -229,33 +369,8 @@ class ProgramScopeMiddleware(BaseHTTPMiddleware):
             request.state.program_id = None
             return await call_next(request)
 
-        # Wildcard handling — only valid on the multi-program allowlist.
-        if program_id == WILDCARD:
-            if not _supports_multi_program(request.method, request.url.path):
-                return _error(
-                    "MULTI_PROGRAM_NOT_SUPPORTED", 400,
-                    "This endpoint requires a single program scope",
-                )
-            request.state.program_id = WILDCARD
-            return await call_next(request)
-
-        # Single-program scope — caller must be a member of the program.
-        # Membership is sourced from the AuthContext populated by
-        # AuthMiddleware; an empty/missing context on a non-bypass route
-        # means the auth chain failed to populate state and the request
-        # should already have been rejected upstream.
         auth: AuthContext | None = getattr(request.state, "auth", None)
-        if auth is None:
-            return _error(
-                "MISSING_PROGRAM_CONTEXT", 400,
-                "Auth context unavailable for program-scope check",
-            )
-
-        if not _membership_includes(auth.programs, program_id):
-            return _error(
-                "PROGRAM_NOT_ASSIGNED", 403,
-                "Caller is not assigned to the requested program",
-            )
-
-        request.state.program_id = program_id
+        rejection = _authorize_parsed_program(request, program_id, auth)
+        if rejection is not None:
+            return rejection
         return await call_next(request)

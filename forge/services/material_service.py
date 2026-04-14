@@ -104,15 +104,21 @@ async def _program_code_for_id(
 def _require_program_access(
     program_code: str, program_codes: list[str] | None,
 ) -> None:
-    """Raise 403 if the caller is not in the required program."""
+    """Raise 404 if the caller is not in the required program.
+
+    UX spec v1.5.1 §3.2 / §6.7.4: cross-program access returns 404,
+    not 403, to prevent existence leaks.  The detail message is kept
+    generic for the same reason — even the message would otherwise
+    confirm that an entity exists in a program the caller cannot see.
+    """
     if program_codes is None:
         return
     if "*" in program_codes:
         return
     if program_code not in program_codes:
         raise HTTPException(
-            status_code=403,
-            detail="No access to this material certification's program",
+            status_code=404,
+            detail="Material certification not found",
         )
 
 

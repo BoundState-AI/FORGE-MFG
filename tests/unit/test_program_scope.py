@@ -79,12 +79,19 @@ def _make_app(
     auth_mode: str,
     *,
     membership_program_ids: list[str] | None = None,
+    roles: list[str] | None = None,
 ) -> Any:
     """Build a fresh FastAPI app wired for a specific auth_mode and
     impersonation context.
 
     membership_program_ids is the value placed into AuthContext.programs
     (UUID strings or '*').  Defaults to ['*'] for local-dev parity.
+
+    roles defaults to a full multi-role grant INCLUDING admin — useful
+    for the feature-flag and local-dev tests that don't exercise the
+    membership contract.  Membership-contract tests (PROGRAM_NOT_ASSIGNED)
+    must pass a non-admin role list to bypass the §6.7.2 admin implicit
+    pass.
     """
     from forge.api.app import create_app
     from forge.api.auth import ROLE_PERMISSIONS, AuthContext
@@ -106,7 +113,7 @@ def _make_app(
     app.state.auth_override = AuthContext(
         sub=_SYSTEM_USER_ID,
         username="test-user",
-        roles=["admin", "engineer", "operator", "inspector"],
+        roles=roles or ["admin", "engineer", "operator", "inspector"],
         programs=membership_program_ids or ["*"],
         permissions=frozenset(perms),
     )
@@ -188,11 +195,15 @@ class TestProgramScopeHeader:
     @pytest.fixture()
     def app(self) -> Any:
         # The caller is a member of one specific program; an unrelated
-        # UUID will be used to exercise the not-assigned path.
+        # UUID will be used to exercise the not-assigned path.  Roles
+        # are restricted to engineer to bypass the §6.7.2 admin implicit
+        # pass — otherwise PROGRAM_NOT_ASSIGNED would never surface for
+        # this caller regardless of the header value.
         self._member_id = str(uuid.uuid4())
         return _make_app(
             "cognito",
             membership_program_ids=[self._member_id],
+            roles=["engineer"],
         )
 
     @pytest.fixture()
@@ -292,6 +303,90 @@ class TestProgramScopeHeader:
         # there are no rows; either way it must not be a 400 from the
         # wildcard check.
         assert resp.status_code != 400
+
+    @pytest.mark.asyncio
+    async def test_admin_namespace_bypasses_program_header(
+        self, client: Any
+    ) -> None:
+        """/api/admin/* is program-agnostic per spec §6.7 (R5-R2-ISSUE-008).
+
+        Admin endpoints manage cross-program identity and configuration;
+        the header would be meaningless on them.  Caller must NOT receive
+        MISSING_PROGRAM_CONTEXT even when the header is omitted.
+        """
+        resp = await client.get("/api/admin/users")
+        # 200 / 404 / other auth-driven status all acceptable; the
+        # assertion is that the program-scope middleware did not fire.
+        if resp.status_code == 400:
+            assert (
+                resp.json().get("error", {}).get("code")
+                != "MISSING_PROGRAM_CONTEXT"
+            )
+
+    @pytest.mark.asyncio
+    async def test_entity_detail_get_skips_membership_check(
+        self, client: Any
+    ) -> None:
+        """§6.7.4: entity-detail GETs do NOT trigger PROGRAM_NOT_ASSIGNED.
+
+        A deep-link to an entity in a non-current-selector program (with
+        the auto-switch UX in §3.2) sends the user's CURRENT selector as
+        the header.  The header value won't match the entity's program,
+        but the middleware must still let the request through so the
+        service layer can authorize via entity.program_id membership.
+
+        We probe with a random UUID against /api/work-orders/{uuid}.
+        The request must reach the route (which 404s on the random
+        UUID) — the assertion is that we do NOT see a 403
+        PROGRAM_NOT_ASSIGNED from the middleware even though the header
+        UUID is unrelated to caller memberships.
+        """
+        unrelated_program = str(uuid.uuid4())
+        random_wo_id = str(uuid.uuid4())
+        resp = await client.get(
+            f"/api/work-orders/{random_wo_id}",
+            headers={"X-Program-Id": unrelated_program},
+        )
+        assert resp.status_code != 403
+        if resp.status_code == 400:
+            assert (
+                resp.json().get("error", {}).get("code")
+                != "PROGRAM_NOT_ASSIGNED"
+            )
+
+    @pytest.mark.asyncio
+    async def test_admin_role_membership_implicit_pass(self) -> None:
+        """§6.7.2 (R5-R1-ISSUE-011): admin role implicitly passes membership.
+
+        An admin caller with NO explicit memberships sending an
+        unrelated-UUID header on a non-detail single-program endpoint
+        must NOT get PROGRAM_NOT_ASSIGNED.
+        """
+        # Build an admin-only auth context with empty programs list.
+        from forge.api.auth import ROLE_PERMISSIONS, AuthContext
+
+        app = _make_app("cognito", membership_program_ids=[])
+        # Override the override to remove the wildcard / multi-role grant.
+        perms: set[str] = set()
+        for p in ROLE_PERMISSIONS.values():
+            perms |= p
+        app.state.auth_override = AuthContext(
+            sub=_SYSTEM_USER_ID,
+            username="admin-only",
+            roles=["admin"],  # admin role only
+            programs=[],  # NO explicit memberships
+            permissions=frozenset(perms),
+        )
+        c = await _client(app)
+        try:
+            resp = await c.get(
+                "/probe/single",
+                headers={"X-Program-Id": str(uuid.uuid4())},
+            )
+            # Membership check must pass via admin-role implicit grant.
+            assert resp.status_code == 200
+        finally:
+            await c.aclose()
 
 
 # ---------------------------------------------------------------------------

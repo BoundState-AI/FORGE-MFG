@@ -522,17 +522,18 @@ class TestWorkOrderLifecycle:
         )
 
         async with await self._client() as client:
-            # Try to get the WO — should be 403
+            # Try to get the WO — cross-program returns 404, not 403
+            # (UX spec v1.5.1 §3.2 / §6.7.4: existence leak prevention).
             resp = await client.get(f"/api/work-orders/{wo['id']}")
-            assert resp.status_code == 403
+            assert resp.status_code == 404
 
-            # Try to release — should also be 403
+            # Try to release — same 404 contract on cross-program writes.
             resp = await client.post(
                 f"/api/work-orders/{wo['id']}/release",
                 json={"version": wo["version"]},
                 headers={"Idempotency-Key": str(uuid.uuid4())},
             )
-            assert resp.status_code == 403
+            assert resp.status_code == 404
 
         self.app.state.auth_override = None
 
@@ -627,4 +628,5 @@ class TestWorkOrderLifecycle:
             )
 
         self.app.state.auth_override = None
-        assert resp.status_code == 403
+        # Cross-program returns 404 per UX spec v1.5.1 §3.2 / §6.7.4.
+        assert resp.status_code == 404

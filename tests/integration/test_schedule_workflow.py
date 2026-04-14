@@ -301,6 +301,7 @@ class TestScheduleWorkflow:
 
     @pytest.mark.asyncio
     async def test_cross_program_schedule_denied(self) -> None:
+        """Cross-program create returns 404 per UX spec §3.2 / §6.7.4."""
         cal = await self._make_calendar()
         wo = await self._make_wo()
 
@@ -320,7 +321,7 @@ class TestScheduleWorkflow:
                 headers={"Idempotency-Key": str(uuid.uuid4())},
             )
         self._clear_override()
-        assert r.status_code == 403
+        assert r.status_code == 404
 
     # ------------------------------------------------------------------
     # Schedule link CRUD + cycle detection

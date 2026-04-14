@@ -112,7 +112,9 @@ async def _get_ncr_in_scope(
     ncr = await session.get(NonconformanceReport, ncr_id)
     if ncr is None:
         raise HTTPException(status_code=404, detail="NCR not found")
-    # Side-effect: 403 if caller is not in the WO's program.
+    # Cross-program access returns 404 (UX spec §3.2 / §6.7.4) — the
+    # WO scope check below raises 404 if the caller is not in the
+    # parent WO's program, indistinguishable from "no such NCR".
     await get_work_order(
         session, ncr.work_order_id, program_codes=program_codes
     )
