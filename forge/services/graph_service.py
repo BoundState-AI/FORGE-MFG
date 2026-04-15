@@ -413,24 +413,19 @@ async def validate_graph_on_hold(
         # Clearing covers two cases (a) admin manual flip was
         # followed by an out-of-band graph repair, (b) the automated
         # DAG check flagged a transient state that has since
-        # resolved.  Flip + audit for traceability; same no-version-
-        # bump rationale as the set-true path.
+        # resolved.
+        #
+        # NO new audit event here.  The spec §6.6.1 audit vocabulary
+        # only names work_order.graph_fixed and graph_issue_reported
+        # for graph lifecycle; inventing work_order.graph_issue_cleared
+        # would drift from the spec.  The flag flip is persisted on
+        # the WO row (with updated_by + updated_at), and the prior
+        # graph_issue_reported audit entry already records when the
+        # flag was set — together they answer "when did this clear?"
+        # without a spec-extending event name.
         wo.has_graph_issue = False
         wo.updated_by = user_id
         await session.flush()
-
-        await create_audit_record(
-            session,
-            event_id=_uuid.uuid4(),
-            actor_type=ActorType.human,
-            user_id=user_id,
-            user_role=None,
-            action_type="work_order.graph_issue_cleared",
-            entity_type="work_order",
-            entity_id=wo.id,
-            before_state={"has_graph_issue": True},
-            after_state={"has_graph_issue": False},
-        )
 
     return GraphValidateOut(
         has_graph_issue=wo.has_graph_issue,
