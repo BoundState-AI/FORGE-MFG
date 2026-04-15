@@ -37,7 +37,6 @@ from forge.schemas.document import (
     DocumentCreate,
     DocumentFinalize,
     DocumentOut,
-    EvidenceUploadRequest,
     PresignedUploadOut,
 )
 from forge.services import document_service as doc_svc
@@ -140,22 +139,8 @@ async def finalize_document(
 
 
 # ---------------------------------------------------------------------------
-# /api/evidence/upload-url  (spec §5.8, permission inspect:create)
+# Evidence upload + confirm (Decision 1) live in forge.api.routes.evidence.
+# The legacy /api/evidence/upload-url lived here against the old flat
+# inspect:create permission; the new contract routes through a scope-aware
+# body in evidence.py with its own permission dispatch.
 # ---------------------------------------------------------------------------
-
-
-@router.post("/api/evidence/upload-url", response_model=PresignedUploadOut)
-async def issue_evidence_upload_url(
-    data: EvidenceUploadRequest,
-    auth: AuthContext = Depends(require_permission("inspect:create")),
-    settings: Settings = Depends(get_config),
-) -> PresignedUploadOut:
-    """Issue a presigned PUT URL for inspection evidence upload."""
-    del auth
-    presigned = await doc_svc.issue_evidence_upload_url(
-        data.operation_id, settings,
-    )
-    return PresignedUploadOut(
-        url=presigned.url, method=presigned.method,
-        s3_key=presigned.s3_key, expires_at=presigned.expires_at,
-    )

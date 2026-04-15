@@ -31,6 +31,7 @@ from .enums import (  # noqa: F401
     Disposition,
     DocumentType,
     EventType,
+    EvidenceScope,
     HoldPointStatus,
     InspectionQueueState,
     InspectionResult,
@@ -50,6 +51,7 @@ from .enums import (  # noqa: F401
     WOStatus,
 )
 from .event import DomainEvent, DomainEventDelivery  # noqa: F401
+from .evidence import EvidenceConfirmation  # noqa: F401
 from .idempotency import IdempotencyRecord  # noqa: F401
 from .inspection import InspectionEvent, SignOffEvent  # noqa: F401
 from .labor import LaborEntry  # noqa: F401

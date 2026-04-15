@@ -65,6 +65,7 @@ from sqlalchemy.orm import selectinload
 from forge.audit.logger import create_audit_record
 from forge.models.enums import (
     ActorType,
+    EvidenceScope,
     HoldPointStatus,
     InspectionQueueState,
     InspectionResult,
@@ -385,6 +386,24 @@ async def record_inspection(
     if sod_violation is not None:
         raise _violation_response(sod_violation)
 
+    # Hydrate evidence refs from the registry (build spec v1.4.2
+    # Decision 1).  The parent program is the op's WO program —
+    # evidence must belong to the same program as the inspected
+    # entity.  hydrate_refs_for_parent raises 422 with distinct
+    # codes on any format / scope / program / confirmation failure
+    # so the client can surface a targeted error.
+    from forge.services.evidence_service import hydrate_refs_for_parent
+    from forge.services.work_order_service import get_work_order
+    wo = await get_work_order(
+        session, op.work_order_id, program_codes=program_codes,
+    )
+    hydrated_refs = await hydrate_refs_for_parent(
+        session=session,
+        submitted=list(data.evidence_refs),
+        expected_scope=EvidenceScope.inspection_evidence,
+        expected_program_id=wo.program_id,
+    )
+
     now = datetime.now(UTC)
     event = InspectionEvent(
         operation_id=op_id,
@@ -393,7 +412,7 @@ async def record_inspection(
         criteria=data.criteria,
         result=data.result,
         measurements=data.measurements,
-        evidence_refs=data.evidence_refs,
+        evidence_refs=hydrated_refs,
         inspected_at=now,
         notes=data.notes,
         supersedes_inspection_id=data.supersedes_inspection_id,

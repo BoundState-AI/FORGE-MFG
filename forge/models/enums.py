@@ -321,3 +321,17 @@ class ActorType(enum.StrEnum):
 
     human = "human"
     system = "system"
+
+
+class EvidenceScope(enum.StrEnum):
+    """EvidenceConfirmation attribution scope (build spec §5.8 Decision 1).
+
+    Distinguishes inspection evidence from NCR remediation evidence so
+    the parent-entity program check, scope cross-check, and cleanup
+    query all have a single source of truth for "what is this blob
+    attached to?".  Documents are not in this enum — they use the
+    ControlledDocumentRef path, not the structured evidence registry.
+    """
+
+    inspection_evidence = "inspection_evidence"
+    ncr_evidence = "ncr_evidence"

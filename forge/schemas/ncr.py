@@ -73,8 +73,35 @@ class NCRClose(BaseModel):
     root_cause: str | None = Field(default=None, max_length=4000)
 
 
+class NCRPatch(BaseModel):
+    """Request body for PATCH /api/ncrs/{id} (build spec v1.4.2 Decision 1).
+
+    This slice restricts the patch surface to evidence refs — the
+    broader NCR-edit redesign is deliberately out of scope.
+    `evidence_refs` entries carry only s3_key; the service hydrates
+    structured metadata from the evidence_confirmations registry.
+    Replace semantics: the submitted list becomes the full
+    canonical list on success.
+    """
+
+    version: int
+    # Accept both dicts and bare strings at the schema layer so the
+    # service emits the UI-facing EVIDENCE_FORMAT_INVALID code
+    # rather than Pydantic's generic dict_type validation error.
+    # The service rejects bare strings and hydrates dicts from the
+    # registry.
+    evidence_refs: list[dict[str, object] | str] = Field(
+        default_factory=list,
+    )
+
+
 class NCROut(BaseModel):
-    """NCR projected for API responses."""
+    """NCR projected for API responses.
+
+    `evidence_refs` echoes the persisted structured refs.  Legacy
+    rows may carry bare-string entries — the read path tolerates
+    that shape until the cleanup job hydrates all rows.
+    """
 
     id: uuid.UUID
     ncr_number: str
@@ -92,6 +119,7 @@ class NCROut(BaseModel):
     mrb_authority_id: uuid.UUID | None
     schedule_impact_days: int | None
     initiated_by_id: uuid.UUID
+    evidence_refs: list[dict[str, object] | str]
     version: int
     created_at: datetime
     updated_at: datetime

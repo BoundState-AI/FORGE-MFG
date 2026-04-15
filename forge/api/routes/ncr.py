@@ -25,16 +25,17 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from forge.api.auth import AuthContext, require_permission
+from forge.api.auth import AuthContext, get_auth_context, require_permission
 from forge.api.deps import get_db
 from forge.schemas.ncr import (
     NCRClose,
     NCRCreate,
     NCRDisposition,
     NCROut,
+    NCRPatch,
 )
 from forge.services import ncr_service as ncr_svc
 
@@ -104,6 +105,41 @@ async def disposition_ncr(
     Enforcement happens in the service layer.
     """
     ncr = await ncr_svc.disposition_ncr(
+        session, ncr_id, data, uuid.UUID(auth.sub),
+        program_codes=auth.programs,
+    )
+    await session.commit()
+    await session.refresh(ncr)
+    return NCROut.model_validate(ncr)
+
+
+@router.patch("/{ncr_id}", response_model=NCROut)
+async def patch_ncr(
+    ncr_id: uuid.UUID,
+    data: NCRPatch,
+    auth: AuthContext = Depends(get_auth_context),
+    session: AsyncSession = Depends(get_db),
+) -> NCROut:
+    """Replace evidence_refs on an NCR (build spec v1.4.2 Decision 1).
+
+    Permissions: ncr:disposition OR ncr:close — either role is
+    authorized to attach completion evidence during the remediation
+    cycle.  Since a FastAPI dep cannot OR two permissions, the
+    check is inline here.  Any other NCR-edit surface stays off
+    this route; broader NCR edits are a separate slice.
+    """
+    if not (
+        auth.has_permission("ncr:disposition")
+        or auth.has_permission("ncr:close")
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Missing required permission: ncr:disposition "
+                "or ncr:close"
+            ),
+        )
+    ncr = await ncr_svc.patch_ncr(
         session, ncr_id, data, uuid.UUID(auth.sub),
         program_codes=auth.programs,
     )

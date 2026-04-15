@@ -425,7 +425,15 @@ class TestNCRWorkflow:
 
     @pytest.mark.asyncio
     async def test_full_workflow_create_disposition_close(self) -> None:
-        """Done-means: full create → disposition → close path succeeds."""
+        """Done-means: full create → disposition → close path succeeds.
+
+        Uses `use_as_is` disposition so the test stays focused on
+        the lifecycle state machine rather than the Decision-1
+        evidence gate (which is exercised in
+        tests/integration/test_evidence_registry.py).  rework /
+        repair dispositions now require non-empty evidence_refs at
+        close per build spec v1.4.2 Decision 1.
+        """
         wo = await self._make_wo()
         ncr = await self._create_ncr(wo["id"])
 
@@ -436,8 +444,8 @@ class TestNCRWorkflow:
                 f"/api/ncrs/{ncr['id']}/disposition",
                 json={
                     "version": ncr["version"],
-                    "disposition": "repair",
-                    "disposition_rationale": "Local weld repair per WPS-117",
+                    "disposition": "use_as_is",
+                    "disposition_rationale": "Within tolerance on review",
                 },
             )
             assert r.status_code == 200, r.text

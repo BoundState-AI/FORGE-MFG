@@ -38,14 +38,20 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from forge.audit.logger import create_audit_record
-from forge.models.enums import ActorType, Disposition, NCRStatus
+from forge.models.enums import (
+    ActorType,
+    Disposition,
+    EvidenceScope,
+    NCRStatus,
+)
 from forge.models.ncr import NonconformanceReport
 from forge.rules.separation_of_duties import (
     SoDViolation,
     check_sod_002_ncr_disposition,
 )
 from forge.rules.status_transitions import validate_ncr_transition
-from forge.schemas.ncr import NCRClose, NCRCreate, NCRDisposition
+from forge.schemas.ncr import NCRClose, NCRCreate, NCRDisposition, NCRPatch
+from forge.services.evidence_service import hydrate_refs_for_parent
 from forge.services.versioning import (
     VersionConflictError,
     check_version,
@@ -381,6 +387,29 @@ async def close_ncr(
             ),
         )
 
+    # Build spec v1.4.2 Decision 1: close requires non-empty evidence
+    # for rework / repair dispositions.  use_as_is / scrap remain
+    # closeable without evidence.  Pending is blocked by the
+    # transition map (can't close an open NCR), so disposition is
+    # guaranteed to be one of use_as_is / rework / repair / scrap
+    # at this point.
+    if (
+        ncr.disposition in (Disposition.rework, Disposition.repair)
+        and not ncr.evidence_refs
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "EVIDENCE_REQUIRED_FOR_CLOSE",
+                "message": (
+                    "Completion evidence is required to close a "
+                    f"{ncr.disposition.value}-dispositioned NCR; "
+                    "attach evidence via "
+                    "PATCH /api/ncrs/{id} before close"
+                ),
+            },
+        )
+
     before_status_close = ncr.status.value
     ncr.status = NCRStatus.closed
     if data.root_cause is not None:
@@ -415,5 +444,84 @@ async def close_ncr(
             "before": before_status_close,
             "after": ncr.status.value,
         },
+    )
+    return ncr
+
+
+# ---------------------------------------------------------------------------
+# Patch (build spec v1.4.2 Decision 1 — evidence write contract)
+# ---------------------------------------------------------------------------
+
+
+async def patch_ncr(
+    session: AsyncSession,
+    ncr_id: _uuid.UUID,
+    data: NCRPatch,
+    user_id: _uuid.UUID,
+    program_codes: list[str] | None = None,
+) -> NonconformanceReport:
+    """Replace evidence_refs on an NCR that is not yet closed.
+
+    State leaving: ncr.status ∈ {open, dispositioned}.
+    State entering: same status; evidence_refs replaced with the
+    hydrated canonical refs from the evidence_confirmations registry.
+
+    Invariants (in order):
+      1. NCR exists and caller has program scope (404 on mismatch).
+      2. Optimistic version matches.
+      3. NCR is not closed — closed NCRs are terminal.
+      4. Submitted refs are structured (no bare strings).
+      5. Each ref resolves to a confirmed registry row whose scope
+         is ncr_evidence and whose program matches the parent WO's
+         program.
+
+    Replace semantics (not append): the client sends the full
+    desired list; the server persists exactly that list after
+    hydration.  This matches the UX spec §5.6.4 remediation-
+    evidence list pattern.
+    """
+    ncr = await _get_ncr_in_scope(session, ncr_id, program_codes)
+
+    try:
+        check_version(ncr, data.version, entity_type="NonconformanceReport")
+    except VersionConflictError as e:
+        raise version_conflict_response(e) from e
+
+    if ncr.status == NCRStatus.closed:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "NCR_CLOSED_IMMUTABLE",
+                "message": "Closed NCRs cannot be modified",
+            },
+        )
+
+    wo = await get_work_order(
+        session, ncr.work_order_id, program_codes=program_codes,
+    )
+    hydrated_refs = await hydrate_refs_for_parent(
+        session=session,
+        submitted=list(data.evidence_refs),
+        expected_scope=EvidenceScope.ncr_evidence,
+        expected_program_id=wo.program_id,
+    )
+
+    before_refs = list(ncr.evidence_refs)
+    ncr.evidence_refs = hydrated_refs
+    ncr.updated_by = user_id
+    increment_version(ncr)
+    await session.flush()
+
+    await create_audit_record(
+        session,
+        event_id=_uuid.uuid4(),
+        actor_type=ActorType.human,
+        user_id=user_id,
+        user_role=None,
+        action_type="ncr.evidence_updated",
+        entity_type="ncr",
+        entity_id=ncr.id,
+        before_state={"evidence_count": len(before_refs)},
+        after_state={"evidence_count": len(hydrated_refs)},
     )
     return ncr

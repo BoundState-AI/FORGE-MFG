@@ -162,6 +162,7 @@ def _register_domain_routers(app: FastAPI) -> None:
     from .routes.chat import router as chat_router
     from .routes.dashboard import router as dashboard_router
     from .routes.documents import router as documents_router
+    from .routes.evidence import router as evidence_router
     from .routes.inspections import router as inspections_router
     from .routes.labor_entries import router as labor_entries_router
     from .routes.materials import router as materials_router
@@ -180,6 +181,7 @@ def _register_domain_routers(app: FastAPI) -> None:
     app.include_router(materials_router)
     app.include_router(parts_router)
     app.include_router(documents_router)
+    app.include_router(evidence_router)
     app.include_router(calendars_router)
     app.include_router(schedule_router)
     app.include_router(chat_router)

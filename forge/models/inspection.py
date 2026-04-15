@@ -35,7 +35,7 @@ import uuid as _uuid
 from datetime import datetime
 
 from sqlalchemy import DateTime, ForeignKey, Integer, String, UniqueConstraint
-from sqlalchemy.dialects.postgresql import ARRAY, JSON, UUID
+from sqlalchemy.dialects.postgresql import JSON, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .base import AuditableMixin, Base
@@ -60,8 +60,15 @@ class InspectionEvent(AuditableMixin, Base):
     measurements: Mapped[dict[str, object]] = mapped_column(
         JSON, nullable=False, default=dict
     )
-    evidence_refs: Mapped[list[str]] = mapped_column(
-        ARRAY(String), nullable=False, default=list
+    # Structured evidence references (build spec v1.4.2 Decision 1).
+    # JSONB list of {s3_key, filename, content_type, size_bytes,
+    # content_hash, uploaded_at, uploaded_by} objects.  Legacy rows
+    # from the pre-Decision-1 contract may carry plain-string refs
+    # (bare s3_key) under the same column — the read path tolerates
+    # that shape; the write path hydrates structured objects from
+    # the evidence_confirmations registry.
+    evidence_refs: Mapped[list[dict[str, object]]] = mapped_column(
+        JSONB, nullable=False, default=list,
     )
     inspected_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False

@@ -58,18 +58,37 @@ class InspectionCreate(BaseModel):
     operation.  Frontend derives this from the `?resolves=<id>`
     query parameter on the inspection route.  Absent / None means
     a normal first-time inspection.
+
+    `evidence_refs` entries are structured submissions (build spec
+    v1.4.2 Decision 1): only `s3_key` is load-bearing — the service
+    hydrates the full ref metadata from the evidence_confirmations
+    registry.  Bare-string refs are rejected at the service layer.
     """
 
     criteria: str = Field(max_length=2000)
     result: InspectionResult
     measurements: dict[str, object] = Field(default_factory=dict)
-    evidence_refs: list[str] = Field(default_factory=list)
+    # Accept both dicts and strings at the schema layer so the
+    # service can emit the UI-facing EVIDENCE_FORMAT_INVALID code
+    # (with the offending s3_key) instead of Pydantic's generic
+    # dict_type error.  The service rejects bare strings and
+    # hydrates dicts from the registry.
+    evidence_refs: list[dict[str, object] | str] = Field(
+        default_factory=list,
+    )
     notes: str | None = Field(default=None, max_length=2000)
     supersedes_inspection_id: uuid.UUID | None = Field(default=None)
 
 
 class InspectionOut(BaseModel):
-    """Inspection event in API responses."""
+    """Inspection event in API responses.
+
+    `evidence_refs` echoes the persisted structured refs verbatim.
+    Legacy rows written before the Decision-1 contract may surface
+    as bare strings — the read path tolerates that shape; the
+    Pydantic type here is a permissive list of objects OR strings
+    so the response validates against every row already in the DB.
+    """
 
     id: uuid.UUID
     operation_id: uuid.UUID
@@ -78,7 +97,7 @@ class InspectionOut(BaseModel):
     criteria: str
     result: InspectionResult
     measurements: dict[str, object]
-    evidence_refs: list[str]
+    evidence_refs: list[dict[str, object] | str]
     inspected_at: datetime
     notes: str | None
     supersedes_inspection_id: uuid.UUID | None

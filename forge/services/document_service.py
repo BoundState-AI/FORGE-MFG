@@ -50,9 +50,6 @@ from forge.services.s3_presigner import (
 from forge.services.s3_presigner import (
     issue_document_upload_url as _issue_doc_url,
 )
-from forge.services.s3_presigner import (
-    issue_evidence_upload_url as _issue_ev_url,
-)
 from forge.services.versioning import (
     VersionConflictError,
     check_version,
@@ -187,17 +184,9 @@ async def issue_document_upload_url(
     return presigned
 
 
-async def issue_evidence_upload_url(
-    operation_id: _uuid.UUID, settings: Settings,
-) -> PresignedUpload:
-    """Issue a presigned PUT URL for inspection evidence (spec §5.8).
-
-    Evidence does not correspond to a ControlledDocumentRef row — it is
-    referenced directly from InspectionEvent.evidence_refs[].  This is
-    therefore a pure presigner call with no DB mutation, authorised at
-    the route layer by the inspect:create permission.
-    """
-    return _issue_ev_url(operation_id=operation_id, settings=settings)
+# The legacy operation-scoped evidence upload helper moved to
+# forge.services.evidence_service alongside the Decision-1 registry.
+# See evidence_service.issue_upload_url for the scope-aware contract.
 
 
 # ---------------------------------------------------------------------------

@@ -25,7 +25,7 @@ from __future__ import annotations
 import uuid as _uuid
 
 from sqlalchemy import Boolean, ForeignKey, Integer, String
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .base import AuditableMixin, Base
@@ -74,4 +74,12 @@ class NonconformanceReport(AuditableMixin, Base):
     # SOD-002 anchor: initiator cannot disposition the same NCR
     initiated_by_id: Mapped[_uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
+    )
+    # Structured evidence references (build spec v1.4.2 Decision 1).
+    # Required non-empty for rework / repair dispositions at close time
+    # — NCR close gate enforces this invariant in ncr_service.close_ncr.
+    # Write paths hydrate ref metadata from evidence_confirmations so
+    # clients cannot forge structured fields.
+    evidence_refs: Mapped[list[dict[str, object]]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default="[]",
     )
