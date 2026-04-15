@@ -90,12 +90,20 @@ def test_increment_version() -> None:
 
 
 def test_conflict_response_is_409() -> None:
-    """VersionConflictError converts to a 409 HTTPException."""
-    err = VersionConflictError("Program", "abc-123", current_version=5)
+    """VersionConflictError converts to a 409 HTTPException.
+
+    `your_version` is always populated by check_version in production;
+    the helper asserts it here so a mis-constructed error cannot
+    emit the §6.3.2 payload with a zero-sentinel your_version.
+    """
+    err = VersionConflictError(
+        "Program", "abc-123", current_version=5, your_version=4,
+    )
     exc = version_conflict_response(err)
     assert exc.status_code == 409
     assert isinstance(exc.detail, dict)
     assert exc.detail["current_version"] == 5
+    assert exc.detail["your_version"] == 4
 
 
 @pytest.mark.skipif(not _db_available(), reason="Postgres not available")

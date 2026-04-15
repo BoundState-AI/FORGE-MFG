@@ -4,7 +4,7 @@ Module:   Inspection Model
 Purpose:  InspectionEvent and SignOffEvent — quality gate records.
 
 BoundState AI 2026
-Version: 0.1.0
+Version: 0.2.0
 Classification: BoundState Proprietary
 
 Co-Authored-By: Claude "Beth" <noreply@anthropic.com>
@@ -21,6 +21,12 @@ Why this design:
   prevents inspectors who have labor entries from self-inspecting.
   SOD-005 requires distinct user_ids for dual sign-off on safety-critical
   operations.
+
+  `supersedes_inspection_id` is the self-reference that powers the
+  Resolve Conditional Finding flow (UX spec v1.5.1 §5.5.5 /
+  R5-R2-ISSUE-006): a later accept/reject event can name the
+  conditional it resolves so the queue and audit chain can distinguish
+  a resolution from a fresh finding.
 """
 
 from __future__ import annotations
@@ -61,6 +67,17 @@ class InspectionEvent(AuditableMixin, Base):
         DateTime(timezone=True), nullable=False
     )
     notes: Mapped[str | None] = mapped_column(String(2000), nullable=True)
+    # Resolve Conditional Finding link (UX spec v1.5.1 §5.5.5 /
+    # R5-R2-ISSUE-006).  Points at the prior `conditional` inspection
+    # this event supersedes.  Nullable — the overwhelming majority of
+    # inspections are first-time events with no predecessor.  Self-
+    # referential FK so the link is structurally validated; ondelete
+    # is RESTRICT to preserve the audit chain.
+    supersedes_inspection_id: Mapped[_uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("inspection_events.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
 
     # Relationships
     operation: Mapped[Operation] = relationship(  # noqa: F821

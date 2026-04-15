@@ -6,7 +6,7 @@ Purpose:  Pydantic request/response models for inspection and sign-off
           (UX spec v1.5.1 §5.4, §5.5.5).
 
 BoundState AI 2026
-Version: 0.2.0
+Version: 0.3.0
 Classification: BoundState Proprietary
 
 Co-Authored-By: Claude "Beth" <noreply@anthropic.com>
@@ -50,13 +50,22 @@ from forge.models.enums import (
 
 
 class InspectionCreate(BaseModel):
-    """Request body for POST /api/operations/{id}/inspect."""
+    """Request body for POST /api/operations/{id}/inspect.
+
+    `supersedes_inspection_id` opts into Resolve Conditional Finding
+    mode (UX spec v1.5.1 §5.5.5 / R5-R2-ISSUE-006): the inspector
+    is resolving a prior `conditional` inspection on the same
+    operation.  Frontend derives this from the `?resolves=<id>`
+    query parameter on the inspection route.  Absent / None means
+    a normal first-time inspection.
+    """
 
     criteria: str = Field(max_length=2000)
     result: InspectionResult
     measurements: dict[str, object] = Field(default_factory=dict)
     evidence_refs: list[str] = Field(default_factory=list)
     notes: str | None = Field(default=None, max_length=2000)
+    supersedes_inspection_id: uuid.UUID | None = Field(default=None)
 
 
 class InspectionOut(BaseModel):
@@ -72,6 +81,7 @@ class InspectionOut(BaseModel):
     evidence_refs: list[str]
     inspected_at: datetime
     notes: str | None
+    supersedes_inspection_id: uuid.UUID | None
     version: int
     created_at: datetime
     updated_at: datetime

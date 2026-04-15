@@ -6,7 +6,7 @@ Purpose:  Business logic for recording inspections and sign-offs on
           plus the Inspection Queue read-model (UX spec v1.5.1 §5.5.5).
 
 BoundState AI 2026
-Version: 0.2.0
+Version: 0.3.0
 Classification: BoundState Proprietary
 
 Co-Authored-By: Claude "Beth" <noreply@anthropic.com>
@@ -29,11 +29,26 @@ Why this design:
   Audit records are written for every inspect/sign-off so the chain
   carries a tamper-evident record of who attested to what.
 
+  `record_inspection` has two modes:
+    - Normal (supersedes_inspection_id=None): op must be in_progress,
+      SOD-001 applies, event is recorded against the active cycle.
+    - Resolve Conditional Finding (UX spec §5.5.5): op may be
+      in_progress OR complete, the new event names the conditional
+      inspection it supersedes, result must be accept or reject,
+      and the referenced conditional must not already be superseded.
+      SOD-001 still applies.  The post-completion path is the
+      mechanism that lets a WO clear a lingering conditional
+      finding without reopening the op — Reopen/Reactivate remain
+      provisional per §5.3.
+
   The queue read-model (`list_inspection_queue`) is a server-derived
   projection over Operation+WO+Program, NOT a raw InspectionEvent
   query.  Deriving state server-side keeps the frontend from having
   to reproduce COMP-001 / §5.5.5 semantics (§5.4.3 explicit
-  prohibition on client-side hold-status derivation).
+  prohibition on client-side hold-status derivation).  Superseded
+  conditionals fall out of state=conditional naturally because the
+  later accept/reject event has a later inspected_at, so the
+  "latest in current cycle" selector picks it instead.
 """
 
 from __future__ import annotations
@@ -52,6 +67,7 @@ from forge.models.enums import (
     ActorType,
     HoldPointStatus,
     InspectionQueueState,
+    InspectionResult,
     OpStatus,
 )
 from forge.models.inspection import InspectionEvent, SignOffEvent
@@ -105,6 +121,12 @@ def _require_op_in_progress(op: Operation) -> None:
     Invariant: the op must currently be in_progress so we are recording
     against the live execution_cycle.  Recording against a complete or
     pending op would either be after-the-fact theatre or premature.
+
+    Resolve Conditional Finding (UX spec v1.5.1 §5.5.5) is a narrow,
+    explicit exception: a completed op may accept a superseding
+    inspection via the resolve-mode branch below.  That path uses
+    `_require_resolve_mode_op_status` — not this helper — so the
+    normal-inspection rule here stays untouched.
     """
     if op.status != OpStatus.in_progress:
         raise HTTPException(
@@ -112,6 +134,27 @@ def _require_op_in_progress(op: Operation) -> None:
             detail=(
                 "Inspections and sign-offs may only be recorded while the "
                 "operation is in_progress"
+            ),
+        )
+
+
+def _require_resolve_mode_op_status(op: Operation) -> None:
+    """Resolve Conditional Finding is valid on an in_progress or complete op.
+
+    Spec §5.5.5: the queue surfaces conditional rows whose operation
+    is already complete (post-completion resolution is the whole
+    point of the flow), but a conditional finding on an op that was
+    never completed is also resolvable while the op is still
+    in_progress.  Any other status — pending, hold, rework — means
+    the resolution would be recorded against state the spec does
+    not sanction.
+    """
+    if op.status not in (OpStatus.in_progress, OpStatus.complete):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Resolve Conditional Finding requires the operation to be "
+                "in_progress or complete"
             ),
         )
 
@@ -150,6 +193,86 @@ async def _signoffs_for_op(
 # ---------------------------------------------------------------------------
 
 
+async def _validate_resolve_mode(
+    session: AsyncSession,
+    op: Operation,
+    data: InspectionCreate,
+) -> InspectionEvent:
+    """Enforce Resolve Conditional Finding preconditions (UX spec §5.5.5).
+
+    Returns the referenced conditional inspection on success so the
+    caller can build the audit snapshot without a second lookup.
+
+    Invariants (in order — each failure path has a distinct 422):
+      1. op.status ∈ {in_progress, complete} — enforced above, repeated
+         here only as the caller's pre-check.
+      2. result ∈ {accept, reject}.  `conditional` is a fresh finding
+         verb, not a resolution verb — allowing it here would let the
+         queue treat a "re-opened" conditional as resolved.
+      3. Referenced inspection exists.
+      4. Referenced inspection is on the SAME operation (no cross-op
+         supersession — prevents silent leak of another op's state
+         into this op's resolution chain).
+      5. Referenced inspection's result is `conditional` — only
+         conditional findings have resolution semantics.
+      6. Single-resolution truth: the referenced inspection must not
+         already be superseded by another event.  Allowing parallel
+         supersessions would let two inspectors each "resolve" the
+         same conditional with opposing results, and the queue
+         derivation would have no principled way to pick one.  The
+         spec §5.5.5 wording ("the conditional finding is resolved")
+         treats resolution as a terminal event.
+    """
+    if data.result == InspectionResult.conditional:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Resolve Conditional Finding requires result accept or "
+                "reject; `conditional` is invalid in resolve mode"
+            ),
+        )
+    assert data.supersedes_inspection_id is not None  # caller-guaranteed
+    referenced = await session.get(
+        InspectionEvent, data.supersedes_inspection_id
+    )
+    if referenced is None:
+        raise HTTPException(
+            status_code=422,
+            detail="Referenced inspection not found",
+        )
+    if referenced.operation_id != op.id:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Referenced inspection belongs to a different operation"
+            ),
+        )
+    if referenced.result != InspectionResult.conditional:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Referenced inspection is not a conditional finding"
+            ),
+        )
+
+    # Single-resolution check: reject if another event already names
+    # this one as its supersedes target.
+    existing = await session.execute(
+        select(InspectionEvent.id).where(
+            InspectionEvent.supersedes_inspection_id == referenced.id,
+        ),
+    )
+    if existing.first() is not None:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Referenced conditional inspection has already been "
+                "resolved"
+            ),
+        )
+    return referenced
+
+
 async def record_inspection(
     session: AsyncSession,
     op_id: _uuid.UUID,
@@ -157,16 +280,42 @@ async def record_inspection(
     user_id: _uuid.UUID,
     program_codes: list[str] | None = None,
 ) -> InspectionEvent:
-    """Record an inspection event against an in-progress operation.
+    """Record an inspection event against an operation.
 
-    State leaving: in_progress.  State entering: in_progress.
-    Invariants:
-      1. Op must be in_progress (recording window is the active cycle).
-      2. SOD-001: inspector must not have labor entries on this op.
-      3. execution_cycle is taken server-side from op.execution_cycle.
+    Two modes, gated by `data.supersedes_inspection_id`:
+
+    Normal mode (supersedes_inspection_id is None):
+      State leaving: in_progress.  State entering: in_progress.
+      Invariants:
+        1. Op must be in_progress (recording window is the active cycle).
+        2. SOD-001: inspector must not have labor entries on this op.
+        3. execution_cycle is taken server-side from op.execution_cycle.
+
+    Resolve Conditional Finding mode (supersedes_inspection_id set)
+    per UX spec v1.5.1 §5.5.5 / R5-R2-ISSUE-006:
+      State leaving: in_progress OR complete.  State entering:
+      unchanged (the resolution does not mutate op.status in this
+      slice — Reopen/Reactivate remain provisional per §5.3).
+      Invariants:
+        1. Op is in_progress OR complete.
+        2. Result is accept or reject (conditional is invalid here).
+        3. Referenced inspection exists, is on the same op, has
+           result=conditional, and is not already superseded.
+        4. SOD-001 still applies: the inspector resolving the
+           conditional must not have labor on this op.
+        5. execution_cycle is again taken server-side from
+           op.execution_cycle — for a completed op this is the cycle
+           the conditional was recorded against, preserving the
+           "satisfies the hold in the relevant cycle" invariant.
     """
     op = await _get_op(session, op_id, program_codes=program_codes)
-    _require_op_in_progress(op)
+
+    resolve_mode = data.supersedes_inspection_id is not None
+    if resolve_mode:
+        _require_resolve_mode_op_status(op)
+        await _validate_resolve_mode(session, op, data)
+    else:
+        _require_op_in_progress(op)
 
     labor_users = await _labor_user_ids(session, op_id)
     sod_violation = check_sod_001_self_inspection(
@@ -186,11 +335,22 @@ async def record_inspection(
         evidence_refs=data.evidence_refs,
         inspected_at=now,
         notes=data.notes,
+        supersedes_inspection_id=data.supersedes_inspection_id,
         created_by=user_id,
         updated_by=user_id,
     )
     session.add(event)
     await session.flush()
+
+    audit_after: dict[str, object] = {
+        "operation_id": str(op_id),
+        "execution_cycle": op.execution_cycle,
+        "result": data.result.value,
+    }
+    if resolve_mode:
+        audit_after["supersedes_inspection_id"] = str(
+            data.supersedes_inspection_id
+        )
 
     await create_audit_record(
         session,
@@ -201,11 +361,7 @@ async def record_inspection(
         action_type="inspection.record",
         entity_type="inspection_event",
         entity_id=event.id,
-        after_state={
-            "operation_id": str(op_id),
-            "execution_cycle": op.execution_cycle,
-            "result": data.result.value,
-        },
+        after_state=audit_after,
     )
     return event
 
@@ -337,6 +493,13 @@ def _latest_current_cycle_inspection(op: Operation) -> InspectionEvent | None:
     (forge.rules.compliance_checks) the sole owner of the
     completion-gate variant — the two live in different layers on
     purpose and must not cross-depend.
+
+    Resolve Conditional Finding (UX spec §5.5.5) is handled naturally
+    here: a superseding accept/reject is a later event in the same
+    cycle, so max(inspected_at) picks it up and the queue state
+    flips from `conditional` to `completed` (accept) or disappears
+    from the inspector queue entirely (reject — handled on the
+    NCR list).  No explicit "is-superseded" filter is needed.
     """
     cycle = op.execution_cycle
     cycle_events = [i for i in op.inspection_events if i.execution_cycle == cycle]
