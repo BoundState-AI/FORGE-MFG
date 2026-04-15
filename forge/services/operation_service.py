@@ -172,25 +172,64 @@ async def _load_predecessor_summaries(
 ) -> list[Operation]:
     """Load predecessor operations for the §5.4.8 summaries field.
 
-    The Operation model has no explicit predecessor edges today;
-    ordering is by `sequence`.  UX spec §5.4.7 names this "default-
-    sequential" mode: the predecessor of an operation is the
-    immediately-prior operation in the same WO when its siblings are
-    sorted by `sequence`.
+    The WO-level graph mode is the source-of-truth disambiguation:
 
-    Why we sort siblings rather than `WHERE sequence == op.sequence - 1`:
-    `Operation.sequence` is not guaranteed unique or gap-free across the
-    schema (e.g. an engineer may delete the middle op in a draft WO
-    and leave the sequence numbers as-is).  A literal `sequence - 1`
-    lookup misses the predecessor in that case and silently inverts
-    the [Start Timer] tooltip.  Sorting the actual sibling set is the
-    only honest "previous sibling" semantics until explicit
-    predecessor edges land in 5B-10/11.
+      EXPLICIT MODE — the WO has ANY explicit edge in the
+      operation_predecessors table.  In this mode every op's
+      predecessors come from its own explicit set (possibly
+      empty, which means this op is a root — the spec §5.4.6
+      explicitly allows multiple roots).
 
-    When the explicit predecessor-graph model lands, this becomes a
-    join over a predecessor edge table and the return shape stays
-    the same.
+      DEFAULT-SEQUENTIAL MODE — the WO has zero explicit edges.
+      Every op's predecessor is the immediately-prior op by
+      sequence, for authoring ergonomic on linear draft WOs.
+
+    This per-WO determination matters because a per-op check
+    ("does this op have explicit edges?") is ambiguous: an op
+    with zero explicit predecessors inside an otherwise-
+    explicit graph is a TRUE ROOT, not an implicitly-sequenced
+    node.  Reading the mode at the WO level is the only honest
+    resolution.
+
+    Why sort siblings rather than `WHERE sequence == op.sequence - 1`
+    in the default-sequential path: `Operation.sequence` is not
+    guaranteed unique or gap-free — a literal `sequence - 1`
+    lookup misses the predecessor in that case.  Sorting the
+    actual sibling set is the only honest "previous sibling"
+    semantics.
     """
+    from forge.models.operation import operation_predecessors
+
+    # One query: grab every edge where the successor belongs to
+    # this WO.  If the set is non-empty the WO is in EXPLICIT mode
+    # and only edges whose successor is THIS op are returned as
+    # predecessors (an empty set = this op is a root).  If empty
+    # the WO is in DEFAULT-SEQUENTIAL mode and we fall through.
+    edge_result = await session.execute(
+        select(
+            operation_predecessors.c.operation_id,
+            operation_predecessors.c.predecessor_id,
+        ).where(
+            operation_predecessors.c.operation_id.in_(
+                select(Operation.id).where(
+                    Operation.work_order_id == op.work_order_id,
+                ),
+            ),
+        ),
+    )
+    all_edges = [(row[0], row[1]) for row in edge_result.all()]
+
+    if all_edges:
+        # EXPLICIT mode.
+        pred_ids = [p for (succ, p) in all_edges if succ == op.id]
+        if not pred_ids:
+            return []
+        pred_result = await session.execute(
+            select(Operation).where(Operation.id.in_(pred_ids)),
+        )
+        return list(pred_result.scalars().all())
+
+    # DEFAULT-SEQUENTIAL mode.
     result = await session.execute(
         select(Operation)
         .where(Operation.work_order_id == op.work_order_id)

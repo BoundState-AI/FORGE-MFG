@@ -275,8 +275,20 @@ async def release_work_order(
     """Release: draft → released.
 
     State leaving: draft.  State entering: released.
-    Invariant: valid transition per spec §4.3 AND authored_by_id != user_id
-    (SOD-004 independence per spec §4.2, §5.1 line 885).
+    Invariants (in order):
+      1. Caller has program scope (404 on cross-program).
+      2. SOD-004: authored_by_id != user_id (spec §4.2, §5.1 line 885).
+      3. DAG validation: the WO's explicit predecessor graph must
+         pass the same checks that Fix Graph runs (UX spec §5.3
+         Release precondition: "operation dependency graph passes
+         DAG validation").  A WO with zero explicit edges passes
+         trivially (empty DAG is a valid DAG) — the default-
+         sequential read-fallback is unaffected.
+      4. Status transition is valid per spec §4.3.
+
+    Order matters: SOD-004 before graph validation so a self-release
+    attempt gets the SOD error (actionable "assign a second
+    engineer") rather than a graph error that reads as a graph bug.
     """
     # SOD-004: load WO first to check authored_by_id before transition
     wo = await get_work_order(session, wo_id, program_codes=program_codes)
@@ -296,6 +308,8 @@ async def release_work_order(
             },
         )
 
+    await _validate_release_graph(session, wo)
+
     wo = await _transition_wo(
         session, wo_id, WOStatus.released, version, user_id,
         program_codes=program_codes,
@@ -304,6 +318,62 @@ async def release_work_order(
     wo.released_by = user_id
     await session.flush()
     return wo
+
+
+async def _validate_release_graph(
+    session: AsyncSession, wo: WorkOrder,
+) -> None:
+    """Release-precondition DAG check (UX spec §5.3 / §5.4.6).
+
+    Loads every op in the WO + the union of their explicit
+    predecessor edges (queried directly from the association table,
+    not via Operation.predecessors — a self-ref lazy-load under an
+    async session is unsafe), then runs the shared validator.
+    Raises 422 with the same WO-REL-101/102/103 codes Fix Graph
+    uses — spec §5.4.6 says these codes apply "same as release-time
+    validation," so this is the single source of truth.
+
+    Fresh-draft WOs have zero explicit edges.  The validator
+    returns an empty error list on an empty edge set (every
+    defined op with no predecessors is a trivially-valid DAG
+    root), so the default-sequential authoring ergonomic still
+    works end-to-end for linear WOs.
+    """
+    from forge.models.operation import Operation, operation_predecessors
+    from forge.rules.graph_validation import validate_graph
+
+    result = await session.execute(
+        select(Operation.id).where(Operation.work_order_id == wo.id),
+    )
+    op_ids = [row[0] for row in result.all()]
+    if not op_ids:
+        return  # nothing to validate
+
+    edge_result = await session.execute(
+        select(
+            operation_predecessors.c.operation_id,
+            operation_predecessors.c.predecessor_id,
+        ).where(operation_predecessors.c.operation_id.in_(op_ids)),
+    )
+    edges = [(row[0], row[1]) for row in edge_result.all()]
+
+    errors = validate_graph(op_ids, edges)
+    if errors:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "GRAPH_VALIDATION_FAILED",
+                "message": "Graph validation failed",
+                "validation_errors": [
+                    {
+                        "code": e.code,
+                        "detail": e.detail,
+                        "operation_ids": [str(oid) for oid in e.operation_ids],
+                    }
+                    for e in errors
+                ],
+            },
+        )
 
 
 async def recall_work_order(

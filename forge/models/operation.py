@@ -26,7 +26,17 @@ from __future__ import annotations
 import uuid as _uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Table
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    Column,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Table,
+)
 from sqlalchemy.dialects.postgresql import ARRAY, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -45,6 +55,36 @@ op_part_instances = Table(
         "part_instance_id", UUID(as_uuid=True), ForeignKey("part_instances.id"),
         primary_key=True,
     ),
+)
+
+# Self-referential M2M: explicit operation predecessor edges (UX spec
+# §5.4.6).  One row per (successor, predecessor) pair.  Cross-WO edges
+# are enforced at the app layer because FK cannot express "both ops
+# share work_order_id" — the graph validator catches them as WO-REL-103
+# (dangling) when the predecessor is not in the same WO's op set.  Self-
+# reference is enforced here at the DB (CHECK constraint) so the
+# validator is not the only gate.  ON DELETE CASCADE keeps the edge set
+# self-consistent when a draft-WO op is deleted.
+operation_predecessors = Table(
+    "operation_predecessors",
+    Base.metadata,
+    Column(
+        "operation_id",
+        UUID(as_uuid=True),
+        ForeignKey("operations.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column(
+        "predecessor_id",
+        UUID(as_uuid=True),
+        ForeignKey("operations.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    CheckConstraint(
+        "operation_id <> predecessor_id",
+        name="ck_operation_predecessors_no_self_ref",
+    ),
+    extend_existing=True,
 )
 class Operation(AuditableMixin, Base):
     """Sequenced manufacturing operation within a work order."""
@@ -114,4 +154,25 @@ class Operation(AuditableMixin, Base):
     )
     parts_installed: Mapped[list[PartInstance]] = relationship(  # noqa: F821
         secondary=op_part_instances, lazy="selectin"
+    )
+    # Explicit predecessor edges (UX spec §5.4.6).  `predecessors`
+    # returns the operations that must complete before THIS op,
+    # keyed through operation_predecessors.  `primaryjoin` /
+    # `secondaryjoin` explicitly name which column anchors each
+    # direction of the self-referential M2M.
+    #
+    # lazy="select" rather than "selectin": a self-referential M2M
+    # under selectin can recurse unpredictably across the async-
+    # session greenlet boundary (each loaded Operation triggers a
+    # fresh selectin of its own predecessors).  The graph services
+    # and release-time validator query the operation_predecessors
+    # association table directly, so they do not rely on this
+    # relationship being pre-loaded — it is here for the rare
+    # callers that want a convenient walker and are willing to take
+    # the per-access round trip.
+    predecessors: Mapped[list[Operation]] = relationship(
+        secondary=operation_predecessors,
+        primaryjoin="Operation.id == operation_predecessors.c.operation_id",
+        secondaryjoin="Operation.id == operation_predecessors.c.predecessor_id",
+        lazy="select",
     )

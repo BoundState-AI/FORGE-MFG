@@ -28,12 +28,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from forge.api.auth import AuthContext, require_permission
 from forge.api.deps import get_db
+from forge.schemas.graph import (
+    GraphPatchIn,
+    GraphPatchOut,
+    GraphValidateOut,
+)
+from forge.schemas.operation import OperationDetailOut
 from forge.schemas.work_order import (
     WorkOrderCreate,
     WorkOrderOut,
     WorkOrderTransition,
     WorkOrderUpdate,
 )
+from forge.services import graph_service as graph_svc
+from forge.services import operation_service as op_svc
 from forge.services import work_order_service as wo_svc
 
 router = APIRouter(prefix="/api/work-orders", tags=["work-orders"])
@@ -148,6 +156,73 @@ async def recall_work_order(
     await session.commit()
     await session.refresh(wo)
     return WorkOrderOut.model_validate(wo)
+
+
+@router.patch("/{wo_id}/graph", response_model=GraphPatchOut)
+async def fix_graph(
+    wo_id: uuid.UUID,
+    body: GraphPatchIn,
+    auth: AuthContext = Depends(require_permission("wo:graph_edit")),
+    session: AsyncSession = Depends(get_db),
+) -> GraphPatchOut:
+    """Fix Graph (UX spec v1.5.1 §5.4.6).
+
+    Apply predecessor edits + re-validate.  Engineer-only,
+    hold-state-only.  On validation failure the graph is NOT
+    mutated and the response is 422 with per-error detail;
+    on success the WO version bumps, has_graph_issue resets to
+    false, and the response returns the updated WO + its
+    operations with fresh predecessor sets.
+
+    Cross-program returns 404 (§3.2 existence-leak rule), inherited
+    from get_work_order inside the service.
+    """
+    wo, ops = await graph_svc.apply_graph_patch(
+        session, wo_id, body.version, body.predecessor_changes,
+        uuid.UUID(auth.sub),
+        program_codes=auth.programs,
+    )
+    await session.commit()
+    await session.refresh(wo)
+
+    # Hydrate each operation via the same read-side helper GET
+    # /api/operations/{id} uses so the Fix-Graph response shape is
+    # identical to what the client would get by refetching each op.
+    op_details: list[OperationDetailOut] = []
+    for op in ops:
+        payload = await op_svc.get_operation_detail(
+            session, op.id, program_codes=auth.programs,
+        )
+        op_details.append(OperationDetailOut.model_validate(payload))
+
+    return GraphPatchOut(
+        work_order=WorkOrderOut.model_validate(wo),
+        operations=op_details,
+    )
+
+
+@router.post(
+    "/{wo_id}/graph/validate", response_model=GraphValidateOut,
+)
+async def validate_graph_endpoint(
+    wo_id: uuid.UUID,
+    auth: AuthContext = Depends(require_permission("wo:graph_edit")),
+    session: AsyncSession = Depends(get_db),
+) -> GraphValidateOut:
+    """Report Graph Issue (UX spec v1.5.1 §5.4.6).
+
+    Runs the DAG validator on the WO's current predecessor graph
+    without applying any change.  Always 200 regardless of graph
+    state — `validation_errors` is empty on pass, populated on
+    fail.  When issues are found, server-side atomically sets
+    has_graph_issue=true and emits `work_order.graph_issue_reported`.
+    """
+    result = await graph_svc.validate_graph_on_hold(
+        session, wo_id, uuid.UUID(auth.sub),
+        program_codes=auth.programs,
+    )
+    await session.commit()
+    return result
 
 
 @router.post("/{wo_id}/hold", response_model=WorkOrderOut)
