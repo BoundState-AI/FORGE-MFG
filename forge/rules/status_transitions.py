@@ -32,10 +32,19 @@ from forge.models.enums import (
     WOStatus,
 )
 
-# Spec §4.3: valid work order transitions
+# Spec §4.3 + UX spec v1.5.1 §5.3: valid work order transitions.
+# `released → draft` is the Recall transition (slice 5B-14), used
+# pre-activation to return a WO to draft for graph correction before
+# any operation has started.  The "no op has started" invariant is
+# inherent in the source state: the first op start atomically moves
+# the WO to in_progress (see start_operation), so if we are still
+# in released, no op has started.  That preserves the spec §5.3
+# precondition "WO is in released state (no operations have been
+# started; if any had, WO would be in_progress)" without an
+# additional runtime check.
 VALID_WO_TRANSITIONS: dict[WOStatus, set[WOStatus]] = {
     WOStatus.draft: {WOStatus.released},
-    WOStatus.released: {WOStatus.in_progress, WOStatus.hold},
+    WOStatus.released: {WOStatus.in_progress, WOStatus.hold, WOStatus.draft},
     WOStatus.in_progress: {WOStatus.complete, WOStatus.hold},
     WOStatus.hold: {WOStatus.in_progress, WOStatus.closed},
     WOStatus.complete: {WOStatus.closed},

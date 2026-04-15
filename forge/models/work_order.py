@@ -26,7 +26,7 @@ from __future__ import annotations
 import uuid as _uuid
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, ForeignKey, String, Table
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, String, Table
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -104,6 +104,17 @@ class WorkOrder(AuditableMixin, Base):
     )
     released_by: Mapped[_uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
+    )
+    # UX spec v1.5.1 §5.4.6: server-managed flag that gates the
+    # [Fix Graph] / [Report Graph Issue] UI buttons.  Defaults to
+    # false via server_default so legacy / raw-SQL inserts (used by
+    # several test fixtures) remain compatible.  This slice
+    # (5B-10) introduces the persisted field; the active setters
+    # — automated DAG check, admin PATCH, and the
+    # /graph/validate endpoint — land in the graph-write slice
+    # that follows.
+    has_graph_issue: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False,
     )
 
     # Relationships

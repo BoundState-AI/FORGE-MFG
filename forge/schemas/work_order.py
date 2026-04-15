@@ -65,7 +65,15 @@ class WorkOrderTransition(BaseModel):
 
 
 class WorkOrderOut(BaseModel):
-    """Work order in API responses."""
+    """Work order in API responses.
+
+    `has_graph_issue` (UX spec v1.5.1 §5.4.6) ships on every WO
+    response — list, detail, and every state-transition response —
+    so the frontend never has to compose a separate fetch to render
+    the [Fix Graph] / [Report Graph Issue] buttons.  In slice 5B-10
+    the field is read-only surface; the active setters land with the
+    graph-write endpoints in the next slice.
+    """
 
     id: uuid.UUID
     wo_number: str
@@ -79,6 +87,7 @@ class WorkOrderOut(BaseModel):
     bom_revision_ref: str | None
     released_at: datetime | None
     released_by: uuid.UUID | None
+    has_graph_issue: bool
     version: int
     created_at: datetime
     updated_at: datetime

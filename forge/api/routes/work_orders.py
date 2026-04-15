@@ -123,6 +123,33 @@ async def release_work_order(
     return WorkOrderOut.model_validate(wo)
 
 
+@router.post("/{wo_id}/recall", response_model=WorkOrderOut)
+async def recall_work_order(
+    wo_id: uuid.UUID,
+    body: WorkOrderTransition,
+    auth: AuthContext = Depends(require_permission("wo:recall")),
+    session: AsyncSession = Depends(get_db),
+) -> WorkOrderOut:
+    """Recall work order (released → draft, UX spec v1.5.1 §5.3).
+
+    Pre-activation graph-correction path: returns a released WO to
+    draft so the engineer can fix the operation graph and re-release.
+    Only valid while still in `released` — once an op starts, the
+    WO atomically moves to `in_progress` and Recall is no longer
+    appropriate (the correction path from there is Hold + Fix Graph).
+
+    Engineer role only per §5.3 permission matrix, enforced by the
+    `wo:recall` permission dependency.
+    """
+    wo = await wo_svc.recall_work_order(
+        session, wo_id, body.version, uuid.UUID(auth.sub),
+        program_codes=auth.programs,
+    )
+    await session.commit()
+    await session.refresh(wo)
+    return WorkOrderOut.model_validate(wo)
+
+
 @router.post("/{wo_id}/hold", response_model=WorkOrderOut)
 async def hold_work_order(
     wo_id: uuid.UUID,

@@ -257,7 +257,8 @@ ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
         "ncr:read", "part:read", "sched:read", "dash:read", "chat:query",
     }),
     "engineer": frozenset({
-        "wo:create", "wo:update", "wo:release", "wo:hold", "wo:resume",
+        "wo:create", "wo:update", "wo:release", "wo:recall",
+        "wo:hold", "wo:resume",
         "wo:complete", "op:create", "op:update", "op:delete", "op:hold",
         "op:rework", "ncr:create", "ncr:disposition", "sched:create",
         "sched:baseline", "sched:what_if", "labor:update_any", "doc:create",

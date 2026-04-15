@@ -218,11 +218,21 @@ async def _transition_wo(
     version: int,
     user_id: _uuid.UUID,
     program_codes: list[str] | None = None,
+    *,
+    action_type_override: str | None = None,
 ) -> WorkOrder:
     """Apply a state transition with version check and audit.
 
     State leaving: wo.status.  State entering: target.
     Invariant: transition must be in VALID_WO_TRANSITIONS map.
+
+    `action_type_override` lets a caller emit a spec-named audit
+    event when the default `work_order.<target_status>` would be
+    the wrong name.  Concrete case: Recall targets the `draft`
+    state but UX spec §6.6.1 names the audit event
+    `work_order.recalled` (past tense), not `work_order.draft`.
+    Defaulting to None preserves every other transition's existing
+    audit name verbatim — this is an additive kwarg, not a rename.
     """
     wo = await get_work_order(session, wo_id, program_codes=program_codes)
 
@@ -249,7 +259,7 @@ async def _transition_wo(
         actor_type=ActorType.human,
         user_id=user_id,
         user_role=None,
-        action_type=f"work_order.{target.value}",
+        action_type=action_type_override or f"work_order.{target.value}",
         entity_type="work_order",
         entity_id=wo.id,
         before_state={"status": before_status},
@@ -294,6 +304,38 @@ async def release_work_order(
     wo.released_by = user_id
     await session.flush()
     return wo
+
+
+async def recall_work_order(
+    session: AsyncSession, wo_id: _uuid.UUID, version: int, user_id: _uuid.UUID,
+    program_codes: list[str] | None = None,
+) -> WorkOrder:
+    """Recall: released → draft (UX spec v1.5.1 §5.3 Recall transition).
+
+    State leaving: released.  State entering: draft.
+    Invariant: valid transition per VALID_WO_TRANSITIONS.
+      - "WO is in released state (no operations have been started;
+        if any had, WO would be in_progress)" — this precondition is
+        structurally guaranteed by the state machine: the first op
+        start atomically moves the WO to in_progress, so if we are
+        still in released, no op has started.  No additional runtime
+        check is required.
+      - released_at / released_by are deliberately NOT cleared on
+        recall — the spec calls Recall a pre-activation correction
+        step, and wiping release history would erase the audit
+        trail of "this WO was released once and then pulled back."
+        A subsequent re-release increments those fields fresh; the
+        prior values live on in audit records.
+
+    Emits audit event `work_order.recalled` (UX spec §6.6.1) rather
+    than the default `work_order.<target_status>` because spec
+    §6.6.1 names the event in past tense.
+    """
+    return await _transition_wo(
+        session, wo_id, WOStatus.draft, version, user_id,
+        program_codes=program_codes,
+        action_type_override="work_order.recalled",
+    )
 
 
 async def hold_work_order(
