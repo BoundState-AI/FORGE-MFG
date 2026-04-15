@@ -83,3 +83,14 @@ class NonconformanceReport(AuditableMixin, Base):
     evidence_refs: Mapped[list[dict[str, object]]] = mapped_column(
         JSONB, nullable=False, default=list, server_default="[]",
     )
+    # Remediation work order link (build spec v1.4.2 GC-2).  Populated
+    # when an NCR is dispositioned rework/repair against a parent WO
+    # that is already `closed` — in that path the closed WO cannot
+    # be reactivated (Phase-1 rule), so the remediation happens on a
+    # separate WO the client names here.  NULL for the common in-
+    # place-rework case where the parent WO gets reactivated
+    # directly.  Close of an NCR with this link set additionally
+    # requires the remediation WO itself to be `closed`.
+    remediation_work_order_id: Mapped[_uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("work_orders.id"), nullable=True,
+    )

@@ -325,7 +325,7 @@ def _ref_from_registry(row: EvidenceConfirmation) -> dict[str, Any]:
 async def hydrate_refs_for_parent(
     *,
     session: AsyncSession,
-    submitted: list[dict[str, Any]] | list[str],
+    submitted: list[dict[str, Any] | str],
     expected_scope: EvidenceScope,
     expected_program_id: _uuid.UUID,
 ) -> list[dict[str, Any]]:

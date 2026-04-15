@@ -85,12 +85,19 @@ class LaborUpdate(BaseModel):
 
 
 class LaborOut(BaseModel):
-    """Labor entry in API responses."""
+    """Labor entry in API responses.
+
+    `execution_cycle` is the parent operation's cycle at the time
+    this labor row was created (build spec v1.4.2 GC-2).  Clients
+    can group labor by cycle to report remediation hours
+    separately from original-cycle hours.
+    """
 
     id: uuid.UUID
     operation_id: uuid.UUID
     user_id: uuid.UUID
     role: str
+    execution_cycle: int
     started_at: datetime
     stopped_at: datetime | None
     hours: float

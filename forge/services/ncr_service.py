@@ -43,8 +43,12 @@ from forge.models.enums import (
     Disposition,
     EvidenceScope,
     NCRStatus,
+    OpStatus,
+    WOStatus,
 )
 from forge.models.ncr import NonconformanceReport
+from forge.models.operation import Operation
+from forge.models.work_order import WorkOrder
 from forge.rules.separation_of_duties import (
     SoDViolation,
     check_sod_002_ncr_disposition,
@@ -253,6 +257,297 @@ async def list_ncrs(
 # ---------------------------------------------------------------------------
 
 
+_REOPEN_DISPOSITIONS: frozenset[Disposition] = frozenset({
+    Disposition.rework, Disposition.repair,
+})
+
+
+async def _validate_remediation_wo(
+    session: AsyncSession,
+    data: NCRDisposition,
+    ncr: NonconformanceReport,
+    program_codes: list[str] | None,
+) -> WorkOrder:
+    """Validate a remediation WO reference on the closed-WO path.
+
+    Build spec v1.4.2 GC-2: when the NCR's parent WO is closed and
+    disposition is rework / repair, the client must name a separate
+    remediation WO on the disposition request.  This helper enforces:
+      1. Field present (422 REMEDIATION_WO_REQUIRED otherwise).
+      2. Remediation WO exists + caller has scope (404 → 422 to
+         keep the error on the disposition surface).
+      3. Remediation WO is in the SAME program as the NCR's parent
+         WO — remediation cannot cross program boundaries.
+      4. Remediation WO is not the NCR's parent WO itself.
+    """
+    from forge.services.work_order_service import get_work_order
+
+    if data.remediation_work_order_id is None:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "REMEDIATION_WO_REQUIRED",
+                "message": (
+                    "Parent work order is closed; rework/repair "
+                    "disposition requires remediation_work_order_id"
+                ),
+            },
+        )
+    if data.remediation_work_order_id == ncr.work_order_id:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "REMEDIATION_WO_INVALID",
+                "message": (
+                    "remediation_work_order_id must be a different "
+                    "work order than the NCR's parent WO"
+                ),
+            },
+        )
+    try:
+        remediation_wo: WorkOrder = await get_work_order(
+            session, data.remediation_work_order_id,
+            program_codes=program_codes,
+        )
+    except HTTPException as exc:
+        # get_work_order raises 404 on scope miss; restate as 422 on
+        # the disposition surface so the UI handles the single 422
+        # branch rather than a surprise 404 from a write endpoint.
+        if exc.status_code == 404:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "REMEDIATION_WO_INVALID",
+                    "message": (
+                        "remediation_work_order_id does not reference "
+                        "a visible work order"
+                    ),
+                },
+            ) from exc
+        raise
+
+    # Parent WO's program drives the allowed scope — remediation must
+    # happen within the same program as the nonconformance.
+    parent_wo = await get_work_order(
+        session, ncr.work_order_id, program_codes=program_codes,
+    )
+    if remediation_wo.program_id != parent_wo.program_id:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "REMEDIATION_WO_INVALID",
+                "message": (
+                    "remediation_work_order_id belongs to another program"
+                ),
+            },
+        )
+    return remediation_wo
+
+
+async def _reopen_operation(
+    session: AsyncSession,
+    op: Operation,
+    ncr: NonconformanceReport,
+    user_id: _uuid.UUID,
+) -> bool:
+    """Direct complete → in_progress reopen for a linked operation.
+
+    Build spec v1.4.2 GC-2 / UX spec v1.5.1 §5.4.1: the live reopen
+    path is a direct transition.  No persisted `rework` state is
+    introduced — the op moves straight to in_progress, execution_cycle
+    increments, completion-derived fields are cleared, and
+    active_since resets so the overdue clock measures the new cycle.
+
+    Returns True iff the operation was actually reopened (was in
+    `complete` and transitioned).  Idempotent on a non-complete op
+    (in_progress / hold / pending) — returns False without mutation
+    so a second disposition on the same op cannot double-bump cycle.
+    """
+    from datetime import datetime
+
+    if op.status != OpStatus.complete:
+        return False
+
+    before_status = op.status.value
+    before_cycle = op.execution_cycle
+    now = datetime.now(UTC)
+
+    op.status = OpStatus.in_progress
+    op.execution_cycle = before_cycle + 1
+    op.completed_at = None
+    op.active_since = now
+    op.updated_by = user_id
+    increment_version(op)
+    await session.flush()
+
+    await create_audit_record(
+        session,
+        event_id=_uuid.uuid4(),
+        actor_type=ActorType.human,
+        user_id=user_id,
+        user_role=None,
+        action_type="operation.reopened",
+        entity_type="operation",
+        entity_id=op.id,
+        before_state={
+            "status": before_status,
+            "execution_cycle": before_cycle,
+        },
+        after_state={
+            "status": op.status.value,
+            "execution_cycle": op.execution_cycle,
+            "ncr_id": str(ncr.id),
+            "disposition": ncr.disposition.value,
+        },
+    )
+
+    # SSE publish (UX spec v1.5.1 §6.5.2 operation_reopened).  The
+    # Operation Execution stream carries a dedicated reopen event
+    # with the NCR + disposition context so the frontend can render
+    # the reopen banner without a second REST fetch.  Deferred to
+    # after-commit via queue_publish so subscribers never see a
+    # rolled-back reopen.
+    from forge.realtime import OPERATION_BUS, queue_publish
+
+    queue_publish(
+        session,
+        lambda: OPERATION_BUS.publish(
+            op.id,
+            "operation_reopened",
+            {
+                "operation_id": str(op.id),
+                "ncr_id": str(ncr.id),
+                "disposition": ncr.disposition.value,
+                "execution_cycle": op.execution_cycle,
+            },
+        ),
+    )
+    return True
+
+
+async def _reactivate_work_order(
+    session: AsyncSession,
+    wo: WorkOrder,
+    ncr: NonconformanceReport,
+    user_id: _uuid.UUID,
+) -> bool:
+    """Direct complete → in_progress reactivate for a parent WO.
+
+    Build spec v1.4.2 GC-2: when a child op reopens and the parent
+    WO is `complete`, the WO reactivates in place.  `closed` WOs
+    are NEVER reactivated in Phase 1 — the NCR's
+    remediation_work_order_id branch handles those.
+
+    Returns True iff the WO was actually reactivated.
+    """
+    if wo.status != WOStatus.complete:
+        return False
+
+    before_status = wo.status.value
+    wo.status = WOStatus.in_progress
+    wo.updated_by = user_id
+    increment_version(wo)
+    await session.flush()
+
+    await create_audit_record(
+        session,
+        event_id=_uuid.uuid4(),
+        actor_type=ActorType.human,
+        user_id=user_id,
+        user_role=None,
+        action_type="work_order.reactivated",
+        entity_type="work_order",
+        entity_id=wo.id,
+        before_state={"status": before_status},
+        after_state={
+            "status": wo.status.value,
+            "ncr_id": str(ncr.id),
+            "disposition": ncr.disposition.value,
+        },
+    )
+
+    # Reuse the canonical wo_state_changed SSE surface so the
+    # frontend's existing WO-state handler renders the reactivation
+    # without a second event name.  The payload includes the NCR
+    # context via `reason` so the stop-work-style banner has
+    # attribution — no new event type is introduced.
+    from forge.realtime import (
+        publish_wo_state_changed_to_ops,
+        resolve_actor,
+    )
+
+    actor = await resolve_actor(session, user_id)
+    await publish_wo_state_changed_to_ops(
+        session, wo.id,
+        {
+            "work_order_id": str(wo.id),
+            "state": wo.status.value,
+            "previous_state": before_status,
+            "actor": {
+                "user_id": actor["id"],
+                "display_name": actor["display_name"],
+            },
+            "reason": (
+                f"NCR {ncr.ncr_number} dispositioned "
+                f"{ncr.disposition.value}"
+            ),
+            "force_stop_labor": False,
+            "stopped_labor_entries": [],
+        },
+    )
+    return True
+
+
+async def _apply_reopen_side_effect(
+    session: AsyncSession,
+    ncr: NonconformanceReport,
+    data: NCRDisposition,
+    user_id: _uuid.UUID,
+    program_codes: list[str] | None,
+) -> None:
+    """Trigger op reopen + WO reactivate side effects if applicable.
+
+    Branching (build spec v1.4.2 GC-2):
+      - disposition ∈ {use_as_is, scrap}: no-op.
+      - disposition ∈ {rework, repair}:
+          a. If the NCR names no operation, no-op — there is no
+             operation to reopen and the caller has made an
+             informed decision at NCR creation.
+          b. If the NCR's parent WO is `closed`, the client must
+             supply remediation_work_order_id (validated in the
+             caller); the closed WO is NOT reactivated.
+          c. Otherwise, reopen the linked operation if it is
+             `complete`, and reactivate the parent WO if it is
+             `complete`.  Idempotent on both axes — an already-
+             in_progress op / WO is untouched.
+    """
+    from forge.services.work_order_service import get_work_order
+
+    if data.disposition not in _REOPEN_DISPOSITIONS:
+        return
+    if ncr.operation_id is None:
+        return
+
+    parent_wo = await get_work_order(
+        session, ncr.work_order_id, program_codes=program_codes,
+    )
+    if parent_wo.status == WOStatus.closed:
+        # Closed-WO path: the client's remediation_work_order_id is
+        # recorded for close-gating; nothing is reopened here.
+        return
+
+    from forge.models.operation import Operation
+    op = await session.get(Operation, ncr.operation_id)
+    if op is None:
+        return
+
+    reopened = await _reopen_operation(session, op, ncr, user_id)
+    if reopened:
+        await _reactivate_work_order(
+            session, parent_wo, ncr, user_id,
+        )
+
+
 async def disposition_ncr(
     session: AsyncSession,
     ncr_id: _uuid.UUID,
@@ -260,7 +555,7 @@ async def disposition_ncr(
     user_id: _uuid.UUID,
     program_codes: list[str] | None = None,
 ) -> NonconformanceReport:
-    """Disposition an NCR: open → dispositioned.
+    """Disposition an NCR: open → dispositioned + optional reopen.
 
     State leaving: open.  State entering: dispositioned.
     Invariants (in order):
@@ -268,8 +563,20 @@ async def disposition_ncr(
       2. Optimistic version matches.
       3. Transition is legal per VALID_NCR_TRANSITIONS.
       4. SOD-002: initiator must not equal the dispositioner.
-      5. Disposition must be a concrete decision (not `pending`) so a
-         disposition step cannot leave the NCR effectively undecided.
+      5. Disposition must be a concrete decision (not `pending`).
+      6. If disposition is rework/repair AND parent WO is closed,
+         remediation_work_order_id must be supplied and valid.
+
+    Side effects (build spec v1.4.2 GC-2):
+      - rework/repair on an open-or-complete parent WO with a
+        linked operation: the op reopens (complete → in_progress,
+        execution_cycle++, completed_at cleared, active_since
+        reset) and the WO reactivates if it was complete.
+      - rework/repair on a CLOSED parent WO: the
+        remediation_work_order_id is persisted; the closed WO
+        is NOT reactivated.  Close of this NCR is subsequently
+        gated on the remediation WO reaching `closed`.
+      - use_as_is / scrap: no reopen side effect.
     """
     ncr = await _get_ncr_in_scope(session, ncr_id, program_codes)
 
@@ -299,6 +606,21 @@ async def disposition_ncr(
     if sod_violation is not None:
         raise _violation_response(sod_violation)
 
+    # Closed-WO branch validation: when the NCR's parent WO is
+    # already closed and disposition is rework/repair, the client
+    # MUST provide a valid remediation_work_order_id.  Resolution
+    # happens BEFORE the NCR mutation so a failed validation leaves
+    # the NCR untouched.
+    from forge.services.work_order_service import get_work_order
+    parent_wo = await get_work_order(
+        session, ncr.work_order_id, program_codes=program_codes,
+    )
+    if (
+        parent_wo.status == WOStatus.closed
+        and data.disposition in _REOPEN_DISPOSITIONS
+    ):
+        await _validate_remediation_wo(session, data, ncr, program_codes)
+
     before_status = ncr.status.value
     before_disposition = ncr.disposition.value
     ncr.status = NCRStatus.dispositioned
@@ -308,6 +630,10 @@ async def disposition_ncr(
     ncr.mrb_disposition = data.mrb_disposition
     ncr.mrb_authority_id = data.mrb_authority_id
     ncr.schedule_impact_days = data.schedule_impact_days
+    # Persist remediation linkage regardless of WO status — a
+    # non-closed WO with a remediation link is an edge case the
+    # spec does not prohibit and the close gate still honors.
+    ncr.remediation_work_order_id = data.remediation_work_order_id
     ncr.updated_by = user_id
     increment_version(ncr)
     await session.flush()
@@ -327,8 +653,17 @@ async def disposition_ncr(
         after_state={
             "status": ncr.status.value,
             "disposition": ncr.disposition.value,
+            "remediation_work_order_id": (
+                str(ncr.remediation_work_order_id)
+                if ncr.remediation_work_order_id else None
+            ),
         },
     )
+
+    # Trigger the reopen / reactivate side effect inside the same
+    # transaction so the NCR disposition, op reopen, WO reactivate,
+    # audit rows, and queued SSE publishes all commit atomically.
+    await _apply_reopen_side_effect(session, ncr, data, user_id, program_codes)
 
     # Spec §8.2: NCR status changes trigger CPM recalculation via the
     # outbox.  Aggregate is the NCR itself; the handler walks up to
@@ -409,6 +744,35 @@ async def close_ncr(
                 ),
             },
         )
+
+    # Build spec v1.4.2 GC-2 closed-WO branch: if the NCR carries a
+    # remediation_work_order_id (set because the parent WO was
+    # already closed at disposition time), close is blocked until
+    # the remediation WO itself reaches `closed`.  Callers that
+    # need to surface this precondition separately can still GET
+    # the remediation WO directly.
+    if ncr.remediation_work_order_id is not None:
+        remediation_wo = await get_work_order(
+            session, ncr.remediation_work_order_id,
+            program_codes=program_codes,
+        )
+        if remediation_wo.status != WOStatus.closed:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "REMEDIATION_WO_NOT_CLOSED",
+                    "message": (
+                        "Remediation work order must be closed "
+                        "before this NCR can close"
+                    ),
+                    "remediation_work_order_id": str(
+                        ncr.remediation_work_order_id
+                    ),
+                    "remediation_work_order_status": (
+                        remediation_wo.status.value
+                    ),
+                },
+            )
 
     before_status_close = ncr.status.value
     ncr.status = NCRStatus.closed

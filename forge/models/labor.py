@@ -24,7 +24,7 @@ from __future__ import annotations
 import uuid as _uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Float, ForeignKey, String
+from sqlalchemy import DateTime, Float, ForeignKey, Integer, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -43,6 +43,16 @@ class LaborEntry(AuditableMixin, Base):
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
     )
     role: Mapped[str] = mapped_column(String(50), nullable=False)
+    # Set to the parent operation's current execution_cycle at
+    # creation time (build spec v1.4.2 GC-2).  After an NCR-driven
+    # reopen increments op.execution_cycle, new labor rows carry the
+    # new cycle so audit + reporting can distinguish remediation
+    # effort from original-cycle effort.  Legacy rows that predate
+    # this column are back-filled to 1 by the migration — every
+    # production operation starts its first cycle at 1.
+    execution_cycle: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1,
+    )
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )

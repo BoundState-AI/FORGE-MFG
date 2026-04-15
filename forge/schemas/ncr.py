@@ -51,6 +51,12 @@ class NCRDisposition(BaseModel):
 
     Spec §5.15: version is required.  SOD-002 (initiator independence)
     is enforced in the service layer, not here.
+
+    `remediation_work_order_id` is required at disposition time when
+    the disposition is rework/repair and the NCR's parent WO is
+    already `closed` (build spec v1.4.2 GC-2).  In the common case
+    (parent WO not closed) the field is ignored — the parent WO is
+    reactivated in place.
     """
 
     version: int
@@ -60,6 +66,7 @@ class NCRDisposition(BaseModel):
     mrb_disposition: str | None = Field(default=None, max_length=4000)
     mrb_authority_id: uuid.UUID | None = None
     schedule_impact_days: int | None = None
+    remediation_work_order_id: uuid.UUID | None = None
 
 
 class NCRClose(BaseModel):
@@ -120,6 +127,7 @@ class NCROut(BaseModel):
     schedule_impact_days: int | None
     initiated_by_id: uuid.UUID
     evidence_refs: list[dict[str, object] | str]
+    remediation_work_order_id: uuid.UUID | None
     version: int
     created_at: datetime
     updated_at: datetime

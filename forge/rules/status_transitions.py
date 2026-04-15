@@ -47,17 +47,26 @@ VALID_WO_TRANSITIONS: dict[WOStatus, set[WOStatus]] = {
     WOStatus.released: {WOStatus.in_progress, WOStatus.hold, WOStatus.draft},
     WOStatus.in_progress: {WOStatus.complete, WOStatus.hold},
     WOStatus.hold: {WOStatus.in_progress, WOStatus.closed},
-    WOStatus.complete: {WOStatus.closed},
+    # UX spec v1.5.1 §5.3 / build spec v1.4.2 GC-2: a `complete` WO
+    # reactivates to `in_progress` when a child-op NCR disposition
+    # triggers reopen.  `closed` remains terminal — Phase-1 does
+    # not reopen closed WOs; the NCR's remediation_work_order_id
+    # carries remediation effort to a separate WO instead.
+    WOStatus.complete: {WOStatus.closed, WOStatus.in_progress},
     WOStatus.closed: set(),
 }
 
-# Spec §4.3: valid operation transitions
+# Spec §4.3 + build spec v1.4.2 GC-2: valid operation transitions.
+# complete → in_progress is the Phase-1 direct-reopen path (driven by
+# NCR disposition rework / repair).  The legacy in_progress → rework →
+# in_progress path is preserved so the manual rework surface continues
+# to work; GC-2 live reopen skips the transient rework state.
 VALID_OP_TRANSITIONS: dict[OpStatus, set[OpStatus]] = {
     OpStatus.pending: {OpStatus.in_progress},
     OpStatus.in_progress: {OpStatus.complete, OpStatus.hold, OpStatus.rework},
     OpStatus.hold: {OpStatus.in_progress},
     OpStatus.rework: {OpStatus.in_progress},
-    OpStatus.complete: set(),
+    OpStatus.complete: {OpStatus.in_progress},
 }
 
 

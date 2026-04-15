@@ -612,11 +612,14 @@ async def start_operation(
     # resume via this route.
     op.active_since = now
 
-    # Create labor entry for the starting operator
+    # Create labor entry for the starting operator.  execution_cycle
+    # is captured from the op's current cycle (GC-2) so post-reopen
+    # labor carries the new cycle number.
     labor = LaborEntry(
         operation_id=op_id,
         user_id=user_id,
         role=role,
+        execution_cycle=op.execution_cycle,
         started_at=now,
         hours=0.0,
         shift=shift,
@@ -915,6 +918,7 @@ async def resume_operation(
         operation_id=op_id,
         user_id=user_id,
         role=role,
+        execution_cycle=op.execution_cycle,
         started_at=now,
         hours=0.0,
         shift=shift,
@@ -1141,6 +1145,7 @@ async def create_labor_entry(
         operation_id=op_id,
         user_id=user_id,
         role=data.role,
+        execution_cycle=op.execution_cycle,
         started_at=now,
         hours=0.0,
         shift=data.shift,
