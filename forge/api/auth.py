@@ -81,6 +81,13 @@ class AuthContext:
     roles: list[str] = field(default_factory=list)
     programs: list[str] = field(default_factory=list)
     permissions: frozenset[str] = field(default_factory=frozenset)
+    # Unix epoch seconds when this access token expires, if known.
+    # Populated from the JWT `exp` claim by build_auth_context.  The
+    # Operation Execution SSE channel uses this to emit `auth_expired`
+    # mid-stream per UX spec v1.5.1 §6.5.2.  None in local/test mode
+    # (no expiry on the dev-override context), which the SSE loop
+    # treats as "never expires" — safe for local use.
+    expires_at: int | None = None
 
     def has_permission(self, permission: str) -> bool:
         """Check if this user has the given permission string."""
@@ -358,6 +365,13 @@ def build_auth_context(claims: dict[str, Any]) -> AuthContext:
     programs = _parse_csv_claim(claims.get("custom:programs"))
     permissions = _resolve_permissions(roles)
 
+    exp_raw = claims.get("exp")
+    expires_at: int | None
+    try:
+        expires_at = int(exp_raw) if exp_raw is not None else None
+    except (TypeError, ValueError):
+        expires_at = None
+
     return AuthContext(
         sub=str(claims.get("sub", "")),
         username=str(
@@ -366,6 +380,7 @@ def build_auth_context(claims: dict[str, Any]) -> AuthContext:
         roles=roles,
         programs=programs,
         permissions=permissions,
+        expires_at=expires_at,
     )
 
 

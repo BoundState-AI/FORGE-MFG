@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import uuid as _uuid
 from datetime import UTC, datetime
+from typing import Any
 
 from fastapi import HTTPException
 from sqlalchemy import func, select
@@ -33,6 +34,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from forge.audit.logger import create_audit_record
 from forge.models.enums import ActorType, OpStatus, WOStatus
 from forge.models.work_order import WorkOrder
+from forge.realtime import (
+    OPERATION_BUS,
+    publish_labor_activity,
+    publish_wo_state_changed_to_ops,
+    queue_publish,
+    resolve_actor,
+)
 from forge.rules.status_transitions import validate_wo_transition
 from forge.schemas.work_order import WorkOrderCreate, WorkOrderUpdate
 from forge.services.versioning import (
@@ -41,6 +49,49 @@ from forge.services.versioning import (
     increment_version,
     version_conflict_response,
 )
+
+
+async def _publish_wo_state_changed(
+    session: AsyncSession,
+    wo: WorkOrder,
+    *,
+    previous_state: str,
+    actor_id: _uuid.UUID,
+    reason: str | None = None,
+    force_stop_labor: bool = False,
+    stopped_labor_entries: list[dict[str, _uuid.UUID]] | None = None,
+) -> None:
+    """Publish the §6.5.2 wo_state_changed SSE event.
+
+    Fans the event out to every op channel on the WO so any
+    Operation Execution subscriber sees the parent-WO transition.
+    Hold-path callers pass reason + force_stop_labor + stopped
+    entries so the client can render the §5.3 stop-work banner
+    directly from the event; other transitions pass defaults and
+    the payload shape stays stable.
+    """
+    actor = await resolve_actor(session, actor_id)
+    stopped_entries = [
+        {
+            "entry_id": str(entry["entry_id"]),
+            "operation_id": str(entry["operation_id"]),
+            "user_id": str(entry["user_id"]),
+        }
+        for entry in (stopped_labor_entries or [])
+    ]
+    payload: dict[str, object] = {
+        "work_order_id": str(wo.id),
+        "state": wo.status.value,
+        "previous_state": previous_state,
+        "actor": {
+            "user_id": actor["id"],
+            "display_name": actor["display_name"],
+        },
+        "reason": reason,
+        "force_stop_labor": force_stop_labor,
+        "stopped_labor_entries": stopped_entries,
+    }
+    await publish_wo_state_changed_to_ops(session, wo.id, payload)
 
 
 def _wo_to_conflict_dict(wo: WorkOrder) -> dict[str, object]:
@@ -328,6 +379,7 @@ async def release_work_order(
 
     await _validate_release_graph(session, wo)
 
+    previous_state = wo.status.value
     wo = await _transition_wo(
         session, wo_id, WOStatus.released, version, user_id,
         program_codes=program_codes,
@@ -335,6 +387,9 @@ async def release_work_order(
     wo.released_at = datetime.now(UTC)
     wo.released_by = user_id
     await session.flush()
+    await _publish_wo_state_changed(
+        session, wo, previous_state=previous_state, actor_id=user_id,
+    )
     return wo
 
 
@@ -446,11 +501,19 @@ async def recall_work_order(
     than the default `work_order.<target_status>` because spec
     §6.6.1 names the event in past tense.
     """
-    return await _transition_wo(
+    wo_before = await get_work_order(
+        session, wo_id, program_codes=program_codes,
+    )
+    previous_state = wo_before.status.value
+    wo = await _transition_wo(
         session, wo_id, WOStatus.draft, version, user_id,
         program_codes=program_codes,
         action_type_override="work_order.recalled",
     )
+    await _publish_wo_state_changed(
+        session, wo, previous_state=previous_state, actor_id=user_id,
+    )
+    return wo
 
 
 async def hold_work_order(
@@ -480,6 +543,14 @@ async def hold_work_order(
     `force_stop_labor=False`).  The route layer wraps the dicts in
     StoppedLaborEntryOut for the wire response.
     """
+    # Capture pre-transition state so the SSE payload's
+    # previous_state is truthful — the transition helper mutates
+    # wo.status in place.
+    wo_before = await get_work_order(
+        session, wo_id, program_codes=program_codes,
+    )
+    previous_state = wo_before.status.value
+
     # Transition the WO first.  _transition_wo runs the version
     # check + state-machine validation + audit record.  If the
     # cascade fails mid-way, we still want the WO to have
@@ -497,6 +568,15 @@ async def hold_work_order(
         stopped = await _cascade_stop_active_labor(
             session, wo.id, user_id, reason=reason,
         )
+
+    await _publish_wo_state_changed(
+        session, wo,
+        previous_state=previous_state,
+        actor_id=user_id,
+        reason=reason,
+        force_stop_labor=force_stop_labor,
+        stopped_labor_entries=stopped,
+    )
 
     return wo, stopped
 
@@ -570,6 +650,17 @@ async def _cascade_stop_active_labor(
             },
         )
 
+        # SSE publish: each cascade-stopped entry surfaces as a
+        # labor_activity event on the affected op channel so each
+        # operator sees their own timer end immediately (§6.5.2).
+        # The parent WO hold also publishes its own
+        # wo_state_changed carrying the full stop-work payload —
+        # labor_activity here is the op-centric counterpart.
+        await publish_labor_activity(
+            session, labor.operation_id, actor_id,
+            action="stopped_by_hold", entry_id=labor.id,
+        )
+
     return stopped
 
 
@@ -582,10 +673,18 @@ async def resume_work_order(
     State leaving: hold.  State entering: in_progress.
     Invariant: valid transition per spec §4.3.
     """
-    return await _transition_wo(
+    wo_before = await get_work_order(
+        session, wo_id, program_codes=program_codes,
+    )
+    previous_state = wo_before.status.value
+    wo = await _transition_wo(
         session, wo_id, WOStatus.in_progress, version, user_id,
         program_codes=program_codes,
     )
+    await _publish_wo_state_changed(
+        session, wo, previous_state=previous_state, actor_id=user_id,
+    )
+    return wo
 
 
 async def complete_work_order(
@@ -600,10 +699,15 @@ async def complete_work_order(
             status_code=422,
             detail=f"{len(incomplete)} operation(s) are not complete",
         )
-    return await _transition_wo(
+    previous_state = wo.status.value
+    wo = await _transition_wo(
         session, wo_id, WOStatus.complete, version, user_id,
         program_codes=program_codes,
     )
+    await _publish_wo_state_changed(
+        session, wo, previous_state=previous_state, actor_id=user_id,
+    )
+    return wo
 
 
 async def close_work_order(
@@ -617,8 +721,33 @@ async def close_work_order(
     Per-NCR disposition preconditions (§5.3 close preconditions)
     are not enforced here yet — deferred pending the NPR 8735.2C
     closure-as-attestation product decision (§5.3 callout).
+
+    SSE side-effect (UX spec §6.5.2 Completion): after the
+    wo_state_changed event lands, a `done` event is published on
+    every child op channel so any open Operation Execution
+    subscriber cleanly closes — the op stream is permanently
+    terminal once the WO is closed.
     """
-    return await _transition_wo(
+    wo_before = await get_work_order(
+        session, wo_id, program_codes=program_codes,
+    )
+    previous_state = wo_before.status.value
+    wo = await _transition_wo(
         session, wo_id, WOStatus.closed, version, user_id,
         program_codes=program_codes,
     )
+    await _publish_wo_state_changed(
+        session, wo, previous_state=previous_state, actor_id=user_id,
+    )
+    # Queue a `done` fan-out behind the wo_state_changed so clients
+    # receive the state transition first, then the stream close.
+    from forge.models.operation import Operation
+    result = await session.execute(
+        select(Operation.id).where(Operation.work_order_id == wo.id),
+    )
+    for target_op_id in [row[0] for row in result.all()]:
+        def _publish_done(op: _uuid.UUID = target_op_id) -> Any:
+            return OPERATION_BUS.publish(op, "done", {})
+
+        queue_publish(session, _publish_done)
+    return wo

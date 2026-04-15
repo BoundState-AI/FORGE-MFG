@@ -64,6 +64,7 @@ from forge.models.enums import ActorType, StopRequestStatus
 from forge.models.labor import LaborEntry
 from forge.models.stop_request import StopRequest
 from forge.models.user import User
+from forge.realtime import publish_labor_activity
 from forge.schemas.stop_request import (
     FlagCorrectionIn,
     ForceStopIn,
@@ -333,6 +334,15 @@ async def apply_force_stop(
             "target_user_id": str(labor.user_id),
             "rationale": data.rationale,
         },
+    )
+
+    # SSE publish (UX spec §6.5.2 labor_activity).  Engineer force-
+    # stop surfaces to every subscriber on the target op channel —
+    # the affected operator's client renders the stop banner from
+    # this event without waiting for a poll or a parent-WO hold.
+    await publish_labor_activity(
+        session, labor.operation_id, actor_id,
+        action="force_stopped", entry_id=labor.id,
     )
 
     return labor

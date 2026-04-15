@@ -33,11 +33,13 @@ import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from forge.api.auth import AuthContext, get_auth_context, require_permission
 from forge.api.concurrency import resolve_version_assertion, strong_etag
 from forge.api.deps import get_db
+from forge.realtime import OPERATION_BUS, stream_operation_events
 from forge.schemas.labor import LaborCreate, LaborOut, LaborUpdate
 from forge.schemas.operation import (
     OperationCreate,
@@ -352,3 +354,82 @@ async def update_labor(
     await session.refresh(labor)
     response.headers["ETag"] = strong_etag(labor.version)
     return LaborOut.model_validate(labor)
+
+
+# ---------------------------------------------------------------------------
+# Operation Execution SSE channel (UX spec v1.5.1 §6.5.2)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/api/operations/{op_id}/events")
+async def stream_operation_events_route(
+    op_id: uuid.UUID,
+    last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
+    auth: AuthContext = Depends(require_permission("op:read")),
+    session: AsyncSession = Depends(get_db),
+) -> StreamingResponse:
+    """Subscribe to sub-second operation updates (UX spec v1.5.1 §6.5.2).
+
+    Events emitted: hold_point_changed, wo_state_changed,
+    labor_activity, ping (20s heartbeat), auth_expired (on token
+    expiry), buffer_reset (when `Last-Event-ID` replay is
+    unsatisfiable), error (on internal stream failure — client
+    falls back to 30s polling per §6.5.2 error mapping), done
+    (when the parent WO transitions to `closed` — the op stream is
+    permanently terminal at that point).  The operation_reopened
+    event is explicitly provisional per §5.3 / §6.5.2 and is NOT
+    emitted by this slice.
+
+    Authorization:
+      - op:read permission at the route level.
+      - service-layer scope check via get_operation (404 on cross-program
+        per §3.2 / §6.7.4 entity-detail existence-leak rule).
+      - the program-scope middleware exempts this path from header-based
+        comparison for the same reason the plain entity-detail GET is
+        exempt — the entity's program_id is the authority.
+
+    Reconnect contract: the client performs a mandatory REST refetch of
+    GET /api/operations/{op_id} on every reconnect (§6.5.2).  SSE
+    replay is best-effort only; on buffer miss the server emits
+    buffer_reset and the client leans on the refetch.
+
+    Last-Event-ID parsing is permissive — a malformed header falls
+    back to "no replay hint," which matches a first-connect.  The
+    alternative (400) would surface as an unfriendly reconnect loop
+    on the client without adding safety.
+    """
+    # Service-layer scope check: get_operation_detail raises 404 on
+    # cross-program so the §3.2 existence-leak posture is preserved
+    # even for a streaming connection.  We close the session
+    # immediately after — the stream itself is DB-free and must not
+    # hold a request-scoped session for its (potentially long)
+    # lifetime.
+    await op_svc.get_operation_detail(
+        session, op_id, program_codes=auth.programs,
+    )
+    await session.close()
+
+    parsed_last_id: int | None
+    if last_event_id is None or not last_event_id.strip():
+        parsed_last_id = None
+    else:
+        try:
+            parsed_last_id = int(last_event_id.strip())
+        except ValueError:
+            parsed_last_id = None
+
+    generator = stream_operation_events(
+        op_id,
+        last_event_id=parsed_last_id,
+        bus=OPERATION_BUS,
+        token_expires_at=auth.expires_at,
+    )
+    return StreamingResponse(
+        generator,
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )

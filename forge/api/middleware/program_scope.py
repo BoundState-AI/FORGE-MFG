@@ -203,23 +203,40 @@ def _is_entity_detail_get(method: str, path: str) -> bool:
     """Whether the request is a §6.7.4 entity-detail GET.
 
     Entity-detail GETs match exactly `GET /api/<resource>/<uuid>` with
-    no further path segments and a known resource name.  They are
-    exempt from header-based membership comparison; the service layer
-    is responsible for verifying entity.program_id ∈ caller memberships
-    and returning 404 on cross-program (spec §3.2 / §6.7.4).
+    no further path segments and a known resource name, OR the
+    operation events SSE surface `GET /api/operations/<uuid>/events`
+    (UX spec v1.5.1 §6.5.2) — both are keyed on a single entity and
+    authorize against entity.program_id in the service layer, so the
+    header-based membership comparison is skipped and 404 returns on
+    cross-program per the §3.2 existence-leak rule.
     """
     if method != "GET":
         return False
     parts = path.strip("/").split("/")
-    if len(parts) != 3:
+    if parts[:1] != ["api"]:
         return False
-    if parts[0] != "api" or parts[1] not in ENTITY_DETAIL_RESOURCES:
-        return False
-    try:
-        uuid.UUID(parts[2])
-    except (ValueError, AttributeError):
-        return False
-    return True
+    # Canonical `/api/<resource>/<uuid>` shape.
+    if len(parts) == 3 and parts[1] in ENTITY_DETAIL_RESOURCES:
+        try:
+            uuid.UUID(parts[2])
+        except (ValueError, AttributeError):
+            return False
+        return True
+    # Operation events sub-path: `/api/operations/<uuid>/events`.
+    # The SSE channel is entity-keyed (op_id) and the service-layer
+    # scope check runs inside the stream opener, so the same §6.7.4
+    # exemption applies as the plain entity-detail GET.
+    if (
+        len(parts) == 4
+        and parts[1] == "operations"
+        and parts[3] == "events"
+    ):
+        try:
+            uuid.UUID(parts[2])
+        except (ValueError, AttributeError):
+            return False
+        return True
+    return False
 
 
 def _error(code: str, status: int, message: str) -> JSONResponse:

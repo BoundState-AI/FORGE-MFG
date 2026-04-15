@@ -53,6 +53,11 @@ from forge.models.enums import (
 from forge.models.labor import LaborEntry
 from forge.models.operation import Operation
 from forge.models.work_order import WorkOrder
+from forge.realtime import (
+    publish_labor_activity,
+    publish_wo_state_changed_to_ops,
+    resolve_actor,
+)
 from forge.rules.compliance_checks import (
     ComplianceViolation,
     InspectionSnapshot,
@@ -626,10 +631,12 @@ async def start_operation(
     # the WO into active execution).  This is implicit from the WO
     # lifecycle — released means "ready to execute."
     wo = await _get_wo(session, op.work_order_id, program_codes=program_codes)
+    wo_transitioned = False
     if wo.status == WOStatus.released:
         wo.status = WOStatus.in_progress
         wo.updated_by = user_id
         increment_version(wo)
+        wo_transitioned = True
 
         await create_audit_record(
             session,
@@ -645,6 +652,31 @@ async def start_operation(
         )
 
     await session.flush()
+
+    # SSE publish (UX spec §6.5.2).  labor_activity for the new
+    # labor entry + wo_state_changed on the implicit WO auto-
+    # advance from released.  Both go after flush so the labor row
+    # id is available for the payload.
+    await publish_labor_activity(
+        session, op_id, user_id, action="started", entry_id=labor.id,
+    )
+    if wo_transitioned:
+        actor = await resolve_actor(session, user_id)
+        await publish_wo_state_changed_to_ops(
+            session, wo.id,
+            {
+                "work_order_id": str(wo.id),
+                "state": wo.status.value,
+                "previous_state": "released",
+                "actor": {
+                    "user_id": actor["id"],
+                    "display_name": actor["display_name"],
+                },
+                "reason": None,
+                "force_stop_labor": False,
+                "stopped_labor_entries": [],
+            },
+        )
     return op
 
 
@@ -703,6 +735,13 @@ async def stop_operation(
     op.updated_by = user_id
     increment_version(op)
     await session.flush()
+
+    # SSE publish (UX spec §6.5.2 labor_activity).  The operator's
+    # self-stop is surfaced here so other subscribers on this op
+    # channel see the timer end without polling.
+    await publish_labor_activity(
+        session, op_id, user_id, action="stopped", entry_id=labor.id,
+    )
     return op
 
 
@@ -1111,6 +1150,12 @@ async def create_labor_entry(
     )
     session.add(labor)
     await session.flush()
+
+    # SSE publish (UX spec §6.5.2 labor_activity).  The labor
+    # handoff is a canonical "started" action on this op's stream.
+    await publish_labor_activity(
+        session, op_id, user_id, action="started", entry_id=labor.id,
+    )
     return labor
 
 

@@ -76,6 +76,7 @@ from forge.models.ncr import NonconformanceReport
 from forge.models.operation import Operation
 from forge.models.program import Program
 from forge.models.work_order import WorkOrder
+from forge.realtime import OPERATION_BUS, queue_publish
 from forge.rules.separation_of_duties import (
     SignOffSnapshot as SoDSignOff,
 )
@@ -430,6 +431,31 @@ async def record_inspection(
     # event too so we never ship a reject without a matching NCR.
     if data.result == InspectionResult.reject:
         await _create_reject_ncr(session, op, event, user_id)
+
+    # SSE publish (UX spec v1.5.1 §6.5.2 hold_point_changed).  Re-
+    # derive hold_point_status from the current op + the event we
+    # just appended so the payload reflects the post-commit truth.
+    # _derive_hold_point_status walks op.inspection_events; ensure
+    # the collection contains the new row before deriving.  Session
+    # refresh is cheaper than a second SELECT because the identity
+    # map already has the op + inspection rows.
+    await session.refresh(op, attribute_names=["inspection_events"])
+    new_hold_status = _derive_hold_point_status(op)
+    inspection_id_str = str(event.id)
+    # Defer to after the route commits.  Subscribers must never
+    # observe state that is still rolled-backable.
+    queue_publish(
+        session,
+        lambda: OPERATION_BUS.publish(
+            op_id,
+            "hold_point_changed",
+            {
+                "operation_id": str(op_id),
+                "hold_point_status": new_hold_status.value,
+                "inspection_id": inspection_id_str,
+            },
+        ),
+    )
 
     return event
 
