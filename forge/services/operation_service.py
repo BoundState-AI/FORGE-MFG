@@ -220,12 +220,22 @@ async def _load_predecessor_summaries(
     all_edges = [(row[0], row[1]) for row in edge_result.all()]
 
     if all_edges:
-        # EXPLICIT mode.
+        # EXPLICIT mode.  Constrain the hydration query to the same
+        # WO so a corrupt edge pointing at another work order's op
+        # (or another program's) does not leak through the read
+        # surface.  The graph validator rejects cross-WO edges on
+        # every write path, but the read path also has to defend —
+        # a stale / manually-inserted row must not surface foreign
+        # operation data, which would violate the §3.2 "no cross-
+        # program existence leak" posture.
         pred_ids = [p for (succ, p) in all_edges if succ == op.id]
         if not pred_ids:
             return []
         pred_result = await session.execute(
-            select(Operation).where(Operation.id.in_(pred_ids)),
+            select(Operation).where(
+                Operation.id.in_(pred_ids),
+                Operation.work_order_id == op.work_order_id,
+            ),
         )
         return list(pred_result.scalars().all())
 

@@ -789,3 +789,135 @@ class TestWorkOrderGraphEndpoints:
             e["code"] for e in body["detail"]["validation_errors"]
         ]
         assert "WO-REL-101" in codes
+
+    # ------------------------------------------------------------------
+    # Review regression guards (post-5B-11 findings)
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_cross_wo_edge_does_not_leak_on_op_detail(self) -> None:
+        """A corrupt edge pointing at another WO must not surface
+        foreign operation data via GET /api/operations/{id}.
+
+        Scenario: two WOs in the same program.  An edge is injected
+        via raw SQL that points WO-A's op 0 at WO-B's op 0 as a
+        predecessor.  The validator would reject this on every
+        write path (WO-REL-103 dangling within WO-A's op set), but
+        GET /api/operations/{id} is a read — before the fix it would
+        hydrate and return WO-B's op description as a predecessor
+        summary of WO-A's op, leaking cross-WO data.  The fix
+        constrains the hydration query to the same WO, so WO-B's op
+        is silently excluded from WO-A's response.
+        """
+        wo_a = await self._make_wo(self.prog_a_id)
+        ops_a = await self._add_ops(wo_a["id"], count=2)
+        wo_b = await self._make_wo(self.prog_a_id)
+        ops_b = await self._add_ops(wo_b["id"], count=1)
+
+        # Inject a cross-WO edge directly.
+        engine = create_engine(_SYNC_URL)
+        with engine.connect() as conn:
+            conn.execute(text(
+                "INSERT INTO operation_predecessors "
+                "(operation_id, predecessor_id) "
+                "VALUES (CAST(:a AS uuid), CAST(:b AS uuid))"
+            ).bindparams(a=ops_a[0]["id"], b=ops_b[0]["id"]))
+            conn.commit()
+        engine.dispose()
+
+        self._override_as(ENGINEER_USER_ID, roles=["engineer"])
+        async with await self._client() as client:
+            resp = await client.get(f"/api/operations/{ops_a[0]['id']}")
+        self._clear_override()
+        assert resp.status_code == 200
+        detail = resp.json()
+        # Cross-WO predecessor must NOT appear in the response.
+        assert ops_b[0]["id"] not in detail["predecessors"]
+        for summary in detail["predecessor_summaries"]:
+            assert summary["id"] != ops_b[0]["id"], (
+                f"cross-WO op leaked through read surface: {summary}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_validate_clears_stale_has_graph_issue_true(
+        self,
+    ) -> None:
+        """POST /graph/validate on a clean graph clears a stale
+        has_graph_issue=true flag per UX §5.4.6 success payload.
+
+        Manually sets has_graph_issue=true on a held WO with a
+        clean graph (no edges == valid empty DAG).  Calls validate.
+        Expects has_graph_issue=false in the response AND on the
+        persisted row.  Pre-fix the response would echo the stale
+        flag and the UI would permanently show [Fix Graph].
+        """
+        held, _ops = await self._held_wo_with_ops(count=2)
+
+        # Manually set the flag to simulate an admin flip or a
+        # transient automated-check failure that has since resolved.
+        engine = create_engine(_SYNC_URL)
+        with engine.connect() as conn:
+            conn.execute(text(
+                "UPDATE work_orders SET has_graph_issue = true "
+                "WHERE id = CAST(:id AS uuid)"
+            ).bindparams(id=held["id"]))
+            conn.commit()
+        engine.dispose()
+
+        status, body = await self._validate_graph(held)
+        assert status == 200, body
+        assert body["has_graph_issue"] is False
+        assert body["validation_errors"] == []
+
+        # Persisted row was actually cleared — not just the echo.
+        engine = create_engine(_SYNC_URL)
+        with engine.connect() as conn:
+            row = conn.execute(text(
+                "SELECT has_graph_issue FROM work_orders "
+                "WHERE id = CAST(:id AS uuid)"
+            ).bindparams(id=held["id"])).fetchone()
+        engine.dispose()
+        assert row is not None
+        assert row[0] is False
+
+    @pytest.mark.asyncio
+    async def test_graph_fixed_audit_records_actual_before_flag(
+        self,
+    ) -> None:
+        """work_order.graph_fixed before_state.has_graph_issue reflects
+        the actual pre-mutation flag value, not a hardcoded true.
+
+        Scenario: a held WO with has_graph_issue=false (engineer
+        edits the graph before any automated check has flagged it).
+        Pre-fix, the audit before_state would lie and claim the flag
+        was true, producing inaccurate audit history.
+        """
+        held, ops = await self._held_wo_with_ops(count=2)
+        # held.has_graph_issue is False by default; don't touch it.
+
+        await self._patch_graph(held, [
+            {
+                "operation_id": ops[1]["id"],
+                "action": "add",
+                "predecessor_id": ops[0]["id"],
+            },
+        ])
+
+        engine = create_engine(_SYNC_URL)
+        with engine.connect() as conn:
+            row = conn.execute(text(
+                "SELECT before_state FROM audit_records "
+                "WHERE entity_type = 'work_order' "
+                "  AND entity_id = CAST(:id AS uuid) "
+                "  AND action_type = 'work_order.graph_fixed' "
+                "ORDER BY sequence_number DESC LIMIT 1"
+            ).bindparams(id=held["id"])).fetchone()
+        engine.dispose()
+        assert row is not None, "graph_fixed audit record missing"
+
+        import json
+        before = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+        assert before["has_graph_issue"] is False, (
+            f"audit before_state lied about pre-mutation flag: "
+            f"{before['has_graph_issue']}"
+        )

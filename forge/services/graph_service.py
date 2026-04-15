@@ -252,6 +252,14 @@ async def apply_graph_patch(
             },
         )
 
+    # Capture the actual pre-mutation flag BEFORE we clear it so the
+    # audit snapshot reflects reality.  Hardcoding `true` here used
+    # to give a false positive when a held-WO engineer edited the
+    # graph before automated validation had flipped the flag — spec
+    # §5.4.6 Fix Graph preconditions are hold + engineer + version,
+    # NOT flag-set.
+    flag_before = wo.has_graph_issue
+
     await _persist_edge_diff(session, wo_id, before_edges, after_edges)
     wo.has_graph_issue = False
     wo.updated_by = user_id
@@ -271,7 +279,7 @@ async def apply_graph_patch(
             "edges": sorted(
                 [[str(a), str(b)] for a, b in before_edges]
             ),
-            "has_graph_issue": True,
+            "has_graph_issue": flag_before,
         },
         after_state={
             "edges": sorted(
@@ -369,6 +377,7 @@ async def validate_graph_on_hold(
     edges = await _current_edges(session, op_ids)
     errors = validate_graph(op_ids, edges)
 
+    flag_before = wo.has_graph_issue
     if errors:
         wo.has_graph_issue = True
         wo.updated_by = user_id
@@ -378,6 +387,8 @@ async def validate_graph_on_hold(
         # is a server-owned signal, not a user-visible edit.
         await session.flush()
 
+        # Audit the ACTUAL before-state so the chain reflects reality
+        # even when a re-validation confirmed an already-true flag.
         await create_audit_record(
             session,
             event_id=_uuid.uuid4(),
@@ -387,7 +398,7 @@ async def validate_graph_on_hold(
             action_type="work_order.graph_issue_reported",
             entity_type="work_order",
             entity_id=wo.id,
-            before_state={"has_graph_issue": False},
+            before_state={"has_graph_issue": flag_before},
             after_state={
                 "has_graph_issue": True,
                 "validation_errors": [
@@ -395,6 +406,30 @@ async def validate_graph_on_hold(
                     for e in errors
                 ],
             },
+        )
+    elif flag_before:
+        # Clean graph + previously-set flag: spec §5.4.6 success
+        # payload shows has_graph_issue=false when no issues found.
+        # Clearing covers two cases (a) admin manual flip was
+        # followed by an out-of-band graph repair, (b) the automated
+        # DAG check flagged a transient state that has since
+        # resolved.  Flip + audit for traceability; same no-version-
+        # bump rationale as the set-true path.
+        wo.has_graph_issue = False
+        wo.updated_by = user_id
+        await session.flush()
+
+        await create_audit_record(
+            session,
+            event_id=_uuid.uuid4(),
+            actor_type=ActorType.human,
+            user_id=user_id,
+            user_role=None,
+            action_type="work_order.graph_issue_cleared",
+            entity_type="work_order",
+            entity_id=wo.id,
+            before_state={"has_graph_issue": True},
+            after_state={"has_graph_issue": False},
         )
 
     return GraphValidateOut(
