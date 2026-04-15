@@ -38,6 +38,10 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from forge.api.concurrency import (
+    build_version_conflict_detail,
+    composite_conflict_response,
+)
 from forge.audit.logger import create_audit_record
 from forge.models.enums import (
     ActorType,
@@ -57,7 +61,11 @@ from forge.rules.compliance_checks import (
     check_comp_003_signoffs_complete,
 )
 from forge.rules.status_transitions import validate_op_transition
-from forge.schemas.labor import LaborCreate, LaborUpdate
+from forge.schemas.labor import (
+    LaborCreate,
+    LaborUpdate,
+    LaborVersionAssertions,
+)
 from forge.schemas.operation import OperationCreate, OperationUpdate
 from forge.services.versioning import (
     VersionConflictError,
@@ -69,6 +77,29 @@ from forge.services.versioning import (
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _op_to_conflict_dict(op: Operation) -> dict[str, object]:
+    """Serialize an Operation for the §6.3.2 409 `current_entity`
+    field.  Uses OperationOut so the shape matches the read surface.
+    """
+    from forge.schemas.operation import OperationOut
+
+    return OperationOut.model_validate(op).model_dump(mode="json")
+
+
+def _wo_to_conflict_dict(wo: WorkOrder) -> dict[str, object]:
+    """Serialize a WorkOrder for §6.3.2 409 payloads."""
+    from forge.schemas.work_order import WorkOrderOut
+
+    return WorkOrderOut.model_validate(wo).model_dump(mode="json")
+
+
+def _labor_to_conflict_dict(labor: LaborEntry) -> dict[str, object]:
+    """Serialize a LaborEntry for §6.3.2 409 payloads."""
+    from forge.schemas.labor import LaborOut
+
+    return LaborOut.model_validate(labor).model_dump(mode="json")
 
 
 async def _get_wo(
@@ -135,17 +166,15 @@ def _derive_hold_point_status(op: Operation) -> HoldPointStatus:
     function is the single source of truth for the UI's hold-point
     badge.
 
-    KNOWN CONTRACT MISMATCH (carry-forward):
+    KNOWN CONTRACT MISMATCH:
     Spec §5.3 (WO Complete preconditions) and §5.4.10 (Operation
     Complete tooltip) treat `conditionally_satisfied` as Complete-
-    eligible alongside `satisfied`.  The current COMP-001 check in
+    eligible alongside `satisfied`.  COMP-001 in
     forge.rules.compliance_checks accepts ONLY `result == accept`,
     so a frontend that allows the [Complete Operation] click on a
     `conditionally_satisfied` op will receive a 422 from the server.
-    Aligning COMP-001 to also accept `conditional` is its own slice
-    item (tracked alongside the resolve-conditional flow in §5.5.5).
-    Documenting here so the asymmetry is grep-able and so PR2 does
-    not silently bake the contradiction in.
+    The asymmetry is grep-able here; the resolution belongs in the
+    resolve-conditional flow alongside §5.5.5.
     """
     if not op.inspection_hold:
         return HoldPointStatus.none
@@ -285,9 +314,10 @@ async def get_operation_detail(
     - operation core fields
     - parent WO `program_id` (entity-route auto-switch — §3.2 / §6.7.4)
     - server-derived `hold_point_status` (§5.4.3)
-    - sequence-based predecessor summaries (§5.4.8)
-    - empty `stop_requests` (StopRequest model arrives in 5B-12;
-      the field is wire-stable and always returned as `[]` until then)
+    - predecessor summaries (§5.4.8) — per-WO graph mode:
+      explicit edges if any exist, else default-sequential fallback
+    - pending `stop_requests` (§5.4.8) — fulfilled/expired rows
+      live in the audit trail, not in this response
 
     Authorization: `_get_wo` returns 404 on cross-program per UX spec
     §3.2 / §6.7.4 (existence-leak rule).  The caller route relies on
@@ -383,10 +413,14 @@ async def update_operation(
     wo = await _get_wo(session, op.work_order_id, program_codes=program_codes)
     _require_draft_wo(wo)
 
+    # Route-layer resolve_version_assertion already guarantees int.
+    assert data.version is not None, "route must resolve version before service"
     try:
         check_version(op, data.version, entity_type="Operation")
     except VersionConflictError as e:
-        raise version_conflict_response(e) from e
+        raise version_conflict_response(
+            e, current_entity=_op_to_conflict_dict(op),
+        ) from e
 
     for field in (
         "description", "sequence", "tooling_required", "inspection_hold",
@@ -413,7 +447,9 @@ async def delete_operation(
     try:
         check_version(op, version, entity_type="Operation")
     except VersionConflictError as e:
-        raise version_conflict_response(e) from e
+        raise version_conflict_response(
+            e, current_entity=_op_to_conflict_dict(op),
+        ) from e
     wo = await _get_wo(session, op.work_order_id, program_codes=program_codes)
     _require_draft_wo(wo)
     await session.delete(op)
@@ -439,7 +475,9 @@ async def reorder_operations(
     try:
         check_version(wo, version, entity_type="WorkOrder")
     except VersionConflictError as e:
-        raise version_conflict_response(e) from e
+        raise version_conflict_response(
+            e, current_entity=_wo_to_conflict_dict(wo),
+        ) from e
 
     result = await session.execute(
         select(Operation).where(Operation.work_order_id == wo_id)
@@ -483,7 +521,9 @@ async def _transition_op(
     try:
         check_version(op, version, entity_type="Operation")
     except VersionConflictError as e:
-        raise version_conflict_response(e) from e
+        raise version_conflict_response(
+            e, current_entity=_op_to_conflict_dict(op),
+        ) from e
 
     if not validate_op_transition(op.status, target):
         raise HTTPException(
@@ -628,7 +668,9 @@ async def stop_operation(
     try:
         check_version(op, version, entity_type="Operation")
     except VersionConflictError as e:
-        raise version_conflict_response(e) from e
+        raise version_conflict_response(
+            e, current_entity=_op_to_conflict_dict(op),
+        ) from e
 
     # Find the user's open labor entry on this operation
     result = await session.execute(
@@ -854,6 +896,172 @@ async def resume_operation(
 # ---------------------------------------------------------------------------
 
 
+async def _check_labor_version_assertions(
+    session: AsyncSession,
+    target_op_id: _uuid.UUID,
+    user_id: _uuid.UUID,
+    assertions: LaborVersionAssertions,
+    program_codes: list[str] | None,
+) -> None:
+    """Validate §6.3.3 composite assertions for labor handoff.
+
+    Checks only the fields the caller supplied.  Each mismatch
+    produces one entry in the composite conflict payload
+    (§6.3.3 `conflicts` array); a single mismatch triggers 409.
+
+    Each assertion maps to a concrete live entity:
+      - target_operation   -> the op at target_op_id (url path).
+      - active_labor_entry -> the user's current active labor entry
+                              (stopped_at IS NULL).  Absent-entry is
+                              itself a stale-state mismatch — the
+                              client believes the user has an active
+                              timer; the server disagrees.
+      - active_operation   -> the operation that active labor entry
+                              is on.  Validated whenever it is
+                              supplied — the active labor lookup is
+                              performed independently so an
+                              active_operation assertion without a
+                              paired active_labor_entry assertion is
+                              STILL checked, not silently dropped.
+
+    Raises `composite_conflict_response` on any mismatch.  The
+    per-conflict detail reuses the single-entity 6.3.2 shape so
+    the frontend's conflict modal has one rendering code path.
+    """
+    conflicts: list[dict[str, object]] = []
+
+    # target_operation (the URL op_id) — program-scoped lookup so a
+    # cross-program assertion cannot leak existence/version of an op
+    # the caller has no scope for (§3.2 existence-leak rule: 404 is
+    # the correct shape, not a conflict entry).  _get_op raises 404
+    # on cross-program, which short-circuits the composite path.
+    if assertions.target_operation is not None:
+        target_op = await _get_op(
+            session, target_op_id, program_codes=program_codes,
+        )
+        if target_op.version != assertions.target_operation:
+            conflicts.append(build_version_conflict_detail(
+                entity_type="operation",
+                entity_id=str(target_op.id),
+                your_version=assertions.target_operation,
+                current_version=target_op.version,
+                current_entity=_serialize_operation_for_conflict(target_op),
+            ))
+
+    # Resolve the user's active labor entry ONCE if either
+    # active_labor_entry OR active_operation is asserted.  Sharing
+    # the lookup (a) avoids a second SELECT when both fields are
+    # supplied (spec's canonical shape) and (b) ensures
+    # active_operation is not silently dropped when the caller
+    # supplied it alone.
+    needs_active_lookup = (
+        assertions.active_labor_entry is not None
+        or assertions.active_operation is not None
+    )
+    active_labor: LaborEntry | None = None
+    if needs_active_lookup:
+        active_result = await session.execute(
+            select(LaborEntry).where(
+                LaborEntry.user_id == user_id,
+                LaborEntry.stopped_at.is_(None),
+            ),
+        )
+        active_labor = active_result.scalars().first()
+
+    # active_labor_entry
+    if assertions.active_labor_entry is not None:
+        if active_labor is None:
+            conflicts.append(build_version_conflict_detail(
+                entity_type="labor_entry",
+                entity_id="",
+                your_version=assertions.active_labor_entry,
+                current_version=0,
+                current_entity=None,
+                message=(
+                    "No active labor entry for user — client state is "
+                    "stale (asserted an active timer that does not exist)."
+                ),
+            ))
+        elif active_labor.version != assertions.active_labor_entry:
+            conflicts.append(build_version_conflict_detail(
+                entity_type="labor_entry",
+                entity_id=str(active_labor.id),
+                your_version=assertions.active_labor_entry,
+                current_version=active_labor.version,
+                current_entity=_serialize_labor_for_conflict(active_labor),
+            ))
+
+    # active_operation — validated independently against the user's
+    # active labor entry's op.  No live active entry => the assertion
+    # is stale regardless of which other keys the caller supplied.
+    if assertions.active_operation is not None:
+        if active_labor is None:
+            conflicts.append(build_version_conflict_detail(
+                entity_type="operation",
+                entity_id="",
+                your_version=assertions.active_operation,
+                current_version=0,
+                current_entity=None,
+                message=(
+                    "No active labor entry for user — cannot resolve "
+                    "active_operation; client state is stale."
+                ),
+            ))
+        else:
+            # Program-scoped lookup: a stray labor entry pointing at
+            # a cross-program op would leak existence via the
+            # version read if we used session.get directly.  _get_op
+            # 404s on cross-program instead of leaking.
+            active_op = await _get_op(
+                session, active_labor.operation_id,
+                program_codes=program_codes,
+            )
+            if active_op.version != assertions.active_operation:
+                conflicts.append(build_version_conflict_detail(
+                    entity_type="operation",
+                    entity_id=str(active_op.id),
+                    your_version=assertions.active_operation,
+                    current_version=active_op.version,
+                    current_entity=_serialize_operation_for_conflict(active_op),
+                ))
+
+    if conflicts:
+        raise composite_conflict_response(conflicts)
+
+
+def _serialize_operation_for_conflict(op: Operation) -> dict[str, object]:
+    """Minimal op payload for a §6.3.2 `current_entity`.
+
+    Enough for the frontend's conflict modal to show "id, sequence,
+    description, status, version" without pulling the full
+    OperationDetailOut (which would require the enriched
+    get_operation_detail round trip inside a conflict path).
+    """
+    return {
+        "id": str(op.id),
+        "work_order_id": str(op.work_order_id),
+        "sequence": op.sequence,
+        "description": op.description,
+        "status": op.status.value,
+        "version": op.version,
+    }
+
+
+def _serialize_labor_for_conflict(labor: LaborEntry) -> dict[str, object]:
+    """Minimal labor-entry payload for a §6.3.2 `current_entity`."""
+    return {
+        "id": str(labor.id),
+        "operation_id": str(labor.operation_id),
+        "user_id": str(labor.user_id),
+        "role": labor.role,
+        "started_at": labor.started_at.isoformat(),
+        "stopped_at": (
+            labor.stopped_at.isoformat() if labor.stopped_at else None
+        ),
+        "version": labor.version,
+    }
+
+
 async def create_labor_entry(
     session: AsyncSession,
     op_id: _uuid.UUID,
@@ -861,8 +1069,32 @@ async def create_labor_entry(
     user_id: _uuid.UUID,
     program_codes: list[str] | None = None,
 ) -> LaborEntry:
-    """Create a labor entry on an operation."""
+    """Create a labor entry on an operation.
+
+    When `data.version_assertions` is supplied, every named entity
+    version is validated against the current live state BEFORE the
+    labor entry is created; a single mismatch raises a §6.3.3
+    composite 409 with the full per-entity conflict breakdown.
+    Absent assertions preserve today's behavior (unchecked create).
+
+    Spec §5.4.2 names this endpoint as the canonical labor-start
+    surface including atomic handoff semantics.  The atomic
+    cross-op stop-and-restart is not yet wired in this service —
+    until then, version_assertions still gives clients the
+    stale-state rejection guarantee against the current
+    non-atomic create path.
+    """
+    # Program scope check runs FIRST — a cross-program target_op_id
+    # must 404 before any version_assertions read fires, otherwise
+    # assertions against foreign ops would leak existence/version
+    # (§3.2 existence-leak rule).  `_get_op` returns 404 on
+    # cross-program access.
     op = await _get_op(session, op_id, program_codes=program_codes)
+    if data.version_assertions is not None:
+        await _check_labor_version_assertions(
+            session, op_id, user_id, data.version_assertions,
+            program_codes=program_codes,
+        )
     if op.status not in (OpStatus.in_progress, OpStatus.hold):
         raise HTTPException(
             status_code=422,
@@ -917,10 +1149,14 @@ async def update_labor_entry(
             detail="Cannot update another user's labor entry",
         )
 
+    # Route-layer resolve_version_assertion already guarantees int.
+    assert data.version is not None, "route must resolve version before service"
     try:
         check_version(labor, data.version, entity_type="LaborEntry")
     except VersionConflictError as e:
-        raise version_conflict_response(e) from e
+        raise version_conflict_response(
+            e, current_entity=_labor_to_conflict_dict(labor),
+        ) from e
 
     if data.stopped_at is not None:
         labor.stopped_at = data.stopped_at

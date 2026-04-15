@@ -24,7 +24,7 @@ Why this design:
   s3_replicated=False, push their canonical JSON to S3 Object Lock,
   and set s3_replicated=True + s3_replicated_at.  The row itself
   stays mutable only for those two fields — the protect_audit_records
-  trigger (slice 1C) allows exactly these updates.
+  trigger allows exactly these updates.
 
   In auth_mode != "cognito" or when s3_bucket_audit is not configured,
   the replicator uses a deterministic stub sink.  Stub mode still

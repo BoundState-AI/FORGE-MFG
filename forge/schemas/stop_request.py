@@ -51,19 +51,24 @@ class ForceStopIn(BaseModel):
     `rationale` floor of 10 chars tracks UX spec §5.4.9 verbatim —
     short enough to catch accidental empty submits, long enough to
     force a one-phrase explanation for the audit trail.  The spec
-    also shows labor_entry_version as required for optimistic
-    locking (R5-R2-ISSUE-004).
+    names `labor_entry_version` on the body; §6.3.1 also permits
+    an `If-Match` header, so the body field is now optional and
+    the route reconciles via `resolve_version_assertion`.
     """
 
     rationale: str = Field(min_length=10, max_length=2000)
-    labor_entry_version: int
+    labor_entry_version: int | None = None
 
 
 class StopRequestIn(BaseModel):
-    """Request body for POST /api/labor-entries/{id}/stop-request."""
+    """Request body for POST /api/labor-entries/{id}/stop-request.
+
+    `labor_entry_version` is optional when an If-Match header is
+    supplied; route reconciles.
+    """
 
     note: str = Field(min_length=1, max_length=2000)
-    labor_entry_version: int
+    labor_entry_version: int | None = None
 
 
 class FlagCorrectionIn(BaseModel):

@@ -23,10 +23,8 @@ Why this design:
   OperationDetailOut is a separate, richer shape (not an extension of
   OperationOut) because:
   - hold_point_status requires a server-side scan of inspection history
-  - predecessor_summaries requires sibling-operation lookup
-  - stop_requests requires a future cross-table join (StopRequest model
-    arrives in slice 5B-12; this PR exposes the field as an empty list
-    against the spec contract)
+  - predecessor_summaries requires a join on operation_predecessors
+  - stop_requests requires a cross-table join on StopRequest
   Keeping the list shape (OperationOut) lighter avoids paying that
   enrichment cost on every list response.
 """
@@ -61,9 +59,13 @@ class OperationCreate(BaseModel):
 
 
 class OperationUpdate(BaseModel):
-    """Request body for PATCH /api/operations/{id} (draft WO only)."""
+    """Request body for PATCH /api/operations/{id} (draft WO only).
 
-    version: int
+    `version` is optional so §6.3.1 If-Match may be used instead;
+    the route reconciles via `resolve_version_assertion`.
+    """
+
+    version: int | None = None
     description: str | None = None
     sequence: int | None = None
     tooling_required: list[str] | None = None
@@ -78,7 +80,7 @@ class OperationUpdate(BaseModel):
 class OperationTransition(BaseModel):
     """Request body for operation state-transition endpoints."""
 
-    version: int
+    version: int | None = None
 
 
 class OperationReorder(BaseModel):
@@ -124,8 +126,8 @@ class PredecessorSummary(BaseModel):
 
     `sequence_number` is the spec wire name; the underlying model
     column is named `sequence`.  The service layer maps that on
-    construction so this schema stays spec-accurate without renaming
-    the database column in this PR.
+    construction so this schema stays spec-accurate without
+    renaming the database column.
     """
 
     id: uuid.UUID
@@ -137,10 +139,9 @@ class PredecessorSummary(BaseModel):
 class StopRequestSummary(BaseModel):
     """Pending stop-request summary per UX spec v1.5.1 §5.4.8 / §5.4.9.
 
-    Live as of slice 5B-12: the StopRequest entity exists and the
-    operation-detail response serializes only `pending` rows here.
-    Fulfilled and expired entries live in the audit trail (§6.6)
-    and are not returned on this read surface.
+    The operation-detail response serializes only `pending` rows
+    here.  Fulfilled and expired entries live in the audit trail
+    (§6.6) and are not returned on this read surface.
 
     `requested_by` is a nested object (user_id + display_name) so
     the engineer's Operation Detail view can render the amber
@@ -177,25 +178,24 @@ class OperationDetailOut(BaseModel):
     KNOWN CONTRACT MISMATCH note in
     forge.services.operation_service._derive_hold_point_status — the
     `conditionally_satisfied` value is exposed per spec but COMP-001
-    completion enforcement still requires `accept`; aligning the two
-    is a separate slice item.
+    completion enforcement still requires `accept`.
 
     `predecessor_summaries` carries enough data for the disabled
-    [Start Timer] tooltip in one round-trip.  The current backend is
-    sequence-based default-sequential; explicit predecessor edges
-    arrive with the graph APIs in 5B-10/11.
+    [Start Timer] tooltip in one round-trip.  When the WO has any
+    explicit predecessor edges, each op's summary is sourced from
+    those edges (roots have empty `predecessors`); otherwise the
+    summary falls back to default-sequential by `sequence`.
 
-    `stop_requests` is wire-stable but always empty until 5B-12 (see
-    StopRequestSummary docstring).
+    `stop_requests` contains only PENDING rows — fulfilled / expired
+    entries live in the audit trail (§6.6).
     """
 
     id: uuid.UUID
     work_order_id: uuid.UUID
-    # Parent WO status — required by §6.5.2 reconnect contract so the
+    # Parent WO status — §6.5.2 reconnect contract needs it so the
     # client can render the work-order-on-hold banner (§5.3, §5.4.10)
-    # and gate operation actions against parent state in a single
-    # round-trip.  Without this field a reconnect would require a
-    # second fetch of the parent WO before any UI is safe to render.
+    # and gate operation actions against parent state without a
+    # second fetch of the parent WO.
     work_order_status: WOStatus
     program_id: uuid.UUID
     sequence_number: int

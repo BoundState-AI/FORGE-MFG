@@ -14,25 +14,20 @@ Compliance: NASA-CSET, SWE-013, SWE-032
 Safety Critical: True
 
 Why this design:
-  Audit endpoints are gated by admin:manage in this PR even though
-  spec §6.6.3 anticipates engineer/qa_manager surfaces (Work Order /
-  NCR audit tabs).  Those tabs need per-entity scope filtering
-  ("does the caller have access to the entity at entity_id?") which
-  requires a per-entity-type authorization helper that does not yet
-  exist.  Shipping the admin surface now and adding the per-entity
-  wrapper in a later slice is the honest split — the alternative
+  Audit endpoints are gated by admin:manage even though spec §6.6.3
+  anticipates engineer/qa_manager surfaces (Work Order / NCR audit
+  tabs).  Those tabs need per-entity scope filtering ("does the
+  caller have access to the entity at entity_id?") which requires
+  a per-entity-type authorization helper that does not yet exist.
+  The admin-only surface is the honest split — the alternative
   would be to expose the global event list to every authenticated
   user without a scope check, which would leak entity_ids across
   programs.
 
-  /api/audit/* sits OUTSIDE the X-Program-Id wire contract because
-  audit reads cross program boundaries by definition (a single
-  integrity check covers all programs).  The middleware bypass is
-  not yet reflective of this — the path is not in PUBLIC_PREFIXES.
-  For PR3 we accept that admin callers send a UUID (admin role
-  implicit-pass per §6.7.2 lets it through regardless of the value);
-  formalizing the bypass is on the backlog alongside the per-entity
-  wrapper.
+  /api/audit/* is in PUBLIC_PREFIXES (middleware bypass) because
+  audit reads cross program boundaries by definition — a single
+  integrity check covers all programs and entity_id filters are
+  not naturally program-scoped.
 """
 
 from __future__ import annotations
@@ -68,14 +63,13 @@ async def list_events(
 ) -> PaginatedResponse[AuditEventOut]:
     """Paginated audit event list with filters (UX spec §6.6.2).
 
-    Filters in this PR: entity_type, entity_id, actor_user_id,
-    action, timestamp_from/to.  The spec also names `program_id`;
-    deferred — see audit_service docstring for why.
+    Current filters: entity_type, entity_id, actor_user_id, action,
+    timestamp_from/to.  The spec also names `program_id`; deferred
+    — see audit_service docstring for why.
 
     Typed PaginatedResponse[AuditEventOut] gives the OpenAPI
-    generator the precise item shape — required for the slice 5B-21
-    typed client to compile against this surface without hand-rolling
-    the envelope.
+    generator the precise item shape so the generated client can
+    bind to the envelope + item type directly.
     """
     filters = AuditEventFilters(
         entity_type=entity_type,

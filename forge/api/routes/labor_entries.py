@@ -2,9 +2,9 @@
 """
 Module:   Labor Entries Routes
 Purpose:  Canonical `/api/labor-entries/*` surface: PATCH for
-          corrections (slice 5B-9 normalization) plus the three
-          labor-control endpoints from UX spec v1.5.1 §5.4.9 +
-          §5.4.5 (force-stop, stop-request, flag-correction).
+          corrections plus the three labor-control endpoints from
+          UX spec v1.5.1 §5.4.9 + §5.4.5 (force-stop, stop-request,
+          flag-correction).
 
 BoundState AI 2026
 Version: 0.1.0
@@ -39,8 +39,8 @@ Why this design:
     - /stop-request:        labor:request_stop (operator only).
     - /flag-correction:     labor:flag_correction (operator only).
 
-  Each new permission was added in migration f4d8b2e6c31a with DB
-  seed alignment.
+  Each permission is DB-seeded; see migrations/ for the role
+  mapping alignment if you need provenance.
 """
 
 from __future__ import annotations
@@ -48,10 +48,11 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from forge.api.auth import AuthContext, get_auth_context, require_permission
+from forge.api.concurrency import resolve_version_assertion, strong_etag
 from forge.api.deps import get_db
 from forge.schemas.labor import LaborOut, LaborUpdate
 from forge.schemas.stop_request import (
@@ -70,15 +71,14 @@ router = APIRouter(prefix="/api/labor-entries", tags=["labor-entries"])
 async def update_labor_entry(
     labor_id: uuid.UUID,
     data: LaborUpdate,
+    response: Response,
+    if_match: str | None = Header(default=None, alias="If-Match"),
     auth: AuthContext = Depends(get_auth_context),
     session: AsyncSession = Depends(get_db),
 ) -> Any:
     """Canonical PATCH for labor-entry corrections (UX spec §3.2).
 
-    Mirrors the legacy /api/labor/{id} handler in operations.py —
-    both delegate to op_svc.update_labor_entry.  Permission split
-    (labor:update_own vs labor:update_any) is unchanged from the
-    pre-normalization surface; only the URL moved.
+    §6.3.1 version assertion via body.version OR If-Match.
     """
     can_any = auth.has_permission("labor:update_any")
     can_own = auth.has_permission("labor:update_own")
@@ -91,6 +91,8 @@ async def update_labor_entry(
             ),
         )
 
+    expected = resolve_version_assertion(data.version, if_match)
+    data = data.model_copy(update={"version": expected})
     labor = await op_svc.update_labor_entry(
         session, labor_id, data, uuid.UUID(auth.sub),
         can_update_any=can_any,
@@ -98,6 +100,7 @@ async def update_labor_entry(
     )
     await session.commit()
     await session.refresh(labor)
+    response.headers["ETag"] = strong_etag(labor.version)
     return LaborOut.model_validate(labor)
 
 
@@ -105,23 +108,25 @@ async def update_labor_entry(
 async def force_stop(
     labor_id: uuid.UUID,
     data: ForceStopIn,
+    response: Response,
+    if_match: str | None = Header(default=None, alias="If-Match"),
     auth: AuthContext = Depends(require_permission("labor:force_stop")),
     session: AsyncSession = Depends(get_db),
 ) -> LaborOut:
     """Engineer stops another user's active labor entry (UX §5.4.9).
 
-    Emits labor.stopped_by_engineer, transitions any pending
-    stop-request on this entry to `fulfilled`, and returns the
-    updated LaborEntry.  Service-layer enforcement catches own-
-    entry attempts (LABOR-STOP-002), already-stopped entries
-    (LABOR-STOP-001), and version conflicts (409).
+    §6.3.1 version assertion via `labor_entry_version` body field
+    OR `If-Match` header.
     """
+    expected = resolve_version_assertion(data.labor_entry_version, if_match)
+    data = data.model_copy(update={"labor_entry_version": expected})
     labor = await stop_svc.apply_force_stop(
         session, labor_id, data, uuid.UUID(auth.sub),
         program_codes=auth.programs,
     )
     await session.commit()
     await session.refresh(labor)
+    response.headers["ETag"] = strong_etag(labor.version)
     return LaborOut.model_validate(labor)
 
 
@@ -133,16 +138,18 @@ async def force_stop(
 async def create_stop_request(
     labor_id: uuid.UUID,
     data: StopRequestIn,
+    if_match: str | None = Header(default=None, alias="If-Match"),
     auth: AuthContext = Depends(require_permission("labor:request_stop")),
     session: AsyncSession = Depends(get_db),
 ) -> StopRequestOut:
     """Operator requests an engineer stop another user's entry
     (UX §5.4.9).
 
-    Creates a pending StopRequest, emits labor.stop_requested.
-    Duplicate pending requests are blocked at the DB by the partial
-    unique index and surface as LABOR-STOP-REQ-002.
+    §6.3.1 version assertion via `labor_entry_version` body field
+    OR `If-Match` header.
     """
+    expected = resolve_version_assertion(data.labor_entry_version, if_match)
+    data = data.model_copy(update={"labor_entry_version": expected})
     result = await stop_svc.apply_stop_request(
         session, labor_id, data, uuid.UUID(auth.sub),
         program_codes=auth.programs,

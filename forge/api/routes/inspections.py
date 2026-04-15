@@ -26,7 +26,8 @@ Why this design:
   rather than `inspect:create`, so qa_manager drill-through
   (read-only per §5.5.5) works without granting write capability.
   Typed PaginatedResponse[InspectionQueueRowOut] gives the OpenAPI
-  generator the precise item shape required by slice 5B-21.
+  generator the precise item shape so generated clients can bind
+  to the queue row type directly.
 """
 
 from __future__ import annotations

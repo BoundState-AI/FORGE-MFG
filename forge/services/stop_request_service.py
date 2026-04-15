@@ -36,9 +36,9 @@ Why this design:
 
   Authorization rules are spec-exact and split three ways:
 
-    - engineer for force-stop (labor:force_stop, added in
-      migration f4d8b2e6c31a; qa_manager's labor:update_any does
-      NOT imply this).
+    - engineer for force-stop (labor:force_stop — qa_manager's
+      labor:update_any does NOT imply this per §5.4.9
+      LABOR-STOP-003).
     - operator for stop-request and flag-correction
       (labor:request_stop, labor:flag_correction).
 
@@ -184,7 +184,7 @@ async def _resolve_requester_display_name(
 
 
 # ---------------------------------------------------------------------------
-# Shared stop helper — used by force-stop and WO-hold cascade
+# Shared stop helper — single source of truth for stop transitions
 # ---------------------------------------------------------------------------
 
 
@@ -294,12 +294,22 @@ async def apply_force_stop(
             "Cannot force-stop your own labor entry",
         )
 
+    # Route-layer resolve_version_assertion already guarantees int.
+    assert data.labor_entry_version is not None, (
+        "route must resolve version before service"
+    )
     try:
         check_version(
             labor, data.labor_entry_version, entity_type="LaborEntry",
         )
     except VersionConflictError as e:
-        raise version_conflict_response(e) from e
+        from forge.schemas.labor import LaborOut
+        raise version_conflict_response(
+            e,
+            current_entity=LaborOut.model_validate(labor).model_dump(
+                mode="json",
+            ),
+        ) from e
 
     now = datetime.now(UTC)
     summary = await stop_labor_entry_and_resolve(
@@ -366,12 +376,22 @@ async def apply_stop_request(
             "Cannot request stop on your own labor entry",
         )
 
+    # Route-layer resolve_version_assertion already guarantees int.
+    assert data.labor_entry_version is not None, (
+        "route must resolve version before service"
+    )
     try:
         check_version(
             labor, data.labor_entry_version, entity_type="LaborEntry",
         )
     except VersionConflictError as e:
-        raise version_conflict_response(e) from e
+        from forge.schemas.labor import LaborOut
+        raise version_conflict_response(
+            e,
+            current_entity=LaborOut.model_validate(labor).model_dump(
+                mode="json",
+            ),
+        ) from e
 
     stop_request = StopRequest(
         labor_entry_id=labor.id,
@@ -444,8 +464,9 @@ async def apply_flag_correction(
     attention signal only.  The engineer sees flagged entries
     on their next poll of the Work Order view (§5.4.5 language:
     "flagged entries appear in the engineer's work order view
-    as a pending item"); implementing that read surface is out
-    of scope for this slice and tracked as a separate item.
+    as a pending item"); the read surface that renders those
+    flagged entries is tracked separately — the audit row is
+    the durable signal regardless.
 
     Invariants:
       1. Entry exists, program scope (404 on cross-program).

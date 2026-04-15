@@ -231,7 +231,7 @@ async def get_part(
     part_id: _uuid.UUID,
     program_codes: list[str] | None = None,
 ) -> PartInstance:
-    """Load a part in scope (used by tests and traceability)."""
+    """Load a part with program-scope enforcement."""
     return await _load_part_in_scope(session, part_id, program_codes)
 
 

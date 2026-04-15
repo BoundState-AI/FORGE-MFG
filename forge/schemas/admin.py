@@ -159,14 +159,16 @@ class ProgramUpdate(BaseModel):
     at the service layer (model_dump(exclude_unset=True) is the
     canonical pattern in admin_service).
 
-    `version` is REQUIRED for optimistic locking per UX spec v1.5.1
-    §6.3 (composite-field shape uses body version, not the If-Match
-    header, because admin updates are typically composite — name +
-    flags in one request).  A stale version produces 409 with the
-    standard envelope.
+    `version` is OPTIONAL on the wire: UX spec §6.3.1 permits either
+    body-version OR an If-Match header.  The route reconciles via
+    `resolve_version_assertion` and rejects missing-both with 400.
+    Admin updates are typically composite (name + flags in one
+    request) so body-version is still the ergonomic default, but
+    tooling that already sets If-Match globally works without
+    duplicating the assertion.
     """
 
-    version: int
+    version: int | None = None
     name: str | None = None
     active: bool | None = None
     schedule_enabled: bool | None = None

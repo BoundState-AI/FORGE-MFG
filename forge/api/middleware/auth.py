@@ -25,9 +25,10 @@ Why this design:
   pass-through so development and testing can proceed without a live
   Cognito user pool.
 
-  Claim sync from admin writes (Cognito attribute update after DB role/
-  program change) is NOT complete until slice 3C.  The 30-minute drift
-  window (spec §5.0.4) is a deliberate tradeoff for normal actions.
+  Claim sync from admin writes (Cognito attribute update after DB
+  role/program change) is live via forge.services.cognito_sync.  The
+  30-minute drift window (spec §5.0.4) is a deliberate tradeoff for
+  normal actions; zero-drift actions still check live DB roles.
 """
 
 from __future__ import annotations

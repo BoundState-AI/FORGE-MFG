@@ -19,7 +19,7 @@ Why this design:
   Access tokens carry custom:roles and custom:programs claims injected by
   a Cognito Pre Token Generation trigger.  Per-request authorization uses
   these JWT claims as the authority — the database is only queried for
-  zero-drift actions (admin:manage, deactivation) which land in slice 3C.
+  zero-drift actions (admin:manage, deactivation).
 
   ID tokens are explicitly rejected: the spec §5.0.4 states "ID tokens
   are not accepted by the API."
@@ -27,13 +27,13 @@ Why this design:
   JWKS keys are cached with a 1-hour TTL to avoid per-request network
   calls.  On key rotation, a cache miss triggers a fresh fetch.
 
-  Claim sync from admin writes is live as of slice 3C: admin endpoints
-  that change a user's role or program set call Cognito
-  AdminUpdateUserAttributes immediately, and deactivation or admin-role
-  removal additionally calls AdminUserGlobalSignOut (spec §5.0.4).
-  Updated claims take effect on the next token refresh; the 30-minute
-  drift window for normal actions is a deliberate tradeoff (spec
-  §5.0.4).  See forge.services.cognito_sync.
+  Claim sync from admin writes: admin endpoints that change a user's
+  role or program set call Cognito AdminUpdateUserAttributes
+  immediately, and deactivation or admin-role removal additionally
+  calls AdminUserGlobalSignOut (spec §5.0.4).  Updated claims take
+  effect on the next token refresh; the 30-minute drift window for
+  normal actions is a deliberate tradeoff (spec §5.0.4).  See
+  forge.services.cognito_sync.
 """
 
 from __future__ import annotations

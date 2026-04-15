@@ -226,7 +226,13 @@ async def apply_graph_patch(
     try:
         check_version(wo, version, entity_type="WorkOrder")
     except VersionConflictError as e:
-        raise version_conflict_response(e) from e
+        from forge.schemas.work_order import WorkOrderOut
+        raise version_conflict_response(
+            e,
+            current_entity=WorkOrderOut.model_validate(wo).model_dump(
+                mode="json",
+            ),
+        ) from e
 
     _require_hold(wo)
 
@@ -260,7 +266,7 @@ async def apply_graph_patch(
     # NOT flag-set.
     flag_before = wo.has_graph_issue
 
-    await _persist_edge_diff(session, wo_id, before_edges, after_edges)
+    await _persist_edge_diff(session, before_edges, after_edges)
     wo.has_graph_issue = False
     wo.updated_by = user_id
     increment_version(wo)
@@ -304,20 +310,17 @@ async def apply_graph_patch(
 
 
 async def _persist_edge_diff(
-    session: AsyncSession, wo_id: _uuid.UUID,
+    session: AsyncSession,
     before: set[tuple[_uuid.UUID, _uuid.UUID]],
     after: set[tuple[_uuid.UUID, _uuid.UUID]],
 ) -> None:
     """Insert added edges, delete removed edges — atomic diff.
 
-    Computing the diff rather than wiping-and-reinserting means
-    the edge table preserves any row-level metadata a future slice
-    might add (created_at on an edge, for instance).  Keeping the
-    WO id in scope keeps the delete tight — the composite PK by
-    itself is enough, but filtering down to this WO's ops via a
-    subquery would be overkill at current graph sizes.
+    Computing the diff rather than wiping-and-reinserting keeps any
+    row-level metadata on the edge table intact across mutations
+    (there is none today; preserving the shape means a future
+    created_at column would not require a write-path rewrite).
     """
-    del wo_id  # kept for signature stability if a future ACL needs it
     removed = before - after
     added = after - before
     if removed:

@@ -27,9 +27,9 @@ Why this design:
      defends against any future bypass.
   3. Role context: the service filters tiles by caller roles per
      UX §5.1 audience language; the route passes auth.roles through.
-  4. Response shape: DashboardSummaryOut is typed so the OpenAPI
-     client generator (slice 5B-21) can bind to the exact wire
-     contract without hand-rolling the tile structure.
+  4. Response shape: DashboardSummaryOut is typed so generated
+     OpenAPI clients bind to the exact wire contract without
+     hand-rolling the tile structure.
 """
 
 from __future__ import annotations

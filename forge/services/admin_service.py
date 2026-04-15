@@ -522,7 +522,7 @@ async def remove_program(
 
 
 # ---------------------------------------------------------------------------
-# Helpers used by routes for response-building
+# Response-building helpers
 # ---------------------------------------------------------------------------
 
 
@@ -604,10 +604,9 @@ async def create_program(
     Invariant: caller has admin:manage; the unique constraint on
     `code` rejects duplicates at the DB level.
 
-    Feature flags omitted from the body fall back to model server
-    defaults (schedule_enabled=true, oracle_access=false,
-    overdue_threshold_hours=24) — set during the slice 5B-1 program
-    flag migration.
+    Feature flags omitted from the body fall back to the Program
+    model's server-defaults (schedule_enabled=true, oracle_access=false,
+    overdue_threshold_hours=24).
     """
     await _require_admin_manage(session, actor_id)
 
@@ -674,10 +673,19 @@ async def update_program(
     await _require_admin_manage(session, actor_id)
     program = await _get_program(session, program_id)
 
+    # Route-layer resolve_version_assertion already ensured data.version
+    # is an int; assert keeps the type narrow for check_version.
+    assert data.version is not None, "route must resolve version before service"
     try:
         check_version(program, data.version, entity_type="Program")
     except VersionConflictError as exc:
-        raise version_conflict_response(exc) from exc
+        from forge.schemas.admin import ProgramOut
+        raise version_conflict_response(
+            exc,
+            current_entity=ProgramOut.model_validate(program).model_dump(
+                mode="json",
+            ),
+        ) from exc
 
     before_state = {
         "name": program.name,

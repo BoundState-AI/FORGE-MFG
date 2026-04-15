@@ -43,6 +43,18 @@ from forge.services.versioning import (
 )
 
 
+def _wo_to_conflict_dict(wo: WorkOrder) -> dict[str, object]:
+    """Serialize a WorkOrder for the §6.3.2 409 `current_entity` field.
+
+    Uses WorkOrderOut.model_validate so the payload shape matches the
+    GET response exactly — the client's cached entity can be
+    replaced directly from this dict without a reshape layer.
+    """
+    from forge.schemas.work_order import WorkOrderOut
+
+    return WorkOrderOut.model_validate(wo).model_dump(mode="json")
+
+
 async def _generate_wo_number(session: AsyncSession) -> str:
     """Generate the next WO number in WO-YYYY-NNNN format.
 
@@ -189,10 +201,14 @@ async def update_work_order(
             detail="Only draft work orders can be edited",
         )
 
+    # Route-layer resolve_version_assertion already guarantees int.
+    assert data.version is not None, "route must resolve version before service"
     try:
         check_version(wo, data.version, entity_type="WorkOrder")
     except VersionConflictError as e:
-        raise version_conflict_response(e) from e
+        raise version_conflict_response(
+            e, current_entity=_wo_to_conflict_dict(wo),
+        ) from e
 
     if data.engine_serial is not None:
         wo.engine_serial = data.engine_serial
@@ -239,7 +255,9 @@ async def _transition_wo(
     try:
         check_version(wo, version, entity_type="WorkOrder")
     except VersionConflictError as e:
-        raise version_conflict_response(e) from e
+        raise version_conflict_response(
+            e, current_entity=_wo_to_conflict_dict(wo),
+        ) from e
 
     if not validate_wo_transition(wo.status, target):
         raise HTTPException(
@@ -596,7 +614,9 @@ async def close_work_order(
 
     State leaving: complete or hold.  State entering: closed.
     Invariant: valid transition per spec §4.3.
-    NCR disposition check deferred to slice 3A.
+    Per-NCR disposition preconditions (§5.3 close preconditions)
+    are not enforced here yet — deferred pending the NPR 8735.2C
+    closure-as-attestation product decision (§5.3 callout).
     """
     return await _transition_wo(
         session, wo_id, WOStatus.closed, version, user_id,

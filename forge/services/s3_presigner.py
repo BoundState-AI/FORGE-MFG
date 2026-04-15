@@ -27,8 +27,7 @@ Why this design:
       presigned URL against GovCloud S3.  This is the production path.
     - Local / test (no S3 endpoint configured): a deterministic stub URL
       is returned.  Tests assert shape and permission gates, not URL
-      validity — that validation belongs in integration against AWS,
-      which is out of scope for slice 3B.
+      validity — that validation belongs in integration against AWS.
 
   The presigner never writes to the database.  State changes to
   `upload_status` live in the service that invokes the presigner, so

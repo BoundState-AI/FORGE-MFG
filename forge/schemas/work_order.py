@@ -44,10 +44,17 @@ class WorkOrderCreate(BaseModel):
 class WorkOrderUpdate(BaseModel):
     """Request body for PATCH /api/work-orders/{id} (draft only).
 
-    Spec §5.15: version is required for optimistic locking.
+    Spec §6.3.1 allows either `version` in the body OR an
+    `If-Match` header for optimistic locking.  Making `version`
+    optional here keeps the body contract lenient — the route
+    resolves the effective expected version via
+    forge.api.concurrency.effective_expected_version and rejects
+    missing-both with 400 MISSING_VERSION, mismatched-both with
+    409 VERSION_CONFLICT.  Callers still using body-only continue
+    unchanged.
     """
 
-    version: int
+    version: int | None = None
     engine_serial: str | None = None
     module: str | None = None
     build_phase: BuildPhase | None = None
@@ -58,26 +65,31 @@ class WorkOrderUpdate(BaseModel):
 class WorkOrderTransition(BaseModel):
     """Request body for state-transition POST endpoints.
 
-    Spec §5.15: version is required on all state-transition endpoints.
+    Same contract as WorkOrderUpdate: body-version is optional so
+    an If-Match header alone satisfies §6.3.1.
     """
 
-    version: int
+    version: int | None = None
 
 
 class WorkOrderHoldIn(BaseModel):
     """Request body for POST /api/work-orders/{id}/hold (UX spec v1.5.1
     §5.3 Hold Cascading).
 
-    `force_stop_labor` defaults to False (administrative hold).  When
-    True, the server atomically stops all active labor entries on child
-    operations and emits one `labor.stopped_by_hold` audit event per
-    stopped entry.  `reason` is currently nullable — the spec mentions
-    a hold reason but the frozen contract (§5.3 Hold Cascading
-    subsection) only binds it as future SSE payload data, so the field
-    is accepted and stored in the audit before_state but not required.
+    `version` is optional to support the §6.3.1 If-Match alternative
+    (route-level `resolve_version_assertion` enforces exactly-one-of
+    body.version or If-Match is present).  `force_stop_labor`
+    defaults to False (administrative hold).  When True, the server
+    atomically stops all active labor entries on child operations
+    and emits one `labor.stopped_by_hold` audit event per stopped
+    entry.  `reason` is currently nullable — the spec mentions a
+    hold reason but the frozen contract (§5.3 Hold Cascading
+    subsection) only binds it as future SSE payload data, so the
+    field is accepted and stored in the audit before_state but not
+    required.
     """
 
-    version: int
+    version: int | None = None
     force_stop_labor: bool = False
     reason: str | None = Field(default=None, max_length=2000)
 
@@ -118,9 +130,9 @@ class WorkOrderOut(BaseModel):
     `has_graph_issue` (UX spec v1.5.1 §5.4.6) ships on every WO
     response — list, detail, and every state-transition response —
     so the frontend never has to compose a separate fetch to render
-    the [Fix Graph] / [Report Graph Issue] buttons.  In slice 5B-10
-    the field is read-only surface; the active setters land with the
-    graph-write endpoints in the next slice.
+    the [Fix Graph] / [Report Graph Issue] buttons.  The field is
+    written by the graph validator at release + Fix Graph + Report
+    Graph Issue; reads treat it as authoritative.
     """
 
     id: uuid.UUID

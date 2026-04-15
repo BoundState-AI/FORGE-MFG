@@ -23,10 +23,14 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Header, Query, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from forge.api.auth import AuthContext, require_permission
+from forge.api.concurrency import (
+    resolve_version_assertion,
+    strong_etag,
+)
 from forge.api.deps import get_db
 from forge.schemas.graph import (
     GraphPatchIn,
@@ -88,11 +92,18 @@ async def list_work_orders(
 @router.get("/{wo_id}", response_model=WorkOrderOut)
 async def get_work_order(
     wo_id: uuid.UUID,
+    response: Response,
     auth: AuthContext = Depends(require_permission("wo:read")),
     session: AsyncSession = Depends(get_db),
 ) -> WorkOrderOut:
-    """Get work order detail with operations (program-scoped)."""
+    """Get work order detail with operations (program-scoped).
+
+    Emits `ETag: "<version>"` per UX spec v1.5.1 §6.3.1 so the
+    client can send it back as `If-Match` on a subsequent mutation
+    without re-reading the body.
+    """
     wo = await wo_svc.get_work_order(session, wo_id, program_codes=auth.programs)
+    response.headers["ETag"] = strong_etag(wo.version)
     return WorkOrderOut.model_validate(wo)
 
 
@@ -100,16 +111,28 @@ async def get_work_order(
 async def update_work_order(
     wo_id: uuid.UUID,
     data: WorkOrderUpdate,
+    response: Response,
+    if_match: str | None = Header(default=None, alias="If-Match"),
     auth: AuthContext = Depends(require_permission("wo:update")),
     session: AsyncSession = Depends(get_db),
 ) -> WorkOrderOut:
-    """Update work order fields (draft only, version check)."""
+    """Update work order fields (draft only, version check).
+
+    Accepts the version assertion via either body.version or
+    If-Match per UX spec §6.3.1; `resolve_version_assertion`
+    rejects mismatched / missing / weak-ETag cases.
+    """
+    expected = resolve_version_assertion(data.version, if_match)
+    # WorkOrderUpdate's body version becomes the resolved int so the
+    # service-layer check_version call still sees a single int.
+    data = data.model_copy(update={"version": expected})
     wo = await wo_svc.update_work_order(
         session, wo_id, data, uuid.UUID(auth.sub),
         program_codes=auth.programs,
     )
     await session.commit()
     await session.refresh(wo)
+    response.headers["ETag"] = strong_etag(wo.version)
     return WorkOrderOut.model_validate(wo)
 
 
@@ -117,20 +140,25 @@ async def update_work_order(
 async def release_work_order(
     wo_id: uuid.UUID,
     body: WorkOrderTransition,
+    response: Response,
+    if_match: str | None = Header(default=None, alias="If-Match"),
     auth: AuthContext = Depends(require_permission("wo:release")),
     session: AsyncSession = Depends(get_db),
 ) -> WorkOrderOut:
     """Release work order (draft → released).
 
     SOD-004 (spec §4.2, §5.1): author cannot release same WO.
-    Enforcement happens in the service layer.
+    Enforcement happens in the service layer.  Accepts either
+    body.version or If-Match per §6.3.1.
     """
+    expected = resolve_version_assertion(body.version, if_match)
     wo = await wo_svc.release_work_order(
-        session, wo_id, body.version, uuid.UUID(auth.sub),
+        session, wo_id, expected, uuid.UUID(auth.sub),
         program_codes=auth.programs,
     )
     await session.commit()
     await session.refresh(wo)
+    response.headers["ETag"] = strong_etag(wo.version)
     return WorkOrderOut.model_validate(wo)
 
 
@@ -138,26 +166,20 @@ async def release_work_order(
 async def recall_work_order(
     wo_id: uuid.UUID,
     body: WorkOrderTransition,
+    response: Response,
+    if_match: str | None = Header(default=None, alias="If-Match"),
     auth: AuthContext = Depends(require_permission("wo:recall")),
     session: AsyncSession = Depends(get_db),
 ) -> WorkOrderOut:
-    """Recall work order (released → draft, UX spec v1.5.1 §5.3).
-
-    Pre-activation graph-correction path: returns a released WO to
-    draft so the engineer can fix the operation graph and re-release.
-    Only valid while still in `released` — once an op starts, the
-    WO atomically moves to `in_progress` and Recall is no longer
-    appropriate (the correction path from there is Hold + Fix Graph).
-
-    Engineer role only per §5.3 permission matrix, enforced by the
-    `wo:recall` permission dependency.
-    """
+    """Recall work order — If-Match + body.version per §6.3.1."""
+    expected = resolve_version_assertion(body.version, if_match)
     wo = await wo_svc.recall_work_order(
-        session, wo_id, body.version, uuid.UUID(auth.sub),
+        session, wo_id, expected, uuid.UUID(auth.sub),
         program_codes=auth.programs,
     )
     await session.commit()
     await session.refresh(wo)
+    response.headers["ETag"] = strong_etag(wo.version)
     return WorkOrderOut.model_validate(wo)
 
 
@@ -165,6 +187,8 @@ async def recall_work_order(
 async def fix_graph(
     wo_id: uuid.UUID,
     body: GraphPatchIn,
+    response: Response,
+    if_match: str | None = Header(default=None, alias="If-Match"),
     auth: AuthContext = Depends(require_permission("wo:graph_edit")),
     session: AsyncSession = Depends(get_db),
 ) -> GraphPatchOut:
@@ -180,8 +204,9 @@ async def fix_graph(
     Cross-program returns 404 (§3.2 existence-leak rule), inherited
     from get_work_order inside the service.
     """
+    expected = resolve_version_assertion(body.version, if_match)
     wo, ops = await graph_svc.apply_graph_patch(
-        session, wo_id, body.version, body.predecessor_changes,
+        session, wo_id, expected, body.predecessor_changes,
         uuid.UUID(auth.sub),
         program_codes=auth.programs,
     )
@@ -198,6 +223,7 @@ async def fix_graph(
         )
         op_details.append(OperationDetailOut.model_validate(payload))
 
+    response.headers["ETag"] = strong_etag(wo.version)
     return GraphPatchOut(
         work_order=WorkOrderOut.model_validate(wo),
         operations=op_details,
@@ -232,6 +258,8 @@ async def validate_graph_endpoint(
 async def hold_work_order(
     wo_id: uuid.UUID,
     body: WorkOrderHoldIn,
+    response: Response,
+    if_match: str | None = Header(default=None, alias="If-Match"),
     auth: AuthContext = Depends(require_permission("wo:hold")),
     session: AsyncSession = Depends(get_db),
 ) -> WorkOrderHoldOut:
@@ -245,14 +273,16 @@ async def hold_work_order(
     SSE `wo_state_changed` payload (§6.5.2) can reuse the same
     data shape.
     """
+    expected = resolve_version_assertion(body.version, if_match)
     wo, stopped = await wo_svc.hold_work_order(
-        session, wo_id, body.version, uuid.UUID(auth.sub),
+        session, wo_id, expected, uuid.UUID(auth.sub),
         program_codes=auth.programs,
         force_stop_labor=body.force_stop_labor,
         reason=body.reason,
     )
     await session.commit()
     await session.refresh(wo)
+    response.headers["ETag"] = strong_etag(wo.version)
     return WorkOrderHoldOut(
         work_order=WorkOrderOut.model_validate(wo),
         force_stop_labor=body.force_stop_labor,
@@ -271,16 +301,20 @@ async def hold_work_order(
 async def resume_work_order(
     wo_id: uuid.UUID,
     body: WorkOrderTransition,
+    response: Response,
+    if_match: str | None = Header(default=None, alias="If-Match"),
     auth: AuthContext = Depends(require_permission("wo:resume")),
     session: AsyncSession = Depends(get_db),
 ) -> WorkOrderOut:
     """Resume work order from hold."""
+    expected = resolve_version_assertion(body.version, if_match)
     wo = await wo_svc.resume_work_order(
-        session, wo_id, body.version, uuid.UUID(auth.sub),
+        session, wo_id, expected, uuid.UUID(auth.sub),
         program_codes=auth.programs,
     )
     await session.commit()
     await session.refresh(wo)
+    response.headers["ETag"] = strong_etag(wo.version)
     return WorkOrderOut.model_validate(wo)
 
 
@@ -288,16 +322,20 @@ async def resume_work_order(
 async def complete_work_order(
     wo_id: uuid.UUID,
     body: WorkOrderTransition,
+    response: Response,
+    if_match: str | None = Header(default=None, alias="If-Match"),
     auth: AuthContext = Depends(require_permission("wo:complete")),
     session: AsyncSession = Depends(get_db),
 ) -> WorkOrderOut:
     """Mark work order complete (all ops must be complete)."""
+    expected = resolve_version_assertion(body.version, if_match)
     wo = await wo_svc.complete_work_order(
-        session, wo_id, body.version, uuid.UUID(auth.sub),
+        session, wo_id, expected, uuid.UUID(auth.sub),
         program_codes=auth.programs,
     )
     await session.commit()
     await session.refresh(wo)
+    response.headers["ETag"] = strong_etag(wo.version)
     return WorkOrderOut.model_validate(wo)
 
 
@@ -305,14 +343,18 @@ async def complete_work_order(
 async def close_work_order(
     wo_id: uuid.UUID,
     body: WorkOrderTransition,
+    response: Response,
+    if_match: str | None = Header(default=None, alias="If-Match"),
     auth: AuthContext = Depends(require_permission("wo:close")),
     session: AsyncSession = Depends(get_db),
 ) -> WorkOrderOut:
     """Close work order (final QA closure)."""
+    expected = resolve_version_assertion(body.version, if_match)
     wo = await wo_svc.close_work_order(
-        session, wo_id, body.version, uuid.UUID(auth.sub),
+        session, wo_id, expected, uuid.UUID(auth.sub),
         program_codes=auth.programs,
     )
     await session.commit()
     await session.refresh(wo)
+    response.headers["ETag"] = strong_etag(wo.version)
     return WorkOrderOut.model_validate(wo)

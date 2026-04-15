@@ -19,12 +19,12 @@ Why this design:
   Operation start requires role and shift for the labor entry.
   Labor update checks labor:update_own vs labor:update_any.
 
-  GET /api/operations/{op_id} (5B-6) returns the enriched
-  OperationDetailOut shape required by the engineer Operation Detail
+  GET /api/operations/{op_id} returns the enriched
+  OperationDetailOut shape named by the engineer Operation Detail
   page (§5.4.11) and the SSE reconnect contract (§6.5.2 — every SSE
   reconnect refetches this endpoint as the authoritative
   reconciliation surface).  Authorization rides on the §6.7.4
-  entity-detail GET exception in PR1's program-scope middleware.
+  entity-detail GET exception in the program-scope middleware.
 """
 
 from __future__ import annotations
@@ -32,10 +32,11 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from forge.api.auth import AuthContext, get_auth_context, require_permission
+from forge.api.concurrency import resolve_version_assertion, strong_etag
 from forge.api.deps import get_db
 from forge.schemas.labor import LaborCreate, LaborOut, LaborUpdate
 from forge.schemas.operation import (
@@ -88,10 +89,14 @@ async def create_operation(
 @router.get("/api/operations/{op_id}", response_model=OperationDetailOut)
 async def get_operation(
     op_id: uuid.UUID,
+    response: Response,
     auth: AuthContext = Depends(require_permission("op:read")),
     session: AsyncSession = Depends(get_db),
 ) -> OperationDetailOut:
     """Enriched operation detail per UX spec v1.5.1 §5.4.8.
+
+    Emits `ETag: "<version>"` per §6.3.1 so the client can send it
+    back as `If-Match` on subsequent operation mutations.
 
     Drives the engineer Operation Detail page (§5.4.11) and the SSE
     reconnect contract (§6.5.2 — clients refetch this endpoint on every
@@ -106,6 +111,10 @@ async def get_operation(
     detail = await op_svc.get_operation_detail(
         session, op_id, program_codes=auth.programs,
     )
+    # detail is dict[str, object]; version is always int by construction.
+    version = detail["version"]
+    assert isinstance(version, int)
+    response.headers["ETag"] = strong_etag(version)
     return OperationDetailOut.model_validate(detail)
 
 
@@ -113,16 +122,25 @@ async def get_operation(
 async def update_operation(
     op_id: uuid.UUID,
     data: OperationUpdate,
+    response: Response,
+    if_match: str | None = Header(default=None, alias="If-Match"),
     auth: AuthContext = Depends(require_permission("op:update")),
     session: AsyncSession = Depends(get_db),
 ) -> OperationOut:
-    """Update operation (draft WO only, version check)."""
+    """Update operation (draft WO only, version check).
+
+    §6.3.1 concurrency: body.version OR If-Match — route resolves
+    via `resolve_version_assertion`.
+    """
+    expected = resolve_version_assertion(data.version, if_match)
+    data = data.model_copy(update={"version": expected})
     op = await op_svc.update_operation(
         session, op_id, data, uuid.UUID(auth.sub),
         program_codes=auth.programs,
     )
     await session.commit()
     await session.refresh(op)
+    response.headers["ETag"] = strong_etag(op.version)
     return OperationOut.model_validate(op)
 
 
@@ -172,17 +190,21 @@ async def reorder_operations(
 async def start_operation(
     op_id: uuid.UUID,
     body: OperationStartRequest,
+    response: Response,
+    if_match: str | None = Header(default=None, alias="If-Match"),
     auth: AuthContext = Depends(require_permission("op:execute")),
     session: AsyncSession = Depends(get_db),
 ) -> OperationOut:
-    """Start operation, create labor entry."""
+    """Start operation, create labor entry.  §6.3.1 version assertion."""
+    expected = resolve_version_assertion(body.version, if_match)
     op = await op_svc.start_operation(
-        session, op_id, body.version, uuid.UUID(auth.sub),
+        session, op_id, expected, uuid.UUID(auth.sub),
         role=body.role, shift=body.shift,
         program_codes=auth.programs,
     )
     await session.commit()
     await session.refresh(op)
+    response.headers["ETag"] = strong_etag(op.version)
     return OperationOut.model_validate(op)
 
 
@@ -190,16 +212,20 @@ async def start_operation(
 async def stop_operation(
     op_id: uuid.UUID,
     body: OperationTransition,
+    response: Response,
+    if_match: str | None = Header(default=None, alias="If-Match"),
     auth: AuthContext = Depends(require_permission("op:execute")),
     session: AsyncSession = Depends(get_db),
 ) -> OperationOut:
     """Stop active labor entry for the current user."""
+    expected = resolve_version_assertion(body.version, if_match)
     op = await op_svc.stop_operation(
-        session, op_id, body.version, uuid.UUID(auth.sub),
+        session, op_id, expected, uuid.UUID(auth.sub),
         program_codes=auth.programs,
     )
     await session.commit()
     await session.refresh(op)
+    response.headers["ETag"] = strong_etag(op.version)
     return OperationOut.model_validate(op)
 
 
@@ -207,16 +233,20 @@ async def stop_operation(
 async def complete_operation(
     op_id: uuid.UUID,
     body: OperationTransition,
+    response: Response,
+    if_match: str | None = Header(default=None, alias="If-Match"),
     auth: AuthContext = Depends(require_permission("op:execute")),
     session: AsyncSession = Depends(get_db),
 ) -> OperationOut:
     """Complete operation (rules checked)."""
+    expected = resolve_version_assertion(body.version, if_match)
     op = await op_svc.complete_operation(
-        session, op_id, body.version, uuid.UUID(auth.sub),
+        session, op_id, expected, uuid.UUID(auth.sub),
         program_codes=auth.programs,
     )
     await session.commit()
     await session.refresh(op)
+    response.headers["ETag"] = strong_etag(op.version)
     return OperationOut.model_validate(op)
 
 
@@ -224,16 +254,20 @@ async def complete_operation(
 async def hold_operation(
     op_id: uuid.UUID,
     body: OperationTransition,
+    response: Response,
+    if_match: str | None = Header(default=None, alias="If-Match"),
     auth: AuthContext = Depends(require_permission("op:hold")),
     session: AsyncSession = Depends(get_db),
 ) -> OperationOut:
     """Put operation on hold."""
+    expected = resolve_version_assertion(body.version, if_match)
     op = await op_svc.hold_operation(
-        session, op_id, body.version, uuid.UUID(auth.sub),
+        session, op_id, expected, uuid.UUID(auth.sub),
         program_codes=auth.programs,
     )
     await session.commit()
     await session.refresh(op)
+    response.headers["ETag"] = strong_etag(op.version)
     return OperationOut.model_validate(op)
 
 
@@ -241,16 +275,20 @@ async def hold_operation(
 async def rework_operation(
     op_id: uuid.UUID,
     body: OperationTransition,
+    response: Response,
+    if_match: str | None = Header(default=None, alias="If-Match"),
     auth: AuthContext = Depends(require_permission("op:rework")),
     session: AsyncSession = Depends(get_db),
 ) -> OperationOut:
     """Send operation to rework."""
+    expected = resolve_version_assertion(body.version, if_match)
     op = await op_svc.rework_operation(
-        session, op_id, body.version, uuid.UUID(auth.sub),
+        session, op_id, expected, uuid.UUID(auth.sub),
         program_codes=auth.programs,
     )
     await session.commit()
     await session.refresh(op)
+    response.headers["ETag"] = strong_etag(op.version)
     return OperationOut.model_validate(op)
 
 
@@ -284,13 +322,16 @@ async def create_labor(
 async def update_labor(
     labor_id: uuid.UUID,
     data: LaborUpdate,
+    response: Response,
+    if_match: str | None = Header(default=None, alias="If-Match"),
     auth: AuthContext = Depends(get_auth_context),
     session: AsyncSession = Depends(get_db),
 ) -> Any:
     """Update a labor entry (own or any per permission).
 
     Spec §5.3: labor:update_own allows updating own entries,
-    labor:update_any allows updating any entry.
+    labor:update_any allows updating any entry.  §6.3.1 version
+    assertion via body.version OR If-Match.
     """
     can_any = auth.has_permission("labor:update_any")
     can_own = auth.has_permission("labor:update_own")
@@ -300,6 +341,8 @@ async def update_labor(
             detail="Missing required permission: labor:update_own or labor:update_any",
         )
 
+    expected = resolve_version_assertion(data.version, if_match)
+    data = data.model_copy(update={"version": expected})
     labor = await op_svc.update_labor_entry(
         session, labor_id, data, uuid.UUID(auth.sub),
         can_update_any=can_any,
@@ -307,4 +350,5 @@ async def update_labor(
     )
     await session.commit()
     await session.refresh(labor)
+    response.headers["ETag"] = strong_etag(labor.version)
     return LaborOut.model_validate(labor)

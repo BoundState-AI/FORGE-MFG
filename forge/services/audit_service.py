@@ -26,7 +26,7 @@ Why this design:
   ORM relationship walk would create and matches the spec wire shape
   that pre-resolves actor.display_name (§6.6.1).
 
-  Filter set in this PR (full set on the spec backlog):
+  Current filter set (full set on the spec backlog):
   - entity_type (exact match)
   - entity_id (exact match)
   - actor_user_id (exact match)

@@ -55,7 +55,6 @@ from .guards import check_query
 from .intent import classify
 from .packs import PackRegistry, get_default_registry
 from .query_templates import (
-    TemplateValidationError,
     execute_template,
 )
 from .reasoning import ReasoningResult, build_reasoning, build_refusal

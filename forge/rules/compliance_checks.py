@@ -26,8 +26,8 @@ Why this design:
   inspection from a prior execution_cycle is, by spec, no longer a
   valid quality gate after rework.
 
-  COMP-002, COMP-004, COMP-005 are out of 2B scope (material/document
-  rules — slice 3B).
+  COMP-002, COMP-004, COMP-005 are material/document rules and
+  live with their domains, not here.
 """
 
 from __future__ import annotations

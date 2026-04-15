@@ -17,8 +17,7 @@ Safety Critical: True
 Why this design:
   Split into a dedicated router rather than added to admin.py because
   admin.py already prefixes `/api/admin/users` — re-using that router
-  would force every program route to live under /users.  A focused
-  module also keeps the diff for this slice small and readable.
+  would force every program route to live under /users.
 
   The /api/admin/* prefix is exempt from the X-Program-Id wire
   contract per UX spec §6.7 (R5-R2-ISSUE-008): admin endpoints manage
@@ -31,10 +30,11 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Header, Query, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from forge.api.auth import AuthContext, require_permission
+from forge.api.concurrency import resolve_version_assertion, strong_etag
 from forge.api.deps import get_db
 from forge.schemas.admin import (
     ProgramCreate,
@@ -57,10 +57,9 @@ async def list_programs(
 ) -> PaginatedResponse[ProgramListItemOut]:
     """List programs with member count + feature flags (paginated).
 
-    Response envelope is the typed PaginatedResponse[T] (UX spec §5.15)
-    so the OpenAPI schema carries the precise item shape — required
-    for the slice 5B-21 generated-client work to produce typed
-    request/response models.
+    Response envelope is the typed PaginatedResponse[T] (UX spec
+    §5.15) so the OpenAPI schema carries the precise item shape
+    and generated clients can bind to typed request/response models.
     """
     rows, total = await admin_service.list_programs(
         session, page=page, page_size=page_size,
@@ -92,13 +91,15 @@ async def list_programs(
 @router.get("/{program_id}", response_model=ProgramOut)
 async def get_program(
     program_id: uuid.UUID,
+    response: Response,
     auth: AuthContext = Depends(require_permission("admin:manage")),
     session: AsyncSession = Depends(get_db),
 ) -> ProgramOut:
-    """Single program detail."""
+    """Single program detail.  Emits strong ETag per §6.3.1."""
     program = await admin_service.get_program(
         session, program_id, actor_id=uuid.UUID(auth.sub),
     )
+    response.headers["ETag"] = strong_etag(program.version)
     return ProgramOut.model_validate(program)
 
 
@@ -121,13 +122,18 @@ async def create_program(
 async def update_program(
     program_id: uuid.UUID,
     data: ProgramUpdate,
+    response: Response,
+    if_match: str | None = Header(default=None, alias="If-Match"),
     auth: AuthContext = Depends(require_permission("admin:manage")),
     session: AsyncSession = Depends(get_db),
 ) -> ProgramOut:
-    """Update program fields with optimistic concurrency (body version)."""
+    """Update program fields with §6.3.1 concurrency (body or If-Match)."""
+    expected = resolve_version_assertion(data.version, if_match)
+    data = data.model_copy(update={"version": expected})
     program = await admin_service.update_program(
         session, program_id, data, actor_id=uuid.UUID(auth.sub),
     )
     await session.commit()
     await session.refresh(program)
+    response.headers["ETag"] = strong_etag(program.version)
     return ProgramOut.model_validate(program)

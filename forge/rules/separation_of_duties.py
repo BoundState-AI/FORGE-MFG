@@ -85,7 +85,7 @@ def check_sod_001_self_inspection(
 
 
 # ---------------------------------------------------------------------------
-# SOD-002: NCR disposition independence  (helper for slice 3A)
+# SOD-002: NCR disposition independence
 # ---------------------------------------------------------------------------
 
 
@@ -99,9 +99,8 @@ def check_sod_002_ncr_disposition(
     Spec §4.2: "NCR disposition independence — initiator cannot
     disposition the same NCR."
 
-    The full NCR workflow lands in slice 3A; this helper is provided
-    here so all five SoD evaluators are co-located and unit-tested
-    against a single source of policy.
+    Co-located with the other four SoD evaluators so all five live
+    against a single source of policy and share the same unit tests.
     """
     if initiator_id == dispositioner_id:
         return SoDViolation(
@@ -115,7 +114,7 @@ def check_sod_002_ncr_disposition(
 
 
 # ---------------------------------------------------------------------------
-# SOD-003: Material acceptance independence  (helper for slice 3B)
+# SOD-003: Material acceptance independence
 # ---------------------------------------------------------------------------
 
 
@@ -129,8 +128,8 @@ def check_sod_003_material_acceptance(
     Spec §4.2: "Material acceptance independence — receiver cannot be
     the acceptance inspector."
 
-    The full material acceptance workflow lands in slice 3B; this helper
-    is provided here for policy co-location and unit-test coverage.
+    Co-located with the other SoD evaluators for shared policy and
+    shared unit-test coverage.
     """
     if receiver_id == accepter_id:
         return SoDViolation(

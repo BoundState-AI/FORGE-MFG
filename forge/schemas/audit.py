@@ -21,7 +21,7 @@ Why this design:
   cohesive token and benefits from having display_name pre-resolved
   on the server (no follow-up user lookup per row).
 
-  Two spec fields are intentionally absent from this PR's schema and
+  Two spec fields are intentionally absent from this schema and
   documented as deferred:
   - `entity_version_before` / `entity_version_after`: AuditRecord has
     no dedicated columns; values would have to be parsed out of the

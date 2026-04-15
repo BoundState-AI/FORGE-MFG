@@ -117,18 +117,14 @@ def _require_op_in_progress(op: Operation) -> None:
 
 
 async def _labor_user_ids(
-    session: AsyncSession, op_id: _uuid.UUID, execution_cycle: int
+    session: AsyncSession, op_id: _uuid.UUID,
 ) -> list[_uuid.UUID]:
     """Load distinct user_ids that have labor entries on this operation.
 
-    SOD-001 considers any labor on the operation.  Note: labor is not
-    cycle-scoped in the data model (a single LaborEntry can span a
-    rework boundary), so this is intentionally not filtered by
-    execution_cycle.  The cycle parameter is kept for symmetry with
-    sign-off retrieval and to make a future cycle-scoped policy a
-    one-line change.
+    SOD-001 considers any labor on the operation regardless of cycle —
+    a single LaborEntry can span a rework boundary, so cycle-scoping
+    at this layer would miss legitimate SoD matches.
     """
-    del execution_cycle  # reserved for a future cycle-scoped variant
     result = await session.execute(
         select(LaborEntry.user_id).where(LaborEntry.operation_id == op_id)
     )
@@ -172,7 +168,7 @@ async def record_inspection(
     op = await _get_op(session, op_id, program_codes=program_codes)
     _require_op_in_progress(op)
 
-    labor_users = await _labor_user_ids(session, op_id, op.execution_cycle)
+    labor_users = await _labor_user_ids(session, op_id)
     sod_violation = check_sod_001_self_inspection(
         inspector_id=user_id, labor_user_ids=labor_users
     )

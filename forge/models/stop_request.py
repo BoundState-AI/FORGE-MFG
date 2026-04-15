@@ -25,9 +25,8 @@ Why this design:
   Schema constraints:
     - At most ONE pending request per labor entry (spec
       LABOR-STOP-REQ-002).  Enforced at the DB via a partial unique
-      index (WHERE status = 'pending') in migration f4d8b2e6c31a so
-      the guarantee holds under concurrency regardless of
-      application-layer checks.
+      index (WHERE status = 'pending') so the guarantee holds under
+      concurrency regardless of application-layer checks.
     - labor_entry_id FK ON DELETE CASCADE — a labor entry delete
       (narrow admin path) takes its orphan stop-requests with it
       rather than stranding them.

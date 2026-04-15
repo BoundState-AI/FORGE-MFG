@@ -28,22 +28,56 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 
 
+class LaborVersionAssertions(BaseModel):
+    """Optional §6.3.3 composite version assertions for labor handoff.
+
+    UX spec v1.5.1 §5.4.2 names three assertable entities on the
+    canonical labor-start endpoint:
+
+      - target_operation:   the operation being handed off TO
+                            (the op_id in the URL).
+      - active_labor_entry: the user's currently-active labor entry
+                            that will be implicitly stopped.
+      - active_operation:   the operation that active labor entry
+                            is on (the op being handed off FROM).
+
+    Each field is optional — clients submit only the versions they
+    observed.  A missing field means "no assertion."  When absent,
+    the server runs its current default behavior; when present,
+    every supplied assertion is checked and a single stale entry
+    triggers a composite 409.
+    """
+
+    target_operation: int | None = None
+    active_labor_entry: int | None = None
+    active_operation: int | None = None
+
+
 class LaborCreate(BaseModel):
-    """Request body for POST /api/operations/{id}/labor."""
+    """Request body for POST /api/operations/{id}/labor.
+
+    `version_assertions` is optional per UX spec §5.4.2 and §6.3.3;
+    when present, the server validates each asserted version against
+    the corresponding live entity and returns 409 on any mismatch.
+    """
 
     role: str = Field(max_length=50)
     shift: str = Field(max_length=20)
     notes: str | None = None
+    version_assertions: LaborVersionAssertions | None = None
 
 
 class LaborUpdate(BaseModel):
-    """Request body for PATCH /api/labor/{id}.
+    """Request body for PATCH /api/labor-entries/{id}.
 
-    Spec: labor:update_own allows updating own entries,
-    labor:update_any allows updating any entry.
+    `version` is optional so an If-Match header can satisfy the
+    §6.3.1 assertion instead (route reconciles via
+    resolve_version_assertion).  Spec: labor:update_own allows
+    updating own entries, labor:update_any allows updating any
+    entry.
     """
 
-    version: int
+    version: int | None = None
     stopped_at: datetime | None = None
     hours: float | None = None
     shift: str | None = None
