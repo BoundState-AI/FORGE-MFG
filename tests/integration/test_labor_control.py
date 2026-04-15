@@ -168,6 +168,7 @@ class TestLaborControl:
                 conn.execute(text("DELETE FROM stop_requests"))
                 conn.execute(text("DELETE FROM labor_entries"))
                 conn.execute(text("DELETE FROM operation_predecessors"))
+                conn.execute(text("DELETE FROM nonconformance_reports"))
                 conn.execute(text("DELETE FROM operations"))
                 conn.execute(text(
                     "DELETE FROM work_orders WHERE program_id IN ("

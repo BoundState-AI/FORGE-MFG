@@ -144,6 +144,7 @@ class TestWorkOrderLifecycle:
                     "   OR action_type LIKE 'operation.%'"
                 ))
                 conn.execute(text("DELETE FROM labor_entries"))
+                conn.execute(text("DELETE FROM nonconformance_reports"))
                 conn.execute(text("DELETE FROM operations"))
                 conn.execute(text("DELETE FROM work_orders"))
                 conn.execute(text("DELETE FROM idempotency_records"))

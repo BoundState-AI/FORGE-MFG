@@ -166,15 +166,11 @@ def _derive_hold_point_status(op: Operation) -> HoldPointStatus:
     function is the single source of truth for the UI's hold-point
     badge.
 
-    KNOWN CONTRACT MISMATCH:
-    Spec §5.3 (WO Complete preconditions) and §5.4.10 (Operation
-    Complete tooltip) treat `conditionally_satisfied` as Complete-
-    eligible alongside `satisfied`.  COMP-001 in
-    forge.rules.compliance_checks accepts ONLY `result == accept`,
-    so a frontend that allows the [Complete Operation] click on a
-    `conditionally_satisfied` op will receive a 422 from the server.
-    The asymmetry is grep-able here; the resolution belongs in the
-    resolve-conditional flow alongside §5.5.5.
+    Complete-eligibility: both `satisfied` and `conditionally_satisfied`
+    allow the [Complete Operation] click (spec §5.3 / §5.4.10).
+    COMP-001 accepts both verdicts; the post-completion §5.5.5
+    Resolve Conditional Finding flow later supersedes a conditional
+    with an accept or reject.
     """
     if not op.inspection_hold:
         return HoldPointStatus.none

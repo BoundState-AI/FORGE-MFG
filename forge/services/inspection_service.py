@@ -72,6 +72,7 @@ from forge.models.enums import (
 )
 from forge.models.inspection import InspectionEvent, SignOffEvent
 from forge.models.labor import LaborEntry
+from forge.models.ncr import NonconformanceReport
 from forge.models.operation import Operation
 from forge.models.program import Program
 from forge.models.work_order import WorkOrder
@@ -193,6 +194,59 @@ async def _signoffs_for_op(
 # ---------------------------------------------------------------------------
 
 
+async def _create_reject_ncr(
+    session: AsyncSession,
+    op: Operation,
+    inspection: InspectionEvent,
+    user_id: _uuid.UUID,
+) -> NonconformanceReport:
+    """Atomically create an `open` NCR for a reject inspection result.
+
+    Spec §5.5.4 / §5.5.5: a reject inspection creates an NCR "as
+    usual" in the same transaction as the inspection event, so the
+    floor never sees a window where a rejected operation has no
+    corresponding nonconformance record.  Both normal-mode and
+    resolve-mode reject paths funnel through here — the spec
+    phrasing is the same for both.
+
+    Delegates to ncr_service.create_ncr so the NCR numbering rule
+    (NCR-YYYY-NNNN), the open/pending initial state, and the NCR
+    creation audit event stay centralized.  Local import avoids a
+    circular import at module load; ncr_service does not import
+    inspection_service so there is no runtime cycle.
+    """
+    from forge.schemas.ncr import NCRCreate
+    from forge.services import ncr_service
+
+    description_parts: list[str] = [
+        f"Inspection reject on operation {op.id} "
+        f"(execution_cycle={inspection.execution_cycle}).",
+        f"Criteria: {inspection.criteria}",
+    ]
+    if inspection.notes:
+        description_parts.append(f"Notes: {inspection.notes}")
+    if inspection.supersedes_inspection_id is not None:
+        description_parts.append(
+            f"Resolves conditional inspection "
+            f"{inspection.supersedes_inspection_id}."
+        )
+    description = "\n".join(description_parts)[:4000]
+
+    return await ncr_service.create_ncr(
+        session,
+        NCRCreate(
+            work_order_id=op.work_order_id,
+            operation_id=op.id,
+            description=description,
+            mrb_required=False,
+        ),
+        user_id=user_id,
+        # Scope already verified by _get_op above; passing None
+        # skips a redundant WO-scope check inside create_ncr.
+        program_codes=None,
+    )
+
+
 async def _validate_resolve_mode(
     session: AsyncSession,
     op: Operation,
@@ -307,6 +361,12 @@ async def record_inspection(
            op.execution_cycle — for a completed op this is the cycle
            the conditional was recorded against, preserving the
            "satisfies the hold in the relevant cycle" invariant.
+
+    Reject side-effect (both modes): result=reject atomically
+    creates an `open` NCR referencing this operation.  Spec §5.5.4 /
+    §5.5.5 require the NCR to exist by the time the transaction
+    commits so the floor never sees a rejected operation without a
+    nonconformance record.
     """
     op = await _get_op(session, op_id, program_codes=program_codes)
 
@@ -363,6 +423,14 @@ async def record_inspection(
         entity_id=event.id,
         after_state=audit_after,
     )
+
+    # Reject → atomic NCR creation (spec §5.5.4 / §5.5.5).  The NCR
+    # and its own audit event are appended in the same transaction;
+    # if this raises, the outer commit rolls back the inspection
+    # event too so we never ship a reject without a matching NCR.
+    if data.result == InspectionResult.reject:
+        await _create_reject_ncr(session, op, event, user_id)
+
     return event
 
 

@@ -81,27 +81,43 @@ def check_comp_001_inspection_hold(
     current_cycle: int,
     inspections: Iterable[InspectionSnapshot],
 ) -> ComplianceViolation | None:
-    """COMP-001: inspection hold requires accepted inspection in current cycle.
+    """COMP-001: inspection hold requires a satisfying inspection in cycle.
 
     Spec §4.4: "Inspection hold enforcement — requires accepted
     InspectionEvent from current execution_cycle."
 
     State leaving: in_progress.  State entering: complete.
     Invariant: if the operation has inspection_hold=True, at least one
-    inspection event with result="accept" from the current
-    execution_cycle must exist before completion is allowed.
+    inspection event with result ∈ {accept, conditional} from the
+    current execution_cycle must exist before completion is allowed.
 
-    Why current_cycle filter: rework increments execution_cycle, so prior
-    inspections remain in the audit trail but no longer satisfy the gate.
+    Why conditional counts: UX spec v1.5.1 §5.3 (WO Complete) and
+    §5.4.10 (Operation Complete tooltip) both explicitly treat
+    `conditionally_satisfied` as Complete-eligible.  The completed
+    operation can later be resolved via the §5.5.5 Resolve
+    Conditional Finding flow (a superseding accept/reject inspection);
+    a reject atomically creates an NCR and the operation remains
+    complete until reopen is triggered — and the Reopen transition
+    itself is ⚠ provisional, not implemented yet.
+
+    What still blocks completion: pending (no inspection at all in
+    the cycle) and blocked (a reject).  Reject sits outside the
+    allow-list here precisely so a rejected operation cannot be
+    completed — the NCR disposition has to run first.
+
+    Why current_cycle filter: rework increments execution_cycle, so
+    prior inspections remain in the audit trail but no longer satisfy
+    the gate.
     """
     if not inspection_hold:
         return None
 
-    accepted_in_cycle = [
+    satisfying_in_cycle = [
         i for i in inspections
-        if i.execution_cycle == current_cycle and i.result == "accept"
+        if i.execution_cycle == current_cycle
+        and i.result in ("accept", "conditional")
     ]
-    if accepted_in_cycle:
+    if satisfying_in_cycle:
         return None
 
     return ComplianceViolation(
@@ -109,8 +125,8 @@ def check_comp_001_inspection_hold(
         rule_name="Inspection hold enforcement",
         severity="block",
         message=(
-            "Operation has an inspection hold and no accepted inspection "
-            "exists for the current execution cycle"
+            "Operation has an inspection hold and no accept or "
+            "conditional inspection exists for the current execution cycle"
         ),
         context={"execution_cycle": current_cycle},
     )
