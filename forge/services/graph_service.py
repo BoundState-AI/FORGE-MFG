@@ -361,14 +361,20 @@ async def validate_graph_on_hold(
       - return 200 with errors — spec explicitly says this endpoint
         always returns 200 regardless of graph state.
     On validation pass:
-      - leave has_graph_issue alone (stays false per spec).
+      - if has_graph_issue was previously true, clear it to false
+        so the response honestly echoes spec §5.4.6's clean payload
+        (has_graph_issue=false).  No audit event is emitted — spec
+        §6.6.1 does not name a clear-path event name, and
+        traceability is preserved by the pair
+        (prior graph_issue_reported entry + current WO updated_at).
+      - if has_graph_issue was already false, nothing changes.
       - return 200 with empty errors list.
 
     No version check: this is a read-triggered diagnostic, not a
-    mutation of user-visible WO state.  If validation fails and
-    flips has_graph_issue=true that IS a server-owned transition,
-    but it is not racing with user edits — the spec describes this
-    endpoint as on-demand re-validation, not a concurrent editor.
+    mutation of user-visible WO state.  Both the set-true and
+    clear-true paths are server-owned signals rather than user
+    edits, so bumping version here would surface spurious 409s to
+    concurrent editors polling this endpoint.
     """
     wo, ops = await _load_wo_and_ops(session, wo_id, program_codes)
     _require_hold(wo)
