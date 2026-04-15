@@ -137,15 +137,17 @@ class PredecessorSummary(BaseModel):
 class StopRequestSummary(BaseModel):
     """Pending stop-request summary per UX spec v1.5.1 §5.4.8 / §5.4.9.
 
-    NOTE (PR2 boundary): the StopRequest entity itself does not yet
-    exist in the backend — it is queued for slice 5B-12 along with the
-    POST /api/labor-entries/{id}/stop-request and force-stop endpoints.
-    The schema is defined now so the wire contract on
-    GET /api/operations/{op_id} is stable; the field is populated as
-    an empty list until 5B-12 lands.
+    Live as of slice 5B-12: the StopRequest entity exists and the
+    operation-detail response serializes only `pending` rows here.
+    Fulfilled and expired entries live in the audit trail (§6.6)
+    and are not returned on this read surface.
 
-    Only `pending` requests are surfaced here per spec §5.4.8 —
-    fulfilled and expired entries live in the audit trail (§6.6).
+    `requested_by` is a nested object (user_id + display_name) so
+    the engineer's Operation Detail view can render the amber
+    indicator + operator attribution without a follow-up
+    /api/users/{id} round trip.  The shape mirrors
+    forge.schemas.stop_request.StopRequestActor — the inline dict
+    typing here avoids a cross-schema import on the read path.
     """
 
     request_id: uuid.UUID

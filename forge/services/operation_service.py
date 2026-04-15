@@ -297,6 +297,17 @@ async def get_operation_detail(
     wo = await _get_wo(session, op.work_order_id, program_codes=program_codes)
 
     predecessors = await _load_predecessor_summaries(session, op)
+
+    # Pending stop-requests for this op's labor entries (UX §5.4.8).
+    # Only `pending` rows appear — fulfilled/expired live in the
+    # audit trail per §5.4.9 Stop-Request Lifecycle.  Import lazily
+    # to avoid a circular import (stop_request_service imports
+    # _get_op from this module).
+    from forge.services.stop_request_service import (
+        pending_stop_requests_for_operation,
+    )
+    stop_requests = await pending_stop_requests_for_operation(session, op.id)
+
     return {
         "id": op.id,
         "work_order_id": op.work_order_id,
@@ -316,10 +327,7 @@ async def get_operation_detail(
         "predecessor_summaries": [
             _serialize_predecessor_summary(p) for p in predecessors
         ],
-        # Empty until 5B-12: StopRequest model + force-stop / stop-request
-        # write endpoints land together.  Keeping the field present (not
-        # absent) makes the OpenAPI contract stable across slices.
-        "stop_requests": [],
+        "stop_requests": [s.model_dump(mode="json") for s in stop_requests],
         "version": op.version,
         "created_at": op.created_at,
         "updated_at": op.updated_at,
@@ -637,13 +645,23 @@ async def stop_operation(
             detail="No active labor entry found for this user on this operation",
         )
 
-    now = datetime.now(UTC)
-    labor.stopped_at = now
-    elapsed = (now - labor.started_at).total_seconds() / 3600.0
-    labor.hours = round(elapsed, 2)
-    labor.updated_by = user_id
-    increment_version(labor)
+    # Delegate to the shared stop helper so self-stop expires any
+    # pending stop-requests on this labor entry (spec §5.4.9
+    # Lifecycle: "operator self-stop" is an OTHER mechanism, so
+    # pending → expired, not fulfilled).  Avoids a drift path where
+    # the operator's own stop would leave a stop-request forever
+    # pending.
+    from forge.services.stop_request_service import (
+        StopFulfillmentMode,
+        stop_labor_entry_and_resolve,
+    )
 
+    now = datetime.now(UTC)
+    await stop_labor_entry_and_resolve(
+        session, labor, user_id,
+        fulfillment_mode=StopFulfillmentMode.OTHER,
+        stopped_at=now,
+    )
     op.updated_by = user_id
     increment_version(op)
     await session.flush()

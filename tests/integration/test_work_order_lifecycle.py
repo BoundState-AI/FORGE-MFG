@@ -257,9 +257,16 @@ class TestWorkOrderLifecycle:
 
     @pytest.mark.asyncio
     async def test_release_work_order(self) -> None:
-        """Checklist: work order release works (different user per SOD-004)."""
+        """Checklist: work order release works (different user per SOD-004).
+
+        Slice 5B-12/13 added the §5.3 "at least one operation defined"
+        release precondition (WO-REL-104).  Test now creates an op
+        before release so it actually exercises the happy path rather
+        than hitting the empty-ops guard.
+        """
         async with await self._client() as client:
             wo = await self._create_wo(client)
+            await self._add_op(client, wo["id"])
         released = await self._release_wo(wo)
         assert released["status"] == "released"
 
@@ -353,9 +360,15 @@ class TestWorkOrderLifecycle:
 
     @pytest.mark.asyncio
     async def test_draft_only_editing(self) -> None:
-        """Do-not-advance: editing a released WO must fail."""
+        """Do-not-advance: editing a released WO must fail.
+
+        Slice 5B-12/13 added WO-REL-104 (at least one op) as a
+        release precondition; create an op before release so the
+        WO can actually reach `released` state.
+        """
         async with await self._client() as client:
             wo = await self._create_wo(client)
+            await self._add_op(client, wo["id"])
         # Release with different user (SOD-004)
         released = await self._release_wo(wo)
         async with await self._client() as client:
@@ -560,9 +573,15 @@ class TestWorkOrderLifecycle:
 
     @pytest.mark.asyncio
     async def test_sod004_non_author_can_release(self) -> None:
-        """SOD-004 success path: a different user can release the WO."""
+        """SOD-004 success path: a different user can release the WO.
+
+        Slice 5B-12/13 added WO-REL-104 (at least one op) — create
+        an op before release so the test exercises the SOD-004 path
+        rather than hitting the empty-ops guard first.
+        """
         async with await self._client() as client:
             wo = await self._create_wo(client)
+            await self._add_op(client, wo["id"])
         released = await self._release_wo(wo)
         assert released["status"] == "released"
 

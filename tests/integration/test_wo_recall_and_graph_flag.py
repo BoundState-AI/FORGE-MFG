@@ -387,7 +387,9 @@ class TestWorkOrderRecallAndGraphFlag:
             )
         self._clear_override()
         assert resp.status_code == 200, resp.text
-        held = resp.json()
+        # Slice 5B-12 changed hold response to {work_order, ...};
+        # unwrap the nested WO for the Recall call below.
+        held = resp.json()["work_order"]
         assert held["status"] == "hold"
 
         status, body = await self._recall(held)

@@ -333,11 +333,19 @@ async def _validate_release_graph(
     uses — spec §5.4.6 says these codes apply "same as release-time
     validation," so this is the single source of truth.
 
-    Fresh-draft WOs have zero explicit edges.  The validator
-    returns an empty error list on an empty edge set (every
-    defined op with no predecessors is a trivially-valid DAG
-    root), so the default-sequential authoring ergonomic still
-    works end-to-end for linear WOs.
+    Also enforces the §5.3 "at least one operation defined"
+    precondition: a WO with zero ops cannot release.  Prior to
+    this guard, a race / silent setup failure that left the
+    operations table empty would still pass release (empty DAG is
+    trivially valid) — and downstream graph/labor flows would then
+    fail in misleading places.  Raising a specific WO-REL-104
+    rule violation here makes the setup failure visible at its
+    origin.
+
+    Fresh-draft WOs with one linear op chain have zero explicit
+    edges; the validator returns an empty error list on that set
+    and release proceeds.  The default-sequential authoring
+    ergonomic is unaffected.
     """
     from forge.models.operation import Operation, operation_predecessors
     from forge.rules.graph_validation import validate_graph
@@ -347,7 +355,26 @@ async def _validate_release_graph(
     )
     op_ids = [row[0] for row in result.all()]
     if not op_ids:
-        return  # nothing to validate
+        # UX spec v1.5.1 §5.3 Release precondition: "At least one
+        # operation defined".  WO-REL-104 keeps the error code
+        # namespace aligned with the existing 101/102/103 DAG codes
+        # so the frontend has a single branch for WO-REL-* on
+        # release failure.
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "GRAPH_VALIDATION_FAILED",
+                "message": "Graph validation failed",
+                "validation_errors": [{
+                    "code": "WO-REL-104",
+                    "detail": (
+                        "Work order has no operations defined; "
+                        "release requires at least one operation."
+                    ),
+                    "operation_ids": [],
+                }],
+            },
+        )
 
     edge_result = await session.execute(
         select(
@@ -411,16 +438,121 @@ async def recall_work_order(
 async def hold_work_order(
     session: AsyncSession, wo_id: _uuid.UUID, version: int, user_id: _uuid.UUID,
     program_codes: list[str] | None = None,
-) -> WorkOrder:
-    """Hold: released|in_progress → hold.
+    *,
+    force_stop_labor: bool = False,
+    reason: str | None = None,
+) -> tuple[WorkOrder, list[dict[str, _uuid.UUID]]]:
+    """Hold: released|in_progress → hold (UX spec v1.5.1 §5.3).
 
     State leaving: released or in_progress.  State entering: hold.
     Invariant: valid transition per spec §4.3.
+
+    When `force_stop_labor=True`:
+      - atomically stop every active labor entry on child operations
+      - emit one `labor.stopped_by_hold` audit per stopped entry
+      - expire any pending stop-requests on those entries (spec
+        §5.4.9: hold-cascade stop is an OTHER mechanism, not a
+        force-stop endpoint fulfillment)
+
+    `reason` is audited but does not alter behavior — UX §5.3
+    Hold Cascading binds it as future SSE payload data.
+
+    Returns the updated WO plus a list of dicts carrying the entry_id
+    / operation_id / user_id of every stopped entry (empty list when
+    `force_stop_labor=False`).  The route layer wraps the dicts in
+    StoppedLaborEntryOut for the wire response.
     """
-    return await _transition_wo(
+    # Transition the WO first.  _transition_wo runs the version
+    # check + state-machine validation + audit record.  If the
+    # cascade fails mid-way, we still want the WO to have
+    # transitioned — a partial hold that stops nothing is safer
+    # than a rollback where the frontend thinks the hold was
+    # rejected.  Concretely this matters zero today because the
+    # cascade is idempotent, but it keeps the contract clean.
+    wo = await _transition_wo(
         session, wo_id, WOStatus.hold, version, user_id,
         program_codes=program_codes,
     )
+
+    stopped: list[dict[str, _uuid.UUID]] = []
+    if force_stop_labor:
+        stopped = await _cascade_stop_active_labor(
+            session, wo.id, user_id, reason=reason,
+        )
+
+    return wo, stopped
+
+
+async def _cascade_stop_active_labor(
+    session: AsyncSession, wo_id: _uuid.UUID, actor_id: _uuid.UUID,
+    *, reason: str | None,
+) -> list[dict[str, _uuid.UUID]]:
+    """Stop every active labor entry on this WO's child ops.
+
+    Helper split out so the hold path stays readable and so a future
+    "stop-work panic button" endpoint can reuse the same cascade
+    without a second implementation.  Uses the shared
+    stop_labor_entry_and_resolve helper so pending stop-requests
+    transition to `expired` (not `fulfilled` — this is a hold-
+    cascade stop, not the force-stop endpoint).
+
+    Emits `labor.stopped_by_hold` per stopped entry with the
+    cascading actor's user_id and the hold reason.  Spec §5.3
+    names this audit event explicitly.
+    """
+    from forge.audit.logger import create_audit_record
+    from forge.models.enums import ActorType
+    from forge.models.labor import LaborEntry
+    from forge.models.operation import Operation
+    from forge.services.stop_request_service import (
+        StopFulfillmentMode,
+        stop_labor_entry_and_resolve,
+    )
+
+    # Active labor entries on any child op of this WO.
+    result = await session.execute(
+        select(LaborEntry)
+        .join(Operation, LaborEntry.operation_id == Operation.id)
+        .where(
+            Operation.work_order_id == wo_id,
+            LaborEntry.stopped_at.is_(None),
+        ),
+    )
+    entries = list(result.scalars().all())
+    if not entries:
+        return []
+
+    now = datetime.now(UTC)
+    stopped: list[dict[str, _uuid.UUID]] = []
+    for labor in entries:
+        summary = await stop_labor_entry_and_resolve(
+            session, labor, actor_id,
+            fulfillment_mode=StopFulfillmentMode.OTHER,
+            stopped_at=now,
+        )
+        stopped.append({
+            "entry_id": summary.labor_entry_id,
+            "operation_id": summary.operation_id,
+            "user_id": summary.user_id,
+        })
+        await create_audit_record(
+            session,
+            event_id=_uuid.uuid4(),
+            actor_type=ActorType.human,
+            user_id=actor_id,
+            user_role=None,
+            action_type="labor.stopped_by_hold",
+            entity_type="labor_entry",
+            entity_id=labor.id,
+            before_state={"stopped_at": None},
+            after_state={
+                "stopped_at": now.isoformat(),
+                "target_user_id": str(labor.user_id),
+                "reason": reason,
+            },
+        )
+
+    return stopped
 
 
 async def resume_work_order(

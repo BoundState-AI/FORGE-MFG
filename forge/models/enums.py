@@ -104,6 +104,25 @@ class HoldPointStatus(enum.StrEnum):
     blocked = "blocked"
 
 
+class StopRequestStatus(enum.StrEnum):
+    """Stop-request lifecycle (UX spec v1.5.1 §5.4.9 Stop-Request Lifecycle).
+
+    - pending: request created; awaiting engineer action.
+    - fulfilled: the associated labor entry was force-stopped by an
+      engineer via POST /api/labor-entries/{id}/force-stop.
+    - expired: the labor entry was stopped by another mechanism
+      (operator self-stop, hold-cascade, session timeout) before
+      any engineer acted on the request.
+
+    Transitions from `pending` are ALWAYS server-managed; the spec
+    leaves no client-driven path for fulfilled/expired.
+    """
+
+    pending = "pending"
+    fulfilled = "fulfilled"
+    expired = "expired"
+
+
 class InspectionQueueState(enum.StrEnum):
     """Server-derived Inspection Queue bucket (UX spec v1.5.1 §5.5.5).
 

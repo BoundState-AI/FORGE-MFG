@@ -246,7 +246,13 @@ async def verify_access_token(
 # The same mapping is seeded in the roles table (migration 387cadd44f9d).
 ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
     "operator": frozenset({
-        "op:execute", "labor:create", "labor:update_own", "mat:consume",
+        "op:execute", "labor:create", "labor:update_own",
+        # UX spec v1.5.1 §5.4.9: operator-only actions on OTHER
+        # users' labor entries.  These are NOT the same as
+        # labor:update_own (which is the self-edit lane) — they
+        # initiate an escalation to the engineer.
+        "labor:request_stop", "labor:flag_correction",
+        "mat:consume",
         "part:create", "part:update", "wo:read", "op:read", "ncr:read",
         "part:read", "doc:read", "sched:read", "dash:read", "chat:query",
     }),
@@ -260,6 +266,12 @@ ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
         "wo:create", "wo:update", "wo:release", "wo:recall",
         "wo:graph_edit",
         "wo:hold", "wo:resume",
+        # UX spec v1.5.1 §5.4.9 Force-Stop API: engineer-only
+        # authority to stop another user's active labor entry.
+        # qa_manager deliberately does NOT get this even though
+        # they hold labor:update_any — §5.4.9 LABOR-STOP-003
+        # "Caller does not have engineer role" is explicit.
+        "labor:force_stop",
         "wo:complete", "op:create", "op:update", "op:delete", "op:hold",
         "op:rework", "ncr:create", "ncr:disposition", "sched:create",
         "sched:baseline", "sched:what_if", "labor:update_any", "doc:create",

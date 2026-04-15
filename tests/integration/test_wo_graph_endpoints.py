@@ -262,6 +262,9 @@ class TestWorkOrderGraphEndpoints:
         return resp.json()  # type: ignore[no-any-return]
 
     async def _hold(self, wo: dict[str, Any]) -> dict[str, Any]:
+        """POST /hold with default body; returns the nested work_order
+        (5B-12 shape change: hold now returns WorkOrderHoldOut
+        envelope with work_order + stopped_labor_entries)."""
         self._override_as(ENGINEER_USER_ID, roles=["engineer"])
         async with await self._client() as client:
             resp = await client.post(
@@ -271,7 +274,31 @@ class TestWorkOrderGraphEndpoints:
             )
         self._clear_override()
         assert resp.status_code == 200, resp.text
-        return resp.json()  # type: ignore[no-any-return]
+        return resp.json()["work_order"]  # type: ignore[no-any-return]
+
+    def _assert_op_count(
+        self, wo_id: str, expected: int, stage: str,
+    ) -> None:
+        """Temporary instrumentation for the 5B-12/13 flake probe.
+
+        Asserts operations table has `expected` rows for this WO
+        at the named pipeline stage — if release/hold is silently
+        losing ops, this surfaces the loss at the origin rather
+        than as a downstream graph WO-REL-103 (which historically
+        looked like a graph_service bug).
+        """
+        engine = create_engine(_SYNC_URL)
+        with engine.connect() as conn:
+            row = conn.execute(text(
+                "SELECT COUNT(*) FROM operations "
+                "WHERE work_order_id = CAST(:w AS uuid)"
+            ).bindparams(w=wo_id)).fetchone()
+        engine.dispose()
+        actual = int(row[0]) if row is not None else 0
+        assert actual == expected, (
+            f"[{stage}] op count mismatch on WO {wo_id}: "
+            f"expected {expected}, got {actual}"
+        )
 
     async def _held_wo_with_ops(self, count: int = 3) -> tuple[
         dict[str, Any], list[dict[str, Any]],
@@ -284,8 +311,11 @@ class TestWorkOrderGraphEndpoints:
         """
         wo = await self._make_wo(self.prog_a_id)
         ops = await self._add_ops(wo["id"], count=count)
+        self._assert_op_count(wo["id"], count, stage="after add_ops")
         released = await self._release(wo)
+        self._assert_op_count(wo["id"], count, stage="after release")
         held = await self._hold(released)
+        self._assert_op_count(wo["id"], count, stage="after hold")
         return held, ops
 
     async def _patch_graph(

@@ -43,6 +43,7 @@ from .enums import (  # noqa: F401
     ScheduleConstraint,
     ScheduleStatus,
     SignOffAction,
+    StopRequestStatus,
     TraceLinkType,
     TraceSourceType,
     UploadStatus,
@@ -58,5 +59,6 @@ from .operation import Operation  # noqa: F401
 from .part import PartInstance, TraceabilityLink  # noqa: F401
 from .program import Program  # noqa: F401
 from .schedule import BuildSchedule, Milestone, ScheduleLink, WorkCalendar  # noqa: F401
+from .stop_request import StopRequest  # noqa: F401
 from .user import Role, User  # noqa: F401
 from .work_order import WorkOrder  # noqa: F401

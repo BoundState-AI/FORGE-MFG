@@ -64,6 +64,54 @@ class WorkOrderTransition(BaseModel):
     version: int
 
 
+class WorkOrderHoldIn(BaseModel):
+    """Request body for POST /api/work-orders/{id}/hold (UX spec v1.5.1
+    §5.3 Hold Cascading).
+
+    `force_stop_labor` defaults to False (administrative hold).  When
+    True, the server atomically stops all active labor entries on child
+    operations and emits one `labor.stopped_by_hold` audit event per
+    stopped entry.  `reason` is currently nullable — the spec mentions
+    a hold reason but the frozen contract (§5.3 Hold Cascading
+    subsection) only binds it as future SSE payload data, so the field
+    is accepted and stored in the audit before_state but not required.
+    """
+
+    version: int
+    force_stop_labor: bool = False
+    reason: str | None = Field(default=None, max_length=2000)
+
+
+class StoppedLaborEntryOut(BaseModel):
+    """Single entry in WorkOrderHoldOut.stopped_labor_entries
+    (UX spec v1.5.1 §5.3 Hold Cascading + §6.5.2 SSE payload
+    requirements).
+
+    Intentionally minimal: the frontend stop-work banner (§5.3) needs
+    exactly `entry_id` / `operation_id` / `user_id` to decide whether
+    the current user's own timer was force-stopped.  Timestamps are
+    available via a follow-up read if needed.
+    """
+
+    entry_id: uuid.UUID
+    operation_id: uuid.UUID
+    user_id: uuid.UUID
+
+
+class WorkOrderHoldOut(BaseModel):
+    """Response for POST /api/work-orders/{id}/hold.
+
+    Returns the post-hold WorkOrder plus the cascade metadata needed
+    for the §5.3 stop-work banner and the §6.5.2 SSE payload.  When
+    `force_stop_labor` is False, `stopped_labor_entries` is always an
+    empty list — wire-stable so the client does not have to branch.
+    """
+
+    work_order: WorkOrderOut
+    force_stop_labor: bool
+    stopped_labor_entries: list[StoppedLaborEntryOut]
+
+
 class WorkOrderOut(BaseModel):
     """Work order in API responses.
 

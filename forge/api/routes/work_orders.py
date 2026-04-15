@@ -35,7 +35,10 @@ from forge.schemas.graph import (
 )
 from forge.schemas.operation import OperationDetailOut
 from forge.schemas.work_order import (
+    StoppedLaborEntryOut,
     WorkOrderCreate,
+    WorkOrderHoldIn,
+    WorkOrderHoldOut,
     WorkOrderOut,
     WorkOrderTransition,
     WorkOrderUpdate,
@@ -225,21 +228,43 @@ async def validate_graph_endpoint(
     return result
 
 
-@router.post("/{wo_id}/hold", response_model=WorkOrderOut)
+@router.post("/{wo_id}/hold", response_model=WorkOrderHoldOut)
 async def hold_work_order(
     wo_id: uuid.UUID,
-    body: WorkOrderTransition,
+    body: WorkOrderHoldIn,
     auth: AuthContext = Depends(require_permission("wo:hold")),
     session: AsyncSession = Depends(get_db),
-) -> WorkOrderOut:
-    """Put work order on hold."""
-    wo = await wo_svc.hold_work_order(
+) -> WorkOrderHoldOut:
+    """Put work order on hold (UX spec v1.5.1 §5.3).
+
+    `force_stop_labor` (default false) is the stop-work flag: when
+    true the server atomically stops every active labor entry on
+    child operations and emits a `labor.stopped_by_hold` audit event
+    per entry.  The response carries `stopped_labor_entries` so the
+    frontend can render the §5.3 stop-work banner and so the later
+    SSE `wo_state_changed` payload (§6.5.2) can reuse the same
+    data shape.
+    """
+    wo, stopped = await wo_svc.hold_work_order(
         session, wo_id, body.version, uuid.UUID(auth.sub),
         program_codes=auth.programs,
+        force_stop_labor=body.force_stop_labor,
+        reason=body.reason,
     )
     await session.commit()
     await session.refresh(wo)
-    return WorkOrderOut.model_validate(wo)
+    return WorkOrderHoldOut(
+        work_order=WorkOrderOut.model_validate(wo),
+        force_stop_labor=body.force_stop_labor,
+        stopped_labor_entries=[
+            StoppedLaborEntryOut(
+                entry_id=s["entry_id"],
+                operation_id=s["operation_id"],
+                user_id=s["user_id"],
+            )
+            for s in stopped
+        ],
+    )
 
 
 @router.post("/{wo_id}/resume", response_model=WorkOrderOut)
