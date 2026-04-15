@@ -33,9 +33,11 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from forge.audit.logger import create_audit_record
-from forge.models.enums import ActorType, TraceSourceType
+from forge.models.enums import ActorType, PartStatus, TraceSourceType
+from forge.models.ncr import NonconformanceReport
 from forge.models.part import PartInstance, TraceabilityLink
 from forge.models.program import Program
+from forge.models.work_order import WorkOrder
 from forge.rules.status_transitions import validate_part_transition
 from forge.schemas.part import PartCreate, PartUpdate
 from forge.services.versioning import (
@@ -162,12 +164,74 @@ async def create_part(
 # ---------------------------------------------------------------------------
 
 
+async def _resolve_scrap_ncr(
+    session: AsyncSession,
+    part: PartInstance,
+    reason_ncr_id: _uuid.UUID,
+    program_codes: list[str] | None,
+) -> NonconformanceReport:
+    """Validate the reason_ncr referenced by a scrap transition.
+
+    Invariants (UX spec v1.5.1 §5.6.5):
+      1. NCR exists (404 otherwise via the scope check — §3.2 leak rule
+         deliberately conflates "no such NCR" with "NCR in another
+         program").
+      2. NCR's parent WO is in the caller's program scope.  WO program
+         must equal the part's program — the scrap flow only links an
+         NCR to a part within the same program; cross-program linkage
+         would let a QA manager in program A stamp a scrap on a part
+         in program B purely by referencing an NCR.
+      3. Linkage is truthful: either NCR.part_instance_id == part.id
+         (the NCR names this part directly) OR the NCR is untied at
+         the part level (part_instance_id is NULL).  The second clause
+         covers the "scrap material / scrap assembly" flow where an
+         NCR was raised against the operation or WO, not the serialized
+         part — that is the exact case §5.6.5 is built for.
+    """
+    ncr = await session.get(NonconformanceReport, reason_ncr_id)
+    if ncr is None:
+        raise HTTPException(
+            status_code=422,
+            detail="reason_ncr_id does not reference an existing NCR",
+        )
+    # Scope gate — program must match the part.  The WO carries the
+    # canonical program association; reuse _program_code_for_id so the
+    # §3.2 existence-leak posture stays consistent with part lookup.
+    wo = await session.get(WorkOrder, ncr.work_order_id)
+    if wo is None:
+        raise HTTPException(
+            status_code=422,
+            detail="reason_ncr_id points at an NCR with no parent WO",
+        )
+    ncr_program_code = await _program_code_for_id(session, wo.program_id)
+    _require_program_access(ncr_program_code, program_codes)
+    if wo.program_id != part.program_id:
+        raise HTTPException(
+            status_code=422,
+            detail="reason_ncr_id is not in the same program as the part",
+        )
+    # Relationship gate — explicit link or part-untied NCR only.
+    if (
+        ncr.part_instance_id is not None
+        and ncr.part_instance_id != part.id
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "reason_ncr_id names a different part instance; scrap "
+                "linkage must reference the part being scrapped"
+            ),
+        )
+    return ncr
+
+
 async def update_part(
     session: AsyncSession,
     part_id: _uuid.UUID,
     data: PartUpdate,
     user_id: _uuid.UUID,
     program_codes: list[str] | None = None,
+    has_scrap_permission: bool = False,
 ) -> PartInstance:
     """Update a part's status / location / parent assembly.
 
@@ -177,6 +241,23 @@ async def update_part(
       2. Optimistic version matches.
       3. Status transition (if requested) is legal per
          VALID_PART_TRANSITIONS.
+      4. Scrap-specific gates (only when data.status == scrapped):
+         a. Caller carries the part:scrap permission.  Gated here as
+            a second line of defense — the route layer requires the
+            permission too, but this check means a future internal
+            caller cannot escape scrap authority by bypassing the route.
+         b. reason_ncr_id is present.  UX spec §5.6.5 wire shape is
+            {status: "scrapped", reason_ncr_id: <ncr_id>}; the only
+            legitimate status=scrapped call carries the link.
+         c. reason_ncr is validated by _resolve_scrap_ncr (scope +
+            program match + part-instance relationship).
+
+    Audit footprint on scrap success:
+      - part.status_changed  (spec §6.6.1 vocabulary for part lifecycle)
+      - ncr.scrap_linkage_confirmed  (spec §5.6.5 explicit event name)
+    Non-scrap updates keep the pre-existing part.update audit record
+    so downstream audit consumers that index on that action_type do
+    not silently lose events.
     """
     part = await _load_part_in_scope(session, part_id, program_codes)
 
@@ -186,6 +267,30 @@ async def update_part(
         raise version_conflict_response(e) from e
 
     before_status = part.status.value
+    is_scrap_transition = (
+        data.status is not None
+        and data.status != part.status
+        and data.status == PartStatus.scrapped
+    )
+
+    if is_scrap_transition:
+        if not has_scrap_permission:
+            raise HTTPException(
+                status_code=403,
+                detail="Scrap transition requires the part:scrap permission",
+            )
+        if data.reason_ncr_id is None:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "reason_ncr_id is required when transitioning a part "
+                    "to scrapped"
+                ),
+            )
+        await _resolve_scrap_ncr(
+            session, part, data.reason_ncr_id, program_codes
+        )
+
     if data.status is not None and data.status != part.status:
         if not validate_part_transition(part.status, data.status):
             raise HTTPException(
@@ -201,23 +306,64 @@ async def update_part(
         part.current_location = data.current_location
     if data.parent_assembly_id is not None:
         part.parent_assembly_id = data.parent_assembly_id
+    if is_scrap_transition:
+        part.reason_ncr_id = data.reason_ncr_id
 
     part.updated_by = user_id
     increment_version(part)
     await session.flush()
 
-    await create_audit_record(
-        session,
-        event_id=_uuid.uuid4(),
-        actor_type=ActorType.human,
-        user_id=user_id,
-        user_role=None,
-        action_type="part.update",
-        entity_type="part_instance",
-        entity_id=part.id,
-        before_state={"status": before_status},
-        after_state={"status": part.status.value},
-    )
+    if is_scrap_transition:
+        # mypy narrows away the Optional after the earlier
+        # is_scrap_transition gate validated reason_ncr_id is present.
+        assert data.reason_ncr_id is not None
+        # Spec §6.6.1 vocabulary: part.status_changed is the named
+        # lifecycle event.  The legacy part.update event is skipped
+        # here to avoid double-counting the same transition on the
+        # audit timeline — downstream consumers that filter on the
+        # spec-named event will see a single authoritative row.
+        await create_audit_record(
+            session,
+            event_id=_uuid.uuid4(),
+            actor_type=ActorType.human,
+            user_id=user_id,
+            user_role=None,
+            action_type="part.status_changed",
+            entity_type="part_instance",
+            entity_id=part.id,
+            before_state={"status": before_status},
+            after_state={
+                "status": part.status.value,
+                "reason_ncr_id": str(data.reason_ncr_id),
+            },
+        )
+        await create_audit_record(
+            session,
+            event_id=_uuid.uuid4(),
+            actor_type=ActorType.human,
+            user_id=user_id,
+            user_role=None,
+            action_type="ncr.scrap_linkage_confirmed",
+            entity_type="ncr",
+            entity_id=data.reason_ncr_id,
+            after_state={
+                "part_instance_id": str(part.id),
+                "serial_number": part.serial_number,
+            },
+        )
+    else:
+        await create_audit_record(
+            session,
+            event_id=_uuid.uuid4(),
+            actor_type=ActorType.human,
+            user_id=user_id,
+            user_role=None,
+            action_type="part.update",
+            entity_type="part_instance",
+            entity_id=part.id,
+            before_state={"status": before_status},
+            after_state={"status": part.status.value},
+        )
     return part
 
 

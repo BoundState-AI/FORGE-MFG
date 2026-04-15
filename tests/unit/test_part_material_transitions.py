@@ -41,6 +41,21 @@ def test_cert_quarantine_can_accept_reject_or_expire() -> None:
     assert validate_cert_transition(CertStatus.quarantine, CertStatus.expired)
 
 
+def test_cert_quarantine_and_accepted_can_scrap() -> None:
+    """UX spec §5.7: cert filter vocabulary includes scrapped."""
+    assert validate_cert_transition(
+        CertStatus.quarantine, CertStatus.scrapped
+    )
+    assert validate_cert_transition(
+        CertStatus.accepted, CertStatus.scrapped
+    )
+
+
+def test_cert_scrapped_is_terminal() -> None:
+    for tgt in CertStatus:
+        assert not validate_cert_transition(CertStatus.scrapped, tgt)
+
+
 def test_cert_accepted_can_consume_or_expire() -> None:
     assert validate_cert_transition(CertStatus.accepted, CertStatus.consumed)
     assert validate_cert_transition(CertStatus.accepted, CertStatus.expired)

@@ -165,6 +165,7 @@ class TestResolveConditional:
                 ))
                 conn.execute(text("DELETE FROM sign_off_events"))
                 # NCRs reference operation_id + work_order_id via FK.
+                conn.execute(text("UPDATE part_instances SET reason_ncr_id = NULL"))
                 conn.execute(text("DELETE FROM nonconformance_reports"))
                 conn.execute(text("DELETE FROM inspection_events"))
                 conn.execute(text("DELETE FROM labor_entries"))

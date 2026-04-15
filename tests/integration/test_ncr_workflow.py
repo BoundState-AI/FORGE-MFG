@@ -139,6 +139,7 @@ class TestNCRWorkflow:
                     "   OR action_type LIKE 'sign_off.%' "
                     "   OR action_type LIKE 'ncr.%'"
                 ))
+                conn.execute(text("UPDATE part_instances SET reason_ncr_id = NULL"))
                 conn.execute(text("DELETE FROM nonconformance_reports"))
                 conn.execute(text("DELETE FROM sign_off_events"))
                 conn.execute(text("DELETE FROM inspection_events"))

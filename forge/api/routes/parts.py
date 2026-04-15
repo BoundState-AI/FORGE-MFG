@@ -62,10 +62,21 @@ async def update_part(
     auth: AuthContext = Depends(require_permission("part:update")),
     session: AsyncSession = Depends(get_db),
 ) -> PartOut:
-    """Update a part (status/location/parent).  Transitions gated in service."""
+    """Update a part (status/location/parent).  Transitions gated in service.
+
+    Scrap transitions also require `part:scrap`.  UX spec v1.5.1
+    §5.6.5 names qa_manager as the product-authorized scrap role;
+    the admin role additionally carries part:scrap as a Phase-1
+    break-glass lane (see ROLE_PERMISSIONS in forge.api.auth).  The
+    route's base dependency is `part:update` so legitimate non-scrap
+    edits from operator / engineer / qa_manager / admin all reach
+    the service; the service enforces the scrap-specific permission
+    itself when the requested status is `scrapped`.
+    """
     part = await part_svc.update_part(
         session, part_id, data, uuid.UUID(auth.sub),
         program_codes=auth.programs,
+        has_scrap_permission="part:scrap" in auth.permissions,
     )
     await session.commit()
     await session.refresh(part)

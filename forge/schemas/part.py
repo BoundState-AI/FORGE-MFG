@@ -50,12 +50,19 @@ class PartUpdate(BaseModel):
 
     Spec §5.15: version required on mutations.  status transitions
     are validated against VALID_PART_TRANSITIONS in the service.
+
+    `reason_ncr_id` is required when `status == scrapped` per UX spec
+    v1.5.1 §5.6.5 (Part Scrap Transition — the QA-closure flow that
+    posts {status: "scrapped", reason_ncr_id: <ncr_id>}).  Service
+    layer enforces the "required-for-scrap" rule plus NCR scope and
+    relationship checks.
     """
 
     version: int
     status: PartStatus | None = None
     current_location: str | None = Field(default=None, max_length=200)
     parent_assembly_id: uuid.UUID | None = None
+    reason_ncr_id: uuid.UUID | None = None
 
 
 class PartOut(BaseModel):
@@ -70,6 +77,7 @@ class PartOut(BaseModel):
     material_certification_id: uuid.UUID | None
     parent_assembly_id: uuid.UUID | None
     current_location: str | None
+    reason_ncr_id: uuid.UUID | None
     version: int
     created_at: datetime
     updated_at: datetime

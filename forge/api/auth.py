@@ -290,6 +290,15 @@ ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
         # inspect:create) but must see the queue to resolve Dashboard
         # tiles.  Added alongside the §5.5.5 queue surface.
         "inspect:read",
+        # part:update + part:scrap: UX spec v1.5.1 §5.6.5 names
+        # qa_manager as the role performing the PATCH /api/parts/:id
+        # scrap transition.  part:update is the route-level gate
+        # (shared with location / parent-assembly edits the QA role
+        # also needs during closure review); part:scrap is the
+        # service-level second check that separates scrap authority
+        # from generic part editing.  Both are required end-to-end
+        # for the scrap flow to succeed.
+        "part:update", "part:scrap",
         "chat:query",
     }),
     "program_manager": frozenset({
@@ -299,6 +308,12 @@ ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
     "admin": frozenset({
         "admin:manage", "wo:read", "op:read", "ncr:read", "part:read",
         "doc:read", "sched:read", "dash:read",
+        # Admin carries both part:update and part:scrap as a
+        # break-glass override lane — Phase-1 admin needs coverage
+        # of every gated action for hotfix scenarios, and the
+        # scrap route requires part:update at the dependency layer
+        # before part:scrap is evaluated in the service.
+        "part:update", "part:scrap",
     }),
 }
 

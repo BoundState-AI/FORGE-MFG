@@ -134,11 +134,17 @@ def validate_ncr_transition(current: NCRStatus, target: NCRStatus) -> bool:
 VALID_CERT_TRANSITIONS: dict[CertStatus, set[CertStatus]] = {
     CertStatus.quarantine: {
         CertStatus.accepted, CertStatus.rejected, CertStatus.expired,
+        CertStatus.scrapped,
     },
-    CertStatus.accepted: {CertStatus.consumed, CertStatus.expired},
+    CertStatus.accepted: {
+        CertStatus.consumed, CertStatus.expired, CertStatus.scrapped,
+    },
     CertStatus.rejected: set(),
     CertStatus.expired: set(),
     CertStatus.consumed: set(),
+    # `scrapped` is a terminal verdict (spec §5.7 / §5.6.5 NCR close
+    # linkage): a condemned lot cannot be resurrected.
+    CertStatus.scrapped: set(),
 }
 
 

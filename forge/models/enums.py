@@ -178,13 +178,20 @@ class Disposition(enum.StrEnum):
 
 
 class CertStatus(enum.StrEnum):
-    """Material certification lifecycle (spec §3.1 MaterialCertification)."""
+    """Material certification lifecycle (spec §3.1 MaterialCertification).
+
+    `scrapped` is a terminal verdict for stock that has been condemned
+    (lot failure discovered post-accept, in-process damage, or NCR-linked
+    disposal).  UX spec v1.5.1 §5.7 enumerates `scrapped` on the
+    materials filter vocabulary.
+    """
 
     quarantine = "quarantine"
     accepted = "accepted"
     rejected = "rejected"
     consumed = "consumed"
     expired = "expired"
+    scrapped = "scrapped"
 
 
 class PartStatus(enum.StrEnum):

@@ -125,6 +125,20 @@ class TestChatPipeline:
                 "ALTER TABLE audit_records "
                 "DISABLE TRIGGER trg_protect_audit_records"
             ))
+            # NCRs + part_instances FK-reference work_orders.  Cross-
+            # suite runs can leak rows from earlier test files; scrub
+            # them here so DELETE FROM work_orders does not hit a
+            # ForeignKeyViolation.  reason_ncr_id + part_instance_id
+            # form a circular FK between NCR ↔ part, so null the
+            # scrap linkage first.
+            conn.execute(text(
+                "UPDATE part_instances SET reason_ncr_id = NULL"
+            ))
+            conn.execute(text("DELETE FROM nonconformance_reports"))
+            conn.execute(text("DELETE FROM part_instances"))
+            conn.execute(text("DELETE FROM inspection_events"))
+            conn.execute(text("DELETE FROM labor_entries"))
+            conn.execute(text("DELETE FROM operations"))
             conn.execute(text("DELETE FROM work_orders"))
             conn.execute(text(
                 "ALTER TABLE audit_records "

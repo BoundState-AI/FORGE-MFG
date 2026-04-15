@@ -57,6 +57,17 @@ class PartInstance(AuditableMixin, Base):
         UUID(as_uuid=True), ForeignKey("part_instances.id"), nullable=True
     )
     current_location: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # UX spec v1.5.1 §5.6.5: when a part transitions to `scrapped`, the
+    # NCR that justified the disposition is persisted here so the audit
+    # trail and NCR-close preconditions can tell a QA-driven scrap from
+    # an arbitrary administrative one.  Nullable: non-scrapped parts
+    # carry no linkage, and the column lands as NULL-backfilled on
+    # existing rows (all of which predate the contract).
+    reason_ncr_id: Mapped[_uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("nonconformance_reports.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
 
 
 class TraceabilityLink(AuditableMixin, Base):

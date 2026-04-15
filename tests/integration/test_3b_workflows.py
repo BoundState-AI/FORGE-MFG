@@ -149,18 +149,20 @@ class Test3BWorkflows:
                 conn.execute(text("DELETE FROM material_consumptions"))
                 conn.execute(text("DELETE FROM material_certifications"))
                 conn.execute(text("DELETE FROM traceability_links"))
+                # Circular FK between part_instances.reason_ncr_id and
+                # nonconformance_reports.part_instance_id (both added
+                # via the §5.6.5 scrap flow) means neither can be
+                # deleted while populated — null out the scrap linkage
+                # first.  Belt-and-suspenders: also works across test
+                # files that don't create scrapped parts.
+                conn.execute(text(
+                    "UPDATE part_instances SET reason_ncr_id = NULL"
+                ))
+                conn.execute(text("DELETE FROM nonconformance_reports"))
                 conn.execute(text("DELETE FROM part_instances"))
                 conn.execute(text(
                     "DELETE FROM controlled_document_refs"
                 ))
-                # NCRs FK-reference work_orders; must be cleared before WO
-                # delete.  Test slices before 4B did not clean NCRs here
-                # because no prior slice in this file creates them, but
-                # in a cross-slice full-suite run NCR rows can survive
-                # from test_ncr_workflow.py if its own cleanup misses a
-                # case — belt-and-suspenders delete keeps 3B runnable
-                # in any test ordering.
-                conn.execute(text("DELETE FROM nonconformance_reports"))
                 conn.execute(text("DELETE FROM labor_entries"))
                 conn.execute(text("DELETE FROM operations"))
                 conn.execute(text("DELETE FROM work_orders"))
@@ -800,6 +802,247 @@ class Test3BWorkflows:
             )).fetchall()
         engine.dispose()
         assert {r[0] for r in rows} == {"part.create", "part.update"}
+
+    # ------------------------------------------------------------------
+    # Part scrap transition (UX spec v1.5.1 §5.6.5)
+    # ------------------------------------------------------------------
+
+    async def _make_ncr_for_wo(
+        self, wo_id: str, *, part_instance_id: str | None = None,
+    ) -> dict[str, Any]:
+        self._clear_override()
+        async with await self._client() as client:
+            r = await client.post(
+                "/api/ncrs",
+                json={
+                    "work_order_id": wo_id,
+                    "part_instance_id": part_instance_id,
+                    "description": "test ncr for scrap",
+                },
+                headers={"Idempotency-Key": str(uuid.uuid4())},
+            )
+            assert r.status_code == 201, r.text
+            return r.json()  # type: ignore[no-any-return]
+
+    @pytest.mark.asyncio
+    async def test_scrap_transition_requires_reason_ncr_id(self) -> None:
+        """status=scrapped without reason_ncr_id is rejected (§5.6.5)."""
+        part = await self._create_part()
+        async with await self._client() as client:
+            r = await client.patch(
+                f"/api/parts/{part['id']}",
+                json={"version": part["version"], "status": "scrapped"},
+            )
+        assert r.status_code == 422
+        assert "reason_ncr_id" in r.text
+
+    @pytest.mark.asyncio
+    async def test_scrap_transition_with_part_linked_ncr_succeeds(
+        self,
+    ) -> None:
+        """Canonical flow: NCR names the part, QA stamps status=scrapped.
+
+        Asserts the spec-authorized role (qa_manager) reaches the
+        service end-to-end with ONLY their real permission set —
+        catches the route-dep / service-check mismatch the review
+        flagged on the initial implementation.
+        """
+        part = await self._create_part()
+        wo = await self._make_wo()
+        ncr = await self._make_ncr_for_wo(
+            wo["id"], part_instance_id=part["id"],
+        )
+        from forge.api.auth import ROLE_PERMISSIONS
+
+        self._override_as(
+            ACCEPTER_USER_ID,
+            roles=["qa_manager"],
+            permissions=set(ROLE_PERMISSIONS["qa_manager"]),
+        )
+        async with await self._client() as client:
+            r = await client.patch(
+                f"/api/parts/{part['id']}",
+                json={
+                    "version": part["version"],
+                    "status": "scrapped",
+                    "reason_ncr_id": ncr["id"],
+                },
+            )
+        self._clear_override()
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["status"] == "scrapped"
+        assert body["reason_ncr_id"] == ncr["id"]
+
+    @pytest.mark.asyncio
+    async def test_scrap_transition_by_admin_role_only(self) -> None:
+        """Admin break-glass lane: scrap succeeds with ONLY admin perms."""
+        part = await self._create_part()
+        wo = await self._make_wo()
+        ncr = await self._make_ncr_for_wo(
+            wo["id"], part_instance_id=part["id"],
+        )
+        from forge.api.auth import ROLE_PERMISSIONS
+
+        self._override_as(
+            ACCEPTER_USER_ID,
+            roles=["admin"],
+            permissions=set(ROLE_PERMISSIONS["admin"]),
+        )
+        async with await self._client() as client:
+            r = await client.patch(
+                f"/api/parts/{part['id']}",
+                json={
+                    "version": part["version"],
+                    "status": "scrapped",
+                    "reason_ncr_id": ncr["id"],
+                },
+            )
+        self._clear_override()
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "scrapped"
+
+    @pytest.mark.asyncio
+    async def test_scrap_rejected_for_engineer_role(self) -> None:
+        """Engineer has part:update (for non-scrap edits) but NOT part:scrap."""
+        part = await self._create_part()
+        wo = await self._make_wo()
+        ncr = await self._make_ncr_for_wo(wo["id"])
+        from forge.api.auth import ROLE_PERMISSIONS
+
+        # Engineer doesn't have part:update by default; grant the
+        # minimum to reach the route so we're testing the service
+        # gate, not the route gate.  Matches the real operator flow.
+        engineer_perms = set(ROLE_PERMISSIONS["engineer"]) | {"part:update"}
+        self._override_as(
+            ACCEPTER_USER_ID,
+            roles=["engineer"],
+            permissions=engineer_perms,
+        )
+        async with await self._client() as client:
+            r = await client.patch(
+                f"/api/parts/{part['id']}",
+                json={
+                    "version": part["version"],
+                    "status": "scrapped",
+                    "reason_ncr_id": ncr["id"],
+                },
+            )
+        self._clear_override()
+        assert r.status_code == 403
+        assert "part:scrap" in r.text
+
+    @pytest.mark.asyncio
+    async def test_scrap_transition_with_untied_ncr_succeeds(self) -> None:
+        """NCR with part_instance_id=None is allowed (same-WO / op-level)."""
+        part = await self._create_part()
+        wo = await self._make_wo()
+        ncr = await self._make_ncr_for_wo(wo["id"])
+        async with await self._client() as client:
+            r = await client.patch(
+                f"/api/parts/{part['id']}",
+                json={
+                    "version": part["version"],
+                    "status": "scrapped",
+                    "reason_ncr_id": ncr["id"],
+                },
+            )
+        assert r.status_code == 200, r.text
+
+    @pytest.mark.asyncio
+    async def test_scrap_ncr_names_different_part_rejected(self) -> None:
+        """NCR referencing a DIFFERENT part is not a truthful linkage."""
+        part_a = await self._create_part(serial="SN-A")
+        part_b = await self._create_part(serial="SN-B")
+        wo = await self._make_wo()
+        ncr_for_b = await self._make_ncr_for_wo(
+            wo["id"], part_instance_id=part_b["id"],
+        )
+        async with await self._client() as client:
+            r = await client.patch(
+                f"/api/parts/{part_a['id']}",
+                json={
+                    "version": part_a["version"],
+                    "status": "scrapped",
+                    "reason_ncr_id": ncr_for_b["id"],
+                },
+            )
+        assert r.status_code == 422
+        assert "different part" in r.text.lower()
+
+    @pytest.mark.asyncio
+    async def test_scrap_nonexistent_ncr_rejected(self) -> None:
+        part = await self._create_part()
+        async with await self._client() as client:
+            r = await client.patch(
+                f"/api/parts/{part['id']}",
+                json={
+                    "version": part["version"],
+                    "status": "scrapped",
+                    "reason_ncr_id": str(uuid.uuid4()),
+                },
+            )
+        assert r.status_code == 422
+        assert "does not reference" in r.text
+
+    @pytest.mark.asyncio
+    async def test_scrap_requires_part_scrap_permission(self) -> None:
+        """Operator has part:update but NOT part:scrap."""
+        part = await self._create_part()
+        wo = await self._make_wo()
+        ncr = await self._make_ncr_for_wo(wo["id"])
+        # Override with operator's exact permission set — includes
+        # part:update, excludes part:scrap.
+        from forge.api.auth import ROLE_PERMISSIONS
+
+        self._override_as(
+            OPERATOR_USER_ID,
+            roles=["operator"],
+            permissions=set(ROLE_PERMISSIONS["operator"]),
+        )
+        async with await self._client() as client:
+            r = await client.patch(
+                f"/api/parts/{part['id']}",
+                json={
+                    "version": part["version"],
+                    "status": "scrapped",
+                    "reason_ncr_id": ncr["id"],
+                },
+            )
+        self._clear_override()
+        assert r.status_code == 403
+        assert "part:scrap" in r.text
+
+    @pytest.mark.asyncio
+    async def test_scrap_emits_spec_named_audit_events(self) -> None:
+        """Success path writes part.status_changed and ncr.scrap_linkage_confirmed."""
+        part = await self._create_part()
+        wo = await self._make_wo()
+        ncr = await self._make_ncr_for_wo(
+            wo["id"], part_instance_id=part["id"],
+        )
+        async with await self._client() as client:
+            r = await client.patch(
+                f"/api/parts/{part['id']}",
+                json={
+                    "version": part["version"],
+                    "status": "scrapped",
+                    "reason_ncr_id": ncr["id"],
+                },
+            )
+            assert r.status_code == 200, r.text
+
+        engine = create_engine(_SYNC_URL)
+        with engine.connect() as conn:
+            rows = conn.execute(text(
+                "SELECT action_type FROM audit_records "
+                "WHERE action_type IN ("
+                " 'part.status_changed', 'ncr.scrap_linkage_confirmed')"
+            )).fetchall()
+        engine.dispose()
+        names = {r[0] for r in rows}
+        assert "part.status_changed" in names
+        assert "ncr.scrap_linkage_confirmed" in names
 
     # ------------------------------------------------------------------
     # Documents
