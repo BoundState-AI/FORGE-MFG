@@ -15,11 +15,10 @@
  */
 
 import { useState, useMemo, useCallback } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   fetchWorkOrder,
-  fetchWorkOrderOperations,
   releaseWorkOrder,
   recallWorkOrder,
   holdWorkOrder,
@@ -30,12 +29,10 @@ import { useAuthStore } from '@/auth/store';
 import { StatusBadge } from '@/components/StatusBadge';
 import { LoadingSkeleton } from '@/components/LoadingSkeleton';
 import { ErrorBanner } from '@/components/ErrorBanner';
-import { EmptyState } from '@/components/EmptyState';
 import { ConfirmationDialog } from '@/components/ConfirmationDialog';
 import { ConflictModal } from '@/components/ConflictModal';
 import type {
   WorkOrderOut,
-  OperationOut,
   WOStatus,
   VersionConflictError,
 } from '@/types/api';
@@ -102,23 +99,6 @@ function extract422(err: unknown): string | null {
 }
 
 /* ── Inline styles ── */
-
-const thStyle: React.CSSProperties = {
-  textAlign: 'left',
-  padding: 'var(--space-sm) var(--space-md)',
-  borderBottom: '2px solid var(--border)',
-  fontSize: 'var(--font-size-label)',
-  color: 'var(--text-secondary)',
-  fontWeight: 600,
-  whiteSpace: 'nowrap',
-};
-
-const tdStyle: React.CSSProperties = {
-  padding: 'var(--space-sm) var(--space-md)',
-  borderBottom: '1px solid var(--border)',
-  fontSize: 'var(--font-size-table)',
-  color: 'var(--text-primary)',
-};
 
 const actionBtnStyle: React.CSSProperties = {
   padding: 'var(--space-sm) var(--space-md)',
@@ -191,7 +171,6 @@ function HeaderField({ label, value }: { label: string; value: React.ReactNode }
 
 export default function WorkOrderDetail() {
   const { id } = useParams<{ id: string }>();
-  const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { hasRole, hasAnyRole, activeProgram } = useAuthStore();
   const programId = activeProgram?.id ?? 'none';
@@ -211,21 +190,12 @@ export default function WorkOrderDetail() {
     refetchInterval: REFETCH_INTERVAL_MS,
   });
 
-  const opsQuery = useQuery<OperationOut[]>({
-    queryKey: ['work-order-operations', programId, id],
-    queryFn: () => fetchWorkOrderOperations(id!),
-    enabled: !!id,
-    refetchInterval: REFETCH_INTERVAL_MS,
-  });
-
   const wo = woQuery.data;
-  const ops = opsQuery.data ?? [];
 
   /* ── Mutations ── */
 
   const invalidateAll = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ['work-order', programId, id] });
-    queryClient.invalidateQueries({ queryKey: ['work-order-operations', programId, id] });
   }, [queryClient, programId, id]);
 
   const transitionMutation = useMutation({
@@ -346,8 +316,8 @@ export default function WorkOrderDetail() {
     return btns;
   }, [wo, hasRole, hasAnyRole]);
 
-  /* Check if complete is disabled (operations not all complete) */
-  const allOpsComplete = ops.every((op) => op.status === 'complete');
+  /* Operations table is deferred (backend list endpoint not yet exposed).
+     The WO complete precondition will be checked by the server. */
 
   /* ── Loading ── */
   if (woQuery.isLoading) {
@@ -413,8 +383,10 @@ export default function WorkOrderDetail() {
         {/* Action buttons */}
         <div style={{ display: 'flex', gap: 'var(--space-sm)', flexWrap: 'wrap' }}>
           {actionButtons.map((btn) => {
-            const isComplete = btn.action === 'complete';
-            const disabled = isComplete && !allOpsComplete;
+            /* Client-side "all ops complete" gate removed — the operations
+               list endpoint is deferred.  The server still rejects Complete
+               if preconditions are unmet (OP-COMP-* codes in spec §5.4.1). */
+            const disabled = false;
 
             return (
               <div key={btn.action} style={{ position: 'relative' }}>
@@ -489,14 +461,23 @@ export default function WorkOrderDetail() {
         </button>
       </div>
 
-      {/* Tab content */}
+      {/* Tab content.  The operations listing depends on a backend GET
+         that has not been exposed yet (see endpoints.ts header notes).
+         When that endpoint ships the OperationsTab can re-attach — the
+         existing implementation is preserved at the bottom of this file
+         for that integration work. */}
       {activeTab === 'operations' && (
-        <OperationsTab
-          ops={ops}
-          isLoading={opsQuery.isLoading}
-          woId={wo.id}
-          navigate={navigate}
-        />
+        <div
+          style={{
+            padding: 'var(--space-lg)',
+            color: 'var(--text-secondary)',
+            textAlign: 'center',
+          }}
+        >
+          The backend list endpoint (GET /api/work-orders/:id/operations)
+          has not been implemented yet. Individual operations remain
+          reachable via their direct URLs.
+        </div>
       )}
       {activeTab === 'audit' && (
         <div
@@ -563,98 +544,6 @@ export default function WorkOrderDetail() {
   );
 }
 
-/* ── Operations Tab ── */
 
-function OperationsTab({
-  ops,
-  isLoading,
-  woId,
-  navigate,
-}: {
-  ops: OperationOut[];
-  isLoading: boolean;
-  woId: string;
-  navigate: (path: string) => void;
-}) {
-  if (isLoading) return <LoadingSkeleton rows={5} />;
-
-  if (ops.length === 0) {
-    return (
-      <EmptyState
-        title="No operations"
-        message="This work order has no operations defined yet."
-      />
-    );
-  }
-
-  /* Sort by sequence number for display */
-  const sorted = [...ops].sort((a, b) => a.sequence - b.sequence);
-
-  return (
-    <div style={{ overflowX: 'auto' }}>
-      <table
-        style={{
-          width: '100%',
-          borderCollapse: 'collapse',
-          backgroundColor: 'var(--bg-surface)',
-          borderRadius: 'var(--radius-md)',
-        }}
-      >
-        <thead>
-          <tr>
-            <th style={thStyle}>Seq</th>
-            <th style={thStyle}>Description</th>
-            <th style={thStyle}>Status</th>
-            <th style={{ ...thStyle, textAlign: 'center' }}>Safety Critical</th>
-            <th style={thStyle}>Est. Hours</th>
-          </tr>
-        </thead>
-        <tbody>
-          {sorted.map((op) => (
-            <tr
-              key={op.id}
-              onClick={() => navigate(`/work-orders/${woId}/ops/${op.id}`)}
-              style={{ cursor: 'pointer' }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.backgroundColor = 'var(--bg-elevated)';
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.backgroundColor = 'transparent';
-              }}
-              role="link"
-              tabIndex={0}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter')
-                  navigate(`/work-orders/${woId}/ops/${op.id}`);
-              }}
-              aria-label={`Operation ${op.sequence}: ${op.description}`}
-            >
-              <td style={{ ...tdStyle, fontWeight: 600, width: '60px' }}>
-                {op.sequence}
-              </td>
-              <td style={tdStyle}>{op.description}</td>
-              <td style={tdStyle}>
-                <StatusBadge status={op.status} />
-              </td>
-              <td style={{ ...tdStyle, textAlign: 'center' }}>
-                {op.safety_critical ? (
-                  <span
-                    style={{
-                      color: 'var(--safety-critical-border)',
-                      fontWeight: 700,
-                    }}
-                  >
-                    YES
-                  </span>
-                ) : (
-                  <span style={{ color: 'var(--text-muted)' }}>--</span>
-                )}
-              </td>
-              <td style={tdStyle}>{op.estimated_hours}h</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
+/* OperationsTab removed from this slice. Restore once the backend adds
+   GET /api/work-orders/{wo_id}/operations. */

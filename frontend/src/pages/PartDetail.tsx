@@ -1,249 +1,129 @@
 /**
  * Module:   PartDetail
- * Purpose:  Read-only part detail with full traceability chain.
- * Rev:      0.1.0
+ * Purpose:  Traceability view — part record GET not yet on the backend.
+ * Rev:      0.2.0
  *
  * BoundState Proprietary
  * Co-Authored-By: Dr. Joseph Wilde, BoundState AI
  * Co-Authored-By: Claude "Beth" (Opus 4.6)
  *
- * Spec SS5.8: Displays serial number, part number, status, location,
- * and the full traceability chain including material certification
- * linkage, assembly chain (parent assemblies), and child parts.
- * This is a read-only page -- no mutations.
+ * Why reduced surface: The generated OpenAPI schema confirms the
+ * backend does not expose GET /api/parts/{part_id}.  The traceability
+ * endpoint (GET /api/parts/{part_id}/traceability) still works, so
+ * this page renders the full trace graph without the part header.
+ * A future backend slice will add the part GET so this page can show
+ * serial_number, part_number, status, etc. (spec §5.8).
  */
 
 import { useParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { fetchPart, fetchTraceability } from '@/api/endpoints';
-import { StatusBadge } from '@/components/StatusBadge';
-import { ErrorBanner } from '@/components/ErrorBanner';
+import { useAuthStore } from '@/auth/store';
+import { fetchTraceability } from '@/api/endpoints';
 import { LoadingSkeleton } from '@/components/LoadingSkeleton';
+import { ErrorBanner } from '@/components/ErrorBanner';
+import { EmptyState } from '@/components/EmptyState';
 import { PageHeader } from '@/components/PageHeader';
-import type { PartOut } from '@/types/api';
-
-/* ── Styles ── */
-
-const sectionStyle: React.CSSProperties = {
-  marginBottom: 'var(--space-lg)',
-  padding: 'var(--space-md)',
-  backgroundColor: 'var(--bg-surface)',
-  border: '1px solid var(--border)',
-  borderRadius: 'var(--radius-md)',
-};
-
-const fieldRowStyle: React.CSSProperties = {
-  display: 'flex',
-  gap: 'var(--space-lg)',
-  marginBottom: 'var(--space-sm)',
-  flexWrap: 'wrap',
-};
-
-const fieldLabelStyle: React.CSSProperties = {
-  fontSize: 'var(--font-size-label)',
-  fontWeight: 600,
-  color: 'var(--text-secondary)',
-  marginBottom: '2px',
-};
-
-const fieldValueStyle: React.CSSProperties = {
-  fontSize: 'var(--font-size-body)',
-  color: 'var(--text-primary)',
-};
-
-/* ── Part row for traceability lists ── */
-
-function PartRow({ part, indent = 0 }: { part: PartOut; indent?: number }) {
-  return (
-    <div
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 'var(--space-sm)',
-        padding: 'var(--space-xs) var(--space-sm)',
-        paddingLeft: `calc(var(--space-sm) + ${indent * 16}px)`,
-        borderBottom: '1px solid var(--border)',
-        fontSize: 'var(--font-size-body)',
-      }}
-    >
-      <span style={{ fontWeight: 600, color: 'var(--text-primary)', minWidth: '120px' }}>
-        {part.serial_number}
-      </span>
-      <span style={{ color: 'var(--text-secondary)', minWidth: '100px' }}>{part.part_number}</span>
-      <span style={{ flex: 1, color: 'var(--text-primary)' }}>{part.part_description}</span>
-      <StatusBadge status={part.status} />
-    </div>
-  );
-}
-
-/* ── Component ── */
 
 export default function PartDetail() {
   const { id } = useParams<{ id: string }>();
+  const programId = useAuthStore((s) => s.activeProgram?.id);
 
-  const {
-    data: part,
-    isLoading: partLoading,
-    isError: partError,
-    error: partErr,
-  } = useQuery({
-    queryKey: ['part', id],
-    queryFn: () => fetchPart(id!),
-    enabled: !!id,
-  });
-
-  const {
-    data: traceability,
-    isLoading: traceLoading,
-    isError: traceError,
-  } = useQuery({
-    queryKey: ['traceability', id],
+  const traceQuery = useQuery({
+    queryKey: ['part-trace', programId, id],
     queryFn: () => fetchTraceability(id!),
     enabled: !!id,
   });
 
-  const isLoading = partLoading || traceLoading;
+  const trace = traceQuery.data;
 
-  if (isLoading) {
-    return <div style={{ padding: 'var(--space-lg)' }}><LoadingSkeleton rows={10} /></div>;
-  }
-
-  if (partError) {
+  if (traceQuery.isLoading) {
     return (
-      <div style={{ padding: 'var(--space-lg)' }}>
-        <ErrorBanner message={partErr instanceof Error ? partErr.message : 'Failed to load part'} />
+      <div className="page-content">
+        <LoadingSkeleton rows={4} />
       </div>
     );
   }
 
-  if (!part) return null;
+  if (traceQuery.error || !trace) {
+    return (
+      <div className="page-content">
+        <ErrorBanner message="Failed to load part traceability" />
+      </div>
+    );
+  }
 
+  const part = trace.part;
   return (
-    <div style={{ padding: 'var(--space-lg)', maxWidth: '900px' }}>
+    <div className="page-content">
       <PageHeader
         title={part.serial_number}
-        subtitle={`${part.part_number} -- ${part.part_description}`}
-        actions={<StatusBadge status={part.status} />}
+        breadcrumbs={[
+          { label: 'Parts', to: '/parts' },
+          { label: part.serial_number },
+        ]}
       />
 
-      {/* Part details */}
-      <div style={sectionStyle}>
-        <h3 style={{ margin: 0, marginBottom: 'var(--space-sm)', color: 'var(--text-primary)' }}>Part Information</h3>
-        <div style={fieldRowStyle}>
-          <div>
-            <div style={fieldLabelStyle}>Serial Number</div>
-            <div style={fieldValueStyle}>{part.serial_number}</div>
-          </div>
-          <div>
-            <div style={fieldLabelStyle}>Part Number</div>
-            <div style={fieldValueStyle}>{part.part_number}</div>
-          </div>
-          <div>
-            <div style={fieldLabelStyle}>Status</div>
-            <div style={fieldValueStyle}><StatusBadge status={part.status} /></div>
-          </div>
+      <div
+        className="card"
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))',
+          gap: 'var(--space-md)',
+          marginBottom: 'var(--space-lg)',
+        }}
+      >
+        <div>
+          <label>Part Number</label>
+          <div>{part.part_number}</div>
         </div>
-        <div style={fieldRowStyle}>
-          <div>
-            <div style={fieldLabelStyle}>Location</div>
-            <div style={fieldValueStyle}>{part.current_location ?? 'Not specified'}</div>
-          </div>
-          <div>
-            <div style={fieldLabelStyle}>Created</div>
-            <div style={fieldValueStyle}>{new Date(part.created_at).toLocaleString()}</div>
-          </div>
+        <div>
+          <label>Description</label>
+          <div>{part.part_description}</div>
+        </div>
+        <div>
+          <label>Status</label>
+          <div>{part.status}</div>
+        </div>
+        <div>
+          <label>Location</label>
+          <div>{part.current_location ?? '—'}</div>
         </div>
       </div>
 
-      {/* Traceability section */}
-      {traceError && (
-        <ErrorBanner message="Failed to load traceability data" />
-      )}
-
-      {traceability && (
-        <>
-          {/* Material certification link */}
-          {traceability.material_certification_id && (
-            <div style={sectionStyle}>
-              <h3 style={{ margin: 0, marginBottom: 'var(--space-sm)', color: 'var(--text-primary)' }}>
-                Material Certification
-              </h3>
-              <div style={fieldValueStyle}>
-                Linked to certification: {traceability.material_certification_id}
+      <h2 className="section-header">Traceability</h2>
+      <div className="card">
+        {trace.material_certification_id && (
+          <div style={{ marginBottom: 'var(--space-sm)' }}>
+            <label>Material Cert</label>
+            <div>{trace.material_certification_id}</div>
+          </div>
+        )}
+        {trace.assembly_chain.length > 0 && (
+          <div style={{ marginBottom: 'var(--space-sm)' }}>
+            <label>Assembly Chain</label>
+            {trace.assembly_chain.map((a) => (
+              <div key={a.id}>
+                {a.serial_number} — {a.part_description}
               </div>
-            </div>
+            ))}
+          </div>
+        )}
+        {trace.child_parts.length > 0 && (
+          <div>
+            <label>Child Parts</label>
+            {trace.child_parts.map((c) => (
+              <div key={c.id}>
+                {c.serial_number} — {c.part_description}
+              </div>
+            ))}
+          </div>
+        )}
+        {trace.assembly_chain.length === 0 &&
+          trace.child_parts.length === 0 &&
+          !trace.material_certification_id && (
+            <EmptyState title="No traceability links found" />
           )}
-
-          {/* Assembly chain (parent assemblies) */}
-          {traceability.assembly_chain.length > 0 && (
-            <div style={sectionStyle}>
-              <h3 style={{ margin: 0, marginBottom: 'var(--space-sm)', color: 'var(--text-primary)' }}>
-                Assembly Chain
-              </h3>
-              <p style={{ margin: 0, marginBottom: 'var(--space-sm)', fontSize: 'var(--font-size-body)', color: 'var(--text-secondary)' }}>
-                Parent assemblies from top-level down to this part.
-              </p>
-              {traceability.assembly_chain.map((p, i) => (
-                <PartRow key={p.id} part={p} indent={i} />
-              ))}
-            </div>
-          )}
-
-          {/* Child parts */}
-          {traceability.child_parts.length > 0 && (
-            <div style={sectionStyle}>
-              <h3 style={{ margin: 0, marginBottom: 'var(--space-sm)', color: 'var(--text-primary)' }}>
-                Child Parts
-              </h3>
-              <p style={{ margin: 0, marginBottom: 'var(--space-sm)', fontSize: 'var(--font-size-body)', color: 'var(--text-secondary)' }}>
-                Parts assembled into this component.
-              </p>
-              {traceability.child_parts.map((p) => (
-                <PartRow key={p.id} part={p} indent={1} />
-              ))}
-            </div>
-          )}
-
-          {/* Traceability links */}
-          {traceability.links.length > 0 && (
-            <div style={sectionStyle}>
-              <h3 style={{ margin: 0, marginBottom: 'var(--space-sm)', color: 'var(--text-primary)' }}>
-                Traceability Links
-              </h3>
-              {traceability.links.map((link) => (
-                <div
-                  key={link.id}
-                  style={{
-                    display: 'flex',
-                    gap: 'var(--space-sm)',
-                    padding: 'var(--space-xs) 0',
-                    fontSize: 'var(--font-size-body)',
-                    color: 'var(--text-primary)',
-                    borderBottom: '1px solid var(--border)',
-                  }}
-                >
-                  <span style={{ fontWeight: 600 }}>{link.link_type}</span>
-                  <span style={{ color: 'var(--text-secondary)' }}>
-                    {link.source_type}:{link.source_id.slice(0, 8)} → {link.target_type}:{link.target_id.slice(0, 8)}
-                  </span>
-                </div>
-              ))}
-            </div>
-          )}
-
-          {/* Empty traceability */}
-          {!traceability.material_certification_id &&
-            traceability.assembly_chain.length === 0 &&
-            traceability.child_parts.length === 0 &&
-            traceability.links.length === 0 && (
-            <div style={sectionStyle}>
-              <p style={{ margin: 0, fontSize: 'var(--font-size-body)', color: 'var(--text-secondary)' }}>
-                No traceability data available for this part.
-              </p>
-            </div>
-          )}
-        </>
-      )}
+      </div>
     </div>
   );
 }

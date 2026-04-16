@@ -99,20 +99,8 @@ vi.mock('@/api/endpoints', () => ({
     page_size: 50,
     pages: 0,
   }),
-  fetchMaterials: vi.fn().mockResolvedValue({
-    items: [],
-    total: 0,
-    page: 1,
-    page_size: 50,
-    pages: 0,
-  }),
-  fetchParts: vi.fn().mockResolvedValue({
-    items: [],
-    total: 0,
-    page: 1,
-    page_size: 50,
-    pages: 0,
-  }),
+  /* fetchMaterials and fetchParts were removed when the frontend
+     dropped calls to non-existent backend GETs (see endpoints.ts). */
   fetchCurrentUser: vi.fn().mockResolvedValue({
     id: 'test-user-id',
     display_name: 'Test User',

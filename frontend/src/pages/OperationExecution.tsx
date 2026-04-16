@@ -28,10 +28,8 @@ import {
   startOperation,
   completeOperation,
   holdOperation,
-  resumeOperation,
   createLabor,
   stopLabor,
-  fetchOperationLabor,
 } from '@/api/endpoints';
 import { useOperationSSE } from '@/hooks/useOperationSSE';
 import { useAuthStore } from '@/auth/store';
@@ -279,16 +277,14 @@ export default function OperationExecution() {
     refetchInterval: REFETCH_INTERVAL_MS,
   });
 
-  const laborQuery = useQuery<LaborOut[]>({
-    queryKey: ['operation-labor', programId, opId],
-    queryFn: () => fetchOperationLabor(opId!),
-    enabled: !!opId,
-    refetchInterval: REFETCH_INTERVAL_MS,
-  });
-
   const op = opQuery.data;
-  /* Memoize the list so downstream useMemo deps don't change every render. */
-  const laborEntries = useMemo(() => laborQuery.data ?? [], [laborQuery.data]);
+
+  /* Active labor entries for this operation are tracked locally after
+     start/stop mutations rather than fetched — the backend does not yet
+     expose GET /api/operations/:id/labor (see endpoints.ts notes).
+     Kept minimal: the UI only needs to know whether the current user
+     has an active entry so the Start/Stop buttons can toggle. */
+  const [laborEntries, setLaborEntries] = useState<LaborOut[]>([]);
 
   /* Active labor entries for the current user on this operation */
   const myActiveLabor = useMemo(
@@ -340,9 +336,16 @@ export default function OperationExecution() {
 
   /* pending → in_progress.  Invariant: parent WO released or in_progress,
      all predecessors complete, parent WO not on hold.  Server validates
-     via OP-START-001..003.  Permission: operator. */
+     via OP-START-001..003.  The start endpoint atomically creates a
+     labor entry so the request needs role + shift (spec §5.4.2).
+     Permission: operator. */
   const startMutation = useMutation({
-    mutationFn: () => startOperation(opId!, { version: op?.version }),
+    mutationFn: () =>
+      startOperation(opId!, {
+        role: user?.roles?.[0]?.name ?? 'operator',
+        shift: 'day',
+        version: op?.version,
+      }),
     onSuccess: () => {
       setErrorMsg(null);
       invalidateAll();
@@ -382,20 +385,11 @@ export default function OperationExecution() {
     },
   });
 
-  /* hold → in_progress.  Invariant: parent WO not on hold.
-     Server validates via OP-RESUME-001.  Permission: operator, engineer. */
-  const resumeMutation = useMutation({
-    mutationFn: () => resumeOperation(opId!, { version: op?.version }),
-    onSuccess: () => {
-      setErrorMsg(null);
-      setPendingAction(null);
-      invalidateAll();
-    },
-    onError: (err) => {
-      setPendingAction(null);
-      handleMutationError(err);
-    },
-  });
+  /* Resume from hold is not exposed as a dedicated backend route.  In
+     the current contract, operators use [Start Timer] again once the
+     operation returns to a startable state.  The resume UI is therefore
+     omitted from 5C; a future slice will surface it once the backend
+     adds POST /api/operations/:id/resume. */
 
   const createLaborMutation = useMutation({
     mutationFn: () =>
@@ -403,8 +397,10 @@ export default function OperationExecution() {
         role: user?.roles?.[0]?.name ?? 'operator',
         shift: 'day',
       }),
-    onSuccess: () => {
+    onSuccess: (labor) => {
       setErrorMsg(null);
+      /* Track locally until the backend exposes a labor list endpoint. */
+      setLaborEntries((prev) => [...prev, labor]);
       invalidateAll();
     },
     onError: handleMutationError,
@@ -415,8 +411,11 @@ export default function OperationExecution() {
       const entry = laborEntries.find((l) => l.id === entryId);
       return stopLabor(entryId, { version: entry?.version });
     },
-    onSuccess: () => {
+    onSuccess: (labor) => {
       setErrorMsg(null);
+      setLaborEntries((prev) =>
+        prev.map((l) => (l.id === labor.id ? labor : l)),
+      );
       invalidateAll();
     },
     onError: handleMutationError,
@@ -707,24 +706,8 @@ export default function OperationExecution() {
         )}
 
         {/* Resume Operation (engineer role) */}
-        {op.status === 'hold' && hasAnyRole('engineer', 'qa_manager') && (
-          <button
-            type="button"
-            onClick={() =>
-              setPendingAction({
-                title: 'Resume Operation',
-                message: `Resume Op ${op.sequence_number}?`,
-                action: () => resumeMutation.mutate(),
-              })
-            }
-            style={{
-              ...actionBtnStyle,
-              backgroundColor: 'var(--interactive)',
-            }}
-          >
-            Resume Operation
-          </button>
-        )}
+        {/* Resume from hold — deferred until the backend exposes the
+            POST /api/operations/:id/resume route.  See endpoints.ts notes. */}
       </div>
 
       {/* Confirmation dialog */}
@@ -734,11 +717,7 @@ export default function OperationExecution() {
         message={pendingAction?.message ?? ''}
         confirmLabel={pendingAction?.title ?? 'Confirm'}
         destructive={pendingAction?.destructive ?? false}
-        loading={
-          completeMutation.isPending ||
-          holdMutation.isPending ||
-          resumeMutation.isPending
-        }
+        loading={completeMutation.isPending || holdMutation.isPending}
         onConfirm={() => pendingAction?.action()}
         onCancel={() => setPendingAction(null)}
       />

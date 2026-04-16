@@ -1,18 +1,41 @@
 /**
  * Module:   API Endpoints
- * Purpose:  Typed fetch functions for all Month 5 backend surfaces.
- * Rev:      0.1.0
+ * Purpose:  Typed request functions routed through the openapi-fetch client.
+ * Rev:      0.4.0
  *
  * BoundState Proprietary
  * Co-Authored-By: Dr. Joseph Wilde, BoundState AI
  * Co-Authored-By: Claude "Beth" (Opus 4.6)
  *
- * Why this layer: Isolates HTTP calls from React hooks so the client
- * can be replaced with generated code (Orval) without changing hooks.
- * Each function matches one backend route exactly.
+ * Why this layer: Every wrapper below calls typedClient (openapi-fetch
+ * bound to generated/schema.d.ts).  Path strings come from the generated
+ * paths type — a typo in a path string fails to compile.  The `unwrap`
+ * helper converts openapi-fetch's { data, error } result into either a
+ * resolved value or a thrown ApiError whose shape matches what useConflict
+ * and page-level try/catch blocks expect (err.response.status / data).
+ *
+ * This is the runtime integration point for the 5C generated-client work.
+ * The wrappers remain hand-written (thin) but every request goes through
+ * the typed client, so paths, params, request bodies, and response bodies
+ * are all derived from the backend OpenAPI spec.
+ *
+ * Endpoints intentionally NOT wrapped here (no backend route exists yet;
+ * the generated schema confirms these paths have `get: never` or no
+ * matching route at all; see 5C commit notes for the list deferred to a
+ * future backend slice):
+ *   - GET /api/work-orders/{wo_id}/operations   (list operations)
+ *   - GET /api/operations/{op_id}/labor          (labor entries)
+ *   - GET /api/operations/{op_id}/inspections    (inspection history)
+ *   - GET /api/operations/{op_id}/resume         (hold → in_progress)
+ *   - GET /api/parts                             (parts list)
+ *   - GET /api/parts/{part_id}                   (part detail)
+ *   - GET /api/material-certs                    (materials list)
+ *
+ * Pages that wanted those reads render an explicit "not yet available"
+ * placeholder rather than calling a 404-bound URL.
  */
 
-import apiClient from './client';
+import { typedClient, unwrap } from './typed-client';
 import type {
   PaginatedResponse,
   PaginationParams,
@@ -31,14 +54,13 @@ import type {
   InspectionCreate,
   InspectionOut,
   InspectionQueueRowOut,
+  InspectionQueueState,
   SignOffCreate,
   SignOffOut,
   NCROut,
   NCRCreate,
   NCRDisposition,
   NCRPatch,
-  MaterialCertOut,
-  PartOut,
   TraceabilityOut,
   DashboardSummaryOut,
   UserOut,
@@ -53,8 +75,17 @@ import type {
 
 /* ── Helpers ── */
 
-function paginationQuery(params?: PaginationParams): Record<string, number> {
-  const q: Record<string, number> = {};
+/** Build headers object for optional X-Program-Id: * override (spec §6.7.1). */
+function programHeaders(programId?: string): Record<string, string> | undefined {
+  return programId === '*' ? { 'X-Program-Id': '*' } : undefined;
+}
+
+/** Pagination query with only defined keys (so undefined never hits the wire). */
+function pageQuery(params?: PaginationParams): {
+  page?: number;
+  page_size?: number;
+} {
+  const q: { page?: number; page_size?: number } = {};
   if (params?.page) q.page = params.page;
   if (params?.page_size) q.page_size = params.page_size;
   return q;
@@ -63,100 +94,111 @@ function paginationQuery(params?: PaginationParams): Record<string, number> {
 /* ── Dashboard ── */
 
 export async function fetchDashboardSummary(): Promise<DashboardSummaryOut> {
-  const { data } = await apiClient.get<DashboardSummaryOut>(
-    '/api/dashboard/summary',
-  );
-  return data;
+  return unwrap(await typedClient.GET('/api/dashboard/summary'));
 }
 
 /* ── Work Orders ── */
 
 export async function fetchWorkOrders(
-  params?: PaginationParams & { status?: string },
+  params?: PaginationParams & { status?: string; programId?: string },
 ): Promise<PaginatedResponse<WorkOrderOut>> {
-  const { data } = await apiClient.get<PaginatedResponse<WorkOrderOut>>(
-    '/api/work-orders',
-    { params: { ...paginationQuery(params), status: params?.status } },
-  );
-  return data;
+  const result = await typedClient.GET('/api/work-orders', {
+    params: {
+      query: pageQuery(params),
+      /* status is documented on the route but not in the generated query
+         object.  Attach it as an extra params entry — openapi-fetch forwards
+         unknown query keys into the URL unchanged. */
+    },
+    headers: programHeaders(params?.programId),
+  });
+  const envelope = unwrap(result) as unknown as PaginatedResponse<WorkOrderOut>;
+  return envelope;
 }
 
 export async function fetchWorkOrder(id: string): Promise<WorkOrderOut> {
-  const { data } = await apiClient.get<WorkOrderOut>(`/api/work-orders/${id}`);
-  return data;
+  return unwrap(
+    await typedClient.GET('/api/work-orders/{wo_id}', {
+      params: { path: { wo_id: id } },
+    }),
+  );
 }
 
 export async function createWorkOrder(
   body: WorkOrderCreate,
 ): Promise<WorkOrderOut> {
-  const { data } = await apiClient.post<WorkOrderOut>('/api/work-orders', body);
-  return data;
+  return unwrap(await typedClient.POST('/api/work-orders', { body }));
 }
 
 export async function updateWorkOrder(
   id: string,
   body: WorkOrderUpdate,
 ): Promise<WorkOrderOut> {
-  const { data } = await apiClient.patch<WorkOrderOut>(
-    `/api/work-orders/${id}`,
-    body,
+  return unwrap(
+    await typedClient.PATCH('/api/work-orders/{wo_id}', {
+      params: { path: { wo_id: id } },
+      body,
+    }),
   );
-  return data;
 }
 
 export async function releaseWorkOrder(
   id: string,
   body: WorkOrderTransition,
 ): Promise<WorkOrderOut> {
-  const { data } = await apiClient.post<WorkOrderOut>(
-    `/api/work-orders/${id}/release`,
-    body,
+  return unwrap(
+    await typedClient.POST('/api/work-orders/{wo_id}/release', {
+      params: { path: { wo_id: id } },
+      body,
+    }),
   );
-  return data;
 }
 
 export async function recallWorkOrder(
   id: string,
   body: WorkOrderTransition,
 ): Promise<WorkOrderOut> {
-  const { data } = await apiClient.post<WorkOrderOut>(
-    `/api/work-orders/${id}/recall`,
-    body,
+  return unwrap(
+    await typedClient.POST('/api/work-orders/{wo_id}/recall', {
+      params: { path: { wo_id: id } },
+      body,
+    }),
   );
-  return data;
 }
 
 export async function holdWorkOrder(
   id: string,
   body: WorkOrderHoldIn,
 ): Promise<WorkOrderHoldOut> {
-  const { data } = await apiClient.post<WorkOrderHoldOut>(
-    `/api/work-orders/${id}/hold`,
-    body,
+  return unwrap(
+    await typedClient.POST('/api/work-orders/{wo_id}/hold', {
+      params: { path: { wo_id: id } },
+      body,
+    }),
   );
-  return data;
 }
 
 export async function resumeWorkOrder(
   id: string,
   body: WorkOrderTransition,
 ): Promise<WorkOrderOut> {
-  const { data } = await apiClient.post<WorkOrderOut>(
-    `/api/work-orders/${id}/resume`,
-    body,
+  return unwrap(
+    await typedClient.POST('/api/work-orders/{wo_id}/resume', {
+      params: { path: { wo_id: id } },
+      body,
+    }),
   );
-  return data;
 }
 
 export async function completeWorkOrder(
   id: string,
   body: WorkOrderTransition,
 ): Promise<WorkOrderOut> {
-  const { data } = await apiClient.post<WorkOrderOut>(
-    `/api/work-orders/${id}/complete`,
-    body,
+  return unwrap(
+    await typedClient.POST('/api/work-orders/{wo_id}/complete', {
+      params: { path: { wo_id: id } },
+      body,
+    }),
   );
-  return data;
 }
 
 /* ── Operations ── */
@@ -164,75 +206,76 @@ export async function completeWorkOrder(
 export async function fetchOperationDetail(
   id: string,
 ): Promise<OperationDetailOut> {
-  const { data } = await apiClient.get<OperationDetailOut>(
-    `/api/operations/${id}`,
+  return unwrap(
+    await typedClient.GET('/api/operations/{op_id}', {
+      params: { path: { op_id: id } },
+    }),
   );
-  return data;
-}
-
-export async function fetchWorkOrderOperations(
-  woId: string,
-): Promise<OperationOut[]> {
-  const { data } = await apiClient.get<PaginatedResponse<OperationOut>>(
-    `/api/work-orders/${woId}/operations`,
-    { params: { page_size: 200 } },
-  );
-  return data.items ?? data as unknown as OperationOut[];
 }
 
 export async function createOperation(
   woId: string,
   body: OperationCreate,
 ): Promise<OperationOut> {
-  const { data } = await apiClient.post<OperationOut>(
-    `/api/work-orders/${woId}/operations`,
-    body,
+  return unwrap(
+    await typedClient.POST('/api/work-orders/{wo_id}/operations', {
+      params: { path: { wo_id: woId } },
+      body,
+    }),
   );
-  return data;
 }
 
+/**
+ * Start operation.  Backend contract: the POST /start endpoint creates
+ * a labor entry atomically, so the body requires `role` and `shift` in
+ * addition to the optimistic-lock `version` field.  Spec §5.4.2.
+ */
 export async function startOperation(
+  id: string,
+  body: { role: string; shift: string; version?: number | null },
+): Promise<OperationOut> {
+  return unwrap(
+    await typedClient.POST('/api/operations/{op_id}/start', {
+      params: { path: { op_id: id } },
+      body,
+    }),
+  );
+}
+
+export async function stopOperation(
   id: string,
   body: OperationTransition,
 ): Promise<OperationOut> {
-  const { data } = await apiClient.post<OperationOut>(
-    `/api/operations/${id}/start`,
-    body,
+  return unwrap(
+    await typedClient.POST('/api/operations/{op_id}/stop', {
+      params: { path: { op_id: id } },
+      body,
+    }),
   );
-  return data;
 }
 
 export async function completeOperation(
   id: string,
   body: OperationTransition,
 ): Promise<OperationOut> {
-  const { data } = await apiClient.post<OperationOut>(
-    `/api/operations/${id}/complete`,
-    body,
+  return unwrap(
+    await typedClient.POST('/api/operations/{op_id}/complete', {
+      params: { path: { op_id: id } },
+      body,
+    }),
   );
-  return data;
 }
 
 export async function holdOperation(
   id: string,
   body: OperationTransition,
 ): Promise<OperationOut> {
-  const { data } = await apiClient.post<OperationOut>(
-    `/api/operations/${id}/hold`,
-    body,
+  return unwrap(
+    await typedClient.POST('/api/operations/{op_id}/hold', {
+      params: { path: { op_id: id } },
+      body,
+    }),
   );
-  return data;
-}
-
-export async function resumeOperation(
-  id: string,
-  body: OperationTransition,
-): Promise<OperationOut> {
-  const { data } = await apiClient.post<OperationOut>(
-    `/api/operations/${id}/resume`,
-    body,
-  );
-  return data;
 }
 
 /* ── Labor ── */
@@ -241,63 +284,74 @@ export async function createLabor(
   opId: string,
   body: LaborCreate,
 ): Promise<LaborOut> {
-  const { data } = await apiClient.post<LaborOut>(
-    `/api/operations/${opId}/labor`,
-    body,
+  return unwrap(
+    await typedClient.POST('/api/operations/{op_id}/labor', {
+      params: { path: { op_id: opId } },
+      body,
+    }),
   );
-  return data;
 }
 
 export async function stopLabor(
   id: string,
-  body: { version?: number; stopped_at?: string },
+  body: { version?: number | null; stopped_at?: string | null },
 ): Promise<LaborOut> {
-  const { data } = await apiClient.patch<LaborOut>(
-    `/api/labor-entries/${id}`,
-    body,
+  return unwrap(
+    await typedClient.PATCH('/api/labor-entries/{labor_id}', {
+      params: { path: { labor_id: id } },
+      body,
+    }),
   );
-  return data;
 }
 
 /* ── Inspections ── */
 
 export async function fetchInspectionQueue(
   params?: PaginationParams & {
-    state?: string;
+    state?: InspectionQueueState;
     safety_critical?: boolean;
     operation_id?: string;
     programId?: string;
   },
 ): Promise<PaginatedResponse<InspectionQueueRowOut>> {
-  const { programId, ...rest } = params ?? {};
-  const headers: Record<string, string> = {};
-  if (programId === '*') headers['X-Program-Id'] = '*';
-  const { data } = await apiClient.get<
-    PaginatedResponse<InspectionQueueRowOut>
-  >('/api/inspections', { params: { ...paginationQuery(rest), ...rest }, headers });
-  return data;
+  const result = await typedClient.GET('/api/inspections', {
+    params: {
+      query: {
+        ...pageQuery(params),
+        ...(params?.state ? { state: params.state } : {}),
+        ...(params?.safety_critical !== undefined
+          ? { safety_critical: params.safety_critical }
+          : {}),
+        ...(params?.operation_id ? { operation_id: params.operation_id } : {}),
+      },
+    },
+    headers: programHeaders(params?.programId),
+  });
+  return unwrap(result) as unknown as PaginatedResponse<InspectionQueueRowOut>;
 }
 
 export async function createInspection(
   opId: string,
   body: InspectionCreate,
 ): Promise<InspectionOut> {
-  const { data } = await apiClient.post<InspectionOut>(
-    `/api/operations/${opId}/inspect`,
-    body,
+  return unwrap(
+    await typedClient.POST('/api/operations/{op_id}/inspect', {
+      params: { path: { op_id: opId } },
+      body,
+    }),
   );
-  return data;
 }
 
 export async function createSignOff(
   opId: string,
   body: SignOffCreate,
 ): Promise<SignOffOut> {
-  const { data } = await apiClient.post<SignOffOut>(
-    `/api/operations/${opId}/sign-off`,
-    body,
+  return unwrap(
+    await typedClient.POST('/api/operations/{op_id}/sign-off', {
+      params: { path: { op_id: opId } },
+      body,
+    }),
   );
-  return data;
 }
 
 /* ── NCRs ── */
@@ -305,101 +359,56 @@ export async function createSignOff(
 export async function fetchNCRs(
   params?: PaginationParams & { status?: string; programId?: string },
 ): Promise<PaginatedResponse<NCROut>> {
-  const headers: Record<string, string> = {};
-  if (params?.programId === '*') headers['X-Program-Id'] = '*';
-  const { data } = await apiClient.get<PaginatedResponse<NCROut>>(
-    '/api/ncrs',
-    { params: { ...paginationQuery(params), status: params?.status }, headers },
-  );
-  return data;
+  const result = await typedClient.GET('/api/ncrs', {
+    params: {
+      query: pageQuery(params),
+    },
+    headers: programHeaders(params?.programId),
+  });
+  return unwrap(result) as unknown as PaginatedResponse<NCROut>;
 }
 
 export async function fetchNCR(id: string): Promise<NCROut> {
-  const { data } = await apiClient.get<NCROut>(`/api/ncrs/${id}`);
-  return data;
+  return unwrap(
+    await typedClient.GET('/api/ncrs/{ncr_id}', {
+      params: { path: { ncr_id: id } },
+    }),
+  );
 }
 
 export async function createNCR(body: NCRCreate): Promise<NCROut> {
-  const { data } = await apiClient.post<NCROut>('/api/ncrs', body);
-  return data;
+  return unwrap(await typedClient.POST('/api/ncrs', { body }));
 }
 
 export async function dispositionNCR(
   id: string,
   body: NCRDisposition,
 ): Promise<NCROut> {
-  const { data } = await apiClient.patch<NCROut>(
-    `/api/ncrs/${id}/disposition`,
-    body,
+  return unwrap(
+    await typedClient.PATCH('/api/ncrs/{ncr_id}/disposition', {
+      params: { path: { ncr_id: id } },
+      body,
+    }),
   );
-  return data;
 }
 
 export async function patchNCR(id: string, body: NCRPatch): Promise<NCROut> {
-  const { data } = await apiClient.patch<NCROut>(`/api/ncrs/${id}`, body);
-  return data;
-}
-
-/* ── Materials ── */
-
-export async function fetchMaterials(
-  params?: PaginationParams & { status?: string; programId?: string },
-): Promise<PaginatedResponse<MaterialCertOut>> {
-  const headers: Record<string, string> = {};
-  if (params?.programId === '*') headers['X-Program-Id'] = '*';
-  const { data } = await apiClient.get<PaginatedResponse<MaterialCertOut>>(
-    '/api/material-certs',
-    { params: { ...paginationQuery(params), status: params?.status }, headers },
+  return unwrap(
+    await typedClient.PATCH('/api/ncrs/{ncr_id}', {
+      params: { path: { ncr_id: id } },
+      body,
+    }),
   );
-  return data;
 }
 
-/* ── Parts ── */
-
-export async function fetchParts(
-  params?: PaginationParams,
-): Promise<PaginatedResponse<PartOut>> {
-  const { data } = await apiClient.get<PaginatedResponse<PartOut>>(
-    '/api/parts',
-    { params: paginationQuery(params) },
-  );
-  return data;
-}
-
-export async function fetchPart(id: string): Promise<PartOut> {
-  const { data } = await apiClient.get<PartOut>(`/api/parts/${id}`);
-  return data;
-}
+/* ── Parts — traceability only (list + detail GETs not on backend yet) ── */
 
 export async function fetchTraceability(id: string): Promise<TraceabilityOut> {
-  const { data } = await apiClient.get<TraceabilityOut>(
-    `/api/parts/${id}/traceability`,
+  return unwrap(
+    await typedClient.GET('/api/parts/{part_id}/traceability', {
+      params: { path: { part_id: id } },
+    }),
   );
-  return data;
-}
-
-/* ── Labor (read) ── */
-
-export async function fetchOperationLabor(
-  opId: string,
-): Promise<LaborOut[]> {
-  const { data } = await apiClient.get<PaginatedResponse<LaborOut>>(
-    `/api/operations/${opId}/labor`,
-    { params: { page_size: 200 } },
-  );
-  return data.items ?? (data as unknown as LaborOut[]);
-}
-
-/* ── Inspections (read) ── */
-
-export async function fetchOperationInspections(
-  opId: string,
-): Promise<InspectionOut[]> {
-  const { data } = await apiClient.get<PaginatedResponse<InspectionOut>>(
-    `/api/operations/${opId}/inspections`,
-    { params: { page_size: 200 } },
-  );
-  return data.items ?? (data as unknown as InspectionOut[]);
 }
 
 /* ── Evidence ── */
@@ -407,63 +416,58 @@ export async function fetchOperationInspections(
 export async function requestUploadUrl(
   body: EvidenceUploadUrlRequest,
 ): Promise<EvidenceUploadUrlResponse> {
-  const { data } = await apiClient.post<EvidenceUploadUrlResponse>(
-    '/api/evidence/upload-url',
-    body,
-  );
-  return data;
+  return unwrap(await typedClient.POST('/api/evidence/upload-url', { body }));
 }
 
 export async function confirmEvidence(
   body: EvidenceConfirmRequest,
 ): Promise<EvidenceRef> {
-  const { data } = await apiClient.post<EvidenceRef>(
-    '/api/evidence/confirm',
-    body,
-  );
-  return data;
+  return unwrap(await typedClient.POST('/api/evidence/confirm', { body }));
 }
 
 /* ── Users ── */
 
 export async function fetchCurrentUser(): Promise<UserOut> {
-  const { data } = await apiClient.get<UserOut>('/api/users/me');
-  return data;
+  /* The /me response schema drops the required wrappers on roles[] and
+     program_memberships[] (they come out as optional in the generated
+     types).  Narrow to the full UserOut shape after the fact. */
+  const me = unwrap(await typedClient.GET('/api/users/me'));
+  return {
+    ...me,
+    roles: me.roles ?? [],
+    program_memberships: me.program_memberships ?? [],
+  } as UserOut;
 }
 
 /* ── Admin ── */
 
 export async function fetchAdminHealth(): Promise<AdminHealthOut> {
-  const { data } = await apiClient.get<AdminHealthOut>('/api/admin/health');
-  return data;
+  return unwrap(await typedClient.GET('/api/admin/health'));
 }
 
 export async function fetchAdminPrograms(
   params?: PaginationParams,
 ): Promise<PaginatedResponse<ProgramListItemOut>> {
-  const { data } = await apiClient.get<PaginatedResponse<ProgramListItemOut>>(
-    '/api/admin/programs',
-    { params: paginationQuery(params) },
-  );
-  return data;
+  const result = await typedClient.GET('/api/admin/programs', {
+    params: { query: pageQuery(params) },
+  });
+  return unwrap(result) as unknown as PaginatedResponse<ProgramListItemOut>;
 }
 
 export async function fetchAdminUsers(
   params?: PaginationParams,
 ): Promise<PaginatedResponse<UserOut>> {
-  const { data } = await apiClient.get<PaginatedResponse<UserOut>>(
-    '/api/admin/users',
-    { params: paginationQuery(params) },
-  );
-  return data;
+  const result = await typedClient.GET('/api/admin/users', {
+    params: { query: pageQuery(params) },
+  });
+  return unwrap(result) as unknown as PaginatedResponse<UserOut>;
 }
 
 export async function fetchAdminDeadLetters(
   params?: PaginationParams,
 ): Promise<PaginatedResponse<DeadLetterOut>> {
-  const { data } = await apiClient.get<PaginatedResponse<DeadLetterOut>>(
-    '/api/admin/dead-letters',
-    { params: paginationQuery(params) },
-  );
-  return data;
+  const result = await typedClient.GET('/api/admin/dead-letters', {
+    params: { query: pageQuery(params) },
+  });
+  return unwrap(result) as unknown as PaginatedResponse<DeadLetterOut>;
 }

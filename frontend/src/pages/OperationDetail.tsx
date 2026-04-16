@@ -15,28 +15,22 @@
  * pending stop requests at a glance.
  */
 
-import { useState, useCallback, useMemo } from 'react';
+import { useState, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   fetchOperationDetail,
-  fetchOperationLabor,
-  fetchOperationInspections,
   holdOperation,
-  resumeOperation,
 } from '@/api/endpoints';
 import { useAuthStore } from '@/auth/store';
 import { StatusBadge } from '@/components/StatusBadge';
 import { SafetyCriticalBanner } from '@/components/SafetyCriticalBanner';
 import { LoadingSkeleton } from '@/components/LoadingSkeleton';
 import { ErrorBanner } from '@/components/ErrorBanner';
-import { EmptyState } from '@/components/EmptyState';
 import { ConfirmationDialog } from '@/components/ConfirmationDialog';
 import { ConflictModal } from '@/components/ConflictModal';
 import type {
   OperationDetailOut,
-  LaborOut,
-  InspectionOut,
   VersionConflictError,
   PredecessorSummary,
 } from '@/types/api';
@@ -46,27 +40,6 @@ import type {
 const REFETCH_INTERVAL_MS = 30_000;
 
 /* ── Helpers ── */
-
-function humanize(s: string): string {
-  return s
-    .split('_')
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(' ');
-}
-
-function formatDatetime(iso: string | null): string {
-  if (!iso) return '--';
-  return new Date(iso).toLocaleString(undefined, {
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  });
-}
-
-function formatHours(hours: number): string {
-  return `${hours.toFixed(2)}h`;
-}
 
 function extractConflict(err: unknown): VersionConflictError | null {
   const resp = (err as { response?: { status?: number; data?: { error?: VersionConflictError } } })?.response;
@@ -89,23 +62,6 @@ function extractErrorMessage(err: unknown): string {
 }
 
 /* ── Inline styles ── */
-
-const thStyle: React.CSSProperties = {
-  textAlign: 'left',
-  padding: 'var(--space-sm) var(--space-md)',
-  borderBottom: '2px solid var(--border)',
-  fontSize: 'var(--font-size-label)',
-  color: 'var(--text-secondary)',
-  fontWeight: 600,
-  whiteSpace: 'nowrap',
-};
-
-const tdStyle: React.CSSProperties = {
-  padding: 'var(--space-sm) var(--space-md)',
-  borderBottom: '1px solid var(--border)',
-  fontSize: 'var(--font-size-table)',
-  color: 'var(--text-primary)',
-};
 
 const cardStyle: React.CSSProperties = {
   backgroundColor: 'var(--bg-surface)',
@@ -168,135 +124,10 @@ function PredecessorMiniGraph({
   );
 }
 
-function LaborTable({
-  entries,
-  stopRequests,
-}: {
-  entries: LaborOut[];
-  stopRequests: Set<string>;
-}) {
-  if (entries.length === 0) {
-    return (
-      <EmptyState
-        title="No labor entries"
-        message="No labor has been recorded for this operation."
-      />
-    );
-  }
-
-  return (
-    <div style={{ overflowX: 'auto' }}>
-      <table
-        style={{
-          width: '100%',
-          borderCollapse: 'collapse',
-          backgroundColor: 'var(--bg-surface)',
-        }}
-      >
-        <thead>
-          <tr>
-            <th style={thStyle}>User</th>
-            <th style={thStyle}>Start</th>
-            <th style={thStyle}>End</th>
-            <th style={thStyle}>Duration</th>
-            <th style={thStyle}>Cycle</th>
-          </tr>
-        </thead>
-        <tbody>
-          {entries.map((entry) => {
-            const isStopRequest = stopRequests.has(entry.id);
-            /* Stop-request entries highlighted amber per spec */
-            const rowBg = isStopRequest ? 'rgba(245, 158, 11, 0.15)' : 'transparent';
-
-            return (
-              <tr
-                key={entry.id}
-                style={{ backgroundColor: rowBg }}
-                title={isStopRequest ? 'Stop request pending' : undefined}
-              >
-                <td style={tdStyle}>{entry.user_id}</td>
-                <td style={tdStyle}>{formatDatetime(entry.started_at)}</td>
-                <td style={tdStyle}>
-                  {entry.stopped_at ? (
-                    formatDatetime(entry.stopped_at)
-                  ) : (
-                    <span
-                      style={{
-                        color: 'var(--status-active)',
-                        fontWeight: 600,
-                      }}
-                    >
-                      Running
-                    </span>
-                  )}
-                </td>
-                <td style={tdStyle}>{formatHours(entry.hours)}</td>
-                <td style={tdStyle}>{entry.execution_cycle}</td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-function InspectionHistory({ inspections }: { inspections: InspectionOut[] }) {
-  if (inspections.length === 0) {
-    return (
-      <EmptyState
-        title="No inspections"
-        message="No inspections have been recorded for this operation."
-      />
-    );
-  }
-
-  return (
-    <div style={{ overflowX: 'auto' }}>
-      <table
-        style={{
-          width: '100%',
-          borderCollapse: 'collapse',
-          backgroundColor: 'var(--bg-surface)',
-        }}
-      >
-        <thead>
-          <tr>
-            <th style={thStyle}>Criteria</th>
-            <th style={thStyle}>Result</th>
-            <th style={thStyle}>Inspector</th>
-            <th style={thStyle}>Date</th>
-            <th style={thStyle}>Cycle</th>
-            <th style={thStyle}>Notes</th>
-          </tr>
-        </thead>
-        <tbody>
-          {inspections.map((insp) => (
-            <tr key={insp.id}>
-              <td style={tdStyle}>{insp.criteria}</td>
-              <td style={tdStyle}>
-                <StatusBadge
-                  status={
-                    insp.result === 'accept'
-                      ? 'complete'
-                      : insp.result === 'reject'
-                        ? 'open'
-                        : 'hold'
-                  }
-                  label={humanize(insp.result)}
-                />
-              </td>
-              <td style={tdStyle}>{insp.inspector_id}</td>
-              <td style={tdStyle}>{formatDatetime(insp.inspected_at)}</td>
-              <td style={tdStyle}>{insp.execution_cycle}</td>
-              <td style={tdStyle}>{insp.notes ?? '--'}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
+/* LaborTable and InspectionHistory sub-components removed from this slice:
+   the backend does not yet expose GET endpoints for per-operation labor
+   or inspection history.  They will be re-added when those endpoints
+   ship — see endpoints.ts header for the full deferred list. */
 
 /* ── Main Component ── */
 
@@ -325,29 +156,7 @@ export default function OperationDetail() {
     refetchInterval: REFETCH_INTERVAL_MS,
   });
 
-  const laborQuery = useQuery<LaborOut[]>({
-    queryKey: ['operation-labor', programId, opId],
-    queryFn: () => fetchOperationLabor(opId!),
-    enabled: !!opId,
-    refetchInterval: REFETCH_INTERVAL_MS,
-  });
-
-  const inspectionQuery = useQuery<InspectionOut[]>({
-    queryKey: ['operation-inspections', programId, opId],
-    queryFn: () => fetchOperationInspections(opId!),
-    enabled: !!opId,
-    refetchInterval: REFETCH_INTERVAL_MS,
-  });
-
   const op = opQuery.data;
-  const laborEntries = laborQuery.data ?? [];
-  const inspections = inspectionQuery.data ?? [];
-
-  /* Build a set of labor entry IDs that have pending stop requests */
-  const stopRequestEntryIds = useMemo(
-    () => new Set((op?.stop_requests ?? []).map((sr) => sr.labor_entry_id)),
-    [op?.stop_requests],
-  );
 
   /* ── Cache invalidation ── */
 
@@ -379,15 +188,9 @@ export default function OperationDetail() {
     onError: handleMutationError,
   });
 
-  const resumeMutation = useMutation({
-    mutationFn: () => resumeOperation(opId!, { version: op?.version }),
-    onSuccess: () => {
-      setErrorMsg(null);
-      setPendingAction(null);
-      invalidateAll();
-    },
-    onError: handleMutationError,
-  });
+  /* Resume from hold is not exposed as a backend route — see
+     endpoints.ts notes.  The UI simply omits the Resume button until
+     the backend adds POST /api/operations/:id/resume. */
 
   /* ── Loading ── */
   if (opQuery.isLoading) {
@@ -499,76 +302,14 @@ export default function OperationDetail() {
           </button>
         )}
 
-        {op.status === 'hold' && hasAnyRole('engineer', 'qa_manager') && (
-          <button
-            type="button"
-            onClick={() =>
-              setPendingAction({
-                title: 'Resume Operation',
-                message: `Resume Op ${op.sequence_number}?`,
-                action: () => resumeMutation.mutate(),
-              })
-            }
-            style={{
-              ...actionBtnStyle,
-              backgroundColor: 'var(--interactive)',
-            }}
-          >
-            Resume Operation
-          </button>
-        )}
+        {/* Resume button deferred until backend exposes the resume route. */}
       </div>
 
-      {/* Labor entries table */}
+      {/* Labor entries, inspection history, and material consumption
+         tables are deferred to a future slice — the backend does not
+         yet expose the supporting GET endpoints.  See endpoints.ts
+         header comments for the full deferred list. */}
       <div style={cardStyle}>
-        <h2
-          style={{
-            margin: 0,
-            marginBottom: 'var(--space-sm)',
-            fontSize: 'var(--font-size-section)',
-            color: 'var(--text-primary)',
-          }}
-        >
-          Labor Entries
-        </h2>
-        {laborQuery.isLoading ? (
-          <LoadingSkeleton rows={4} />
-        ) : (
-          <LaborTable entries={laborEntries} stopRequests={stopRequestEntryIds} />
-        )}
-      </div>
-
-      {/* Inspection history */}
-      <div style={cardStyle}>
-        <h2
-          style={{
-            margin: 0,
-            marginBottom: 'var(--space-sm)',
-            fontSize: 'var(--font-size-section)',
-            color: 'var(--text-primary)',
-          }}
-        >
-          Inspection History
-        </h2>
-        {inspectionQuery.isLoading ? (
-          <LoadingSkeleton rows={3} />
-        ) : (
-          <InspectionHistory inspections={inspections} />
-        )}
-      </div>
-
-      {/* Material consumption placeholder */}
-      <div style={cardStyle}>
-        <h2
-          style={{
-            margin: 0,
-            marginBottom: 'var(--space-sm)',
-            fontSize: 'var(--font-size-section)',
-            color: 'var(--text-primary)',
-          }}
-        >
-          Material Consumption
-        </h2>
         <div
           style={{
             color: 'var(--text-secondary)',
@@ -577,7 +318,9 @@ export default function OperationDetail() {
             textAlign: 'center',
           }}
         >
-          Material consumption tracking will be available in a future release.
+          Labor entries, inspection history, and material consumption
+          tables will be wired up when the matching backend GET endpoints
+          ship.  Core execution actions (hold / operator flows) are live.
         </div>
       </div>
 
@@ -588,7 +331,7 @@ export default function OperationDetail() {
         message={pendingAction?.message ?? ''}
         confirmLabel={pendingAction?.title ?? 'Confirm'}
         destructive={pendingAction?.destructive ?? false}
-        loading={holdMutation.isPending || resumeMutation.isPending}
+        loading={holdMutation.isPending}
         onConfirm={() => pendingAction?.action()}
         onCancel={() => setPendingAction(null)}
       />

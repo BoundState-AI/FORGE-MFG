@@ -19,7 +19,6 @@ import { useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { fetchWorkOrders } from '@/api/endpoints';
-import apiClient from '@/api/client';
 import { useAuthStore } from '@/auth/store';
 import { StatusBadge } from '@/components/StatusBadge';
 import { LoadingSkeleton } from '@/components/LoadingSkeleton';
@@ -113,34 +112,20 @@ export default function WorkOrderList() {
   const effectiveProgramId = isAllPrograms ? '*' : (programFilter || activeProgram?.id || 'none');
 
   /**
-   * Fetch work orders.  When "All Programs" is selected we override
-   * the X-Program-Id header to '*' on this specific request.
+   * Fetch work orders.  When "All Programs" is selected, the fetchWorkOrders
+   * wrapper emits X-Program-Id: * (spec §6.7.1); otherwise the typedClient
+   * middleware injects the active single-program UUID from sessionStorage.
    */
-  const fetchFn = useCallback(async () => {
-    const params: Record<string, unknown> = {
-      page,
-      page_size: PAGE_SIZE,
-    };
-    if (statusFilter) params.status = statusFilter;
-
-    if (isAllPrograms) {
-      /* Override the program header for this request only */
-      const { data } = await apiClient.get<PaginatedResponse<WorkOrderOut>>(
-        '/api/work-orders',
-        {
-          params,
-          headers: { 'X-Program-Id': '*' },
-        },
-      );
-      return data;
-    }
-
-    return fetchWorkOrders({
-      page,
-      page_size: PAGE_SIZE,
-      status: statusFilter || undefined,
-    });
-  }, [page, statusFilter, isAllPrograms]);
+  const fetchFn = useCallback(
+    () =>
+      fetchWorkOrders({
+        page,
+        page_size: PAGE_SIZE,
+        status: statusFilter || undefined,
+        programId: isAllPrograms ? '*' : undefined,
+      }),
+    [page, statusFilter, isAllPrograms],
+  );
 
   const { data, isLoading, isError, error } = useQuery<
     PaginatedResponse<WorkOrderOut>
