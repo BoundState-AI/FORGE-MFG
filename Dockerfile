@@ -11,11 +11,17 @@ WORKDIR /app
 #               system libpq in subtle SSL/locale ways that are hard to
 #               diagnose on GovCloud.  Source builds against the libpq
 #               we control below.
+#   libc6-dev — Debian slim omits the C standard library headers
+#               (for example stdlib.h).  psycopg2's source build pulls
+#               in Python.h, which includes those libc headers; without
+#               them Railway fails during `pip install .` with
+#               `fatal error: stdlib.h: No such file or directory`.
 #   libpq-dev — PostgreSQL client headers, needed for psycopg2's
 #               C extension build step.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     gcc \
+    libc6-dev \
     libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
