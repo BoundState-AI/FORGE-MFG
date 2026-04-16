@@ -1,4 +1,4 @@
-# FORGE_MFG_CLAUDE_v1.1
+# FORGE_MFG_CLAUDE_v1.2
 
 ## Source Of Truth
 
@@ -158,6 +158,106 @@ Never descope:
 - NCR workflow
 - Material tracking
 - Production dashboard
+
+## Slice Protocol — Required Workflow For Every New Slice
+
+This is the one-shot discipline.  Skipping these steps is what produced
+the multi-round review loops on GC-1 and GC-2.  Follow them in order.
+
+### Step 1: Re-read the frozen spec sections named in the brief
+
+Before writing any code, open the exact sections the brief names in:
+
+- `FORGE_MFG_BUILD_SPEC_v1.4.2.md`
+- `FORGE_MFG_FRONTEND_UX_SPEC_v1.5.1.md`
+- Any gap-closure doc the brief references
+
+Read each section end-to-end.  Do not rely on compressed summaries in
+the slice brief — the brief points at the spec; the spec is the
+contract.  If two sources disagree, the local frozen spec files win
+(the Source Of Truth note at the top of this file).
+
+### Step 2: Emit a compliance checklist BEFORE any code
+
+Respond with a numbered checklist derived from the spec sections.
+Every item must be one of:
+
+- **Schema item** — `FieldName: type` on exactly one Pydantic model,
+  with the error codes the service must emit (distinct 4xx codes with
+  the spec's exact strings).
+- **Route item** — HTTP method + path + permission(s) + mutation vs
+  read semantics.
+- **Transition item** — state machine edge with source, target,
+  invariants, and audit event name.
+- **Audit item** — spec-named action_type string, entity type,
+  before/after shape.
+- **SSE / event item** — event name, publisher call site, payload
+  shape, deferred vs inline publish.
+- **Test item** — exactly one failing assertion per code path,
+  named with the scenario it pins.
+
+Ordering: list every item as-named-in-spec, not grouped by file.
+
+Wait for user sign-off on the checklist before writing code.  If the
+user greenlights without comment, treat that as approval of every
+numbered item; drift from a numbered item later is an explicit change
+request, not a silent reinterpretation.
+
+### Step 3: Test-first for the failure codes
+
+Write the red-path tests first.  Every 4xx code named in the spec
+section must have a test that pins its string exactly
+(`EVIDENCE_SCOPE_MISMATCH`, `REMEDIATION_WO_REQUIRED`,
+`VERSION_CONFLICT`, etc.).  This forces the service to emit the shape
+the spec names, not a directionally-correct approximation.
+
+Happy-path tests land after the red paths work.
+
+### Step 4: Implement against the checklist
+
+Implement one checklist item at a time.  Every commit boundary should
+correspond to a contiguous range of checklist items, not a time-based
+chunk.
+
+### Step 5: Pre-commit drift check
+
+Before `git commit`, run this grep loop across the touched files:
+
+- Retired verbs and routes (e.g. `/api/operations/{op_id}/rework` after
+  GC-2 retired it, stale SSE event names, legacy permission strings).
+- Stale docstrings (search for phrases like "provisional", "NOT emitted
+  by this slice", "deferred to future slice", "TODO" — any phrase that
+  described the PREVIOUS state of the code).
+- Code-vs-DB permission drift: if `ROLE_PERMISSIONS` in
+  `forge/api/auth.py` changed, confirm a migration updates the `roles`
+  table to match.
+
+Fix the drift before committing.  This catches the "still-live
+alongside new path" class of findings that burn review rounds.
+
+### Step 6: Gate loop
+
+Run in this order, fix each before moving on:
+
+1. `ruff check forge/ tests/`
+2. `mypy forge/`  (pre-existing stub warnings are OK; new errors are not)
+3. Targeted tests — the new suite + every adjacent suite the slice
+   touched (NCR/inspection/op for any state-machine slice, evidence
+   suite for any NCR slice, SSE suite for any op-state change, etc.)
+4. Before merge to master: full suite.  Targeted + adjacent is the
+   signal for "slice implementation done"; full suite is the signal
+   for "landable".
+
+### Step 7: Final summary format
+
+Every slice commit message and final response must include:
+
+- What was implemented, mapped back to the checklist numbers.
+- What was intentionally deferred and why.
+- Concrete test results (passed/failed/skipped counts, not "looks
+  green").
+- Any spec ambiguity resolved — state the choice made and the reasoning
+  so the reviewer can challenge it.
 
 ## Build Philosophy
 
