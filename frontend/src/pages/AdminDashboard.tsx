@@ -164,9 +164,12 @@ export default function AdminDashboard() {
 
         {health && (
           <>
-            {/* System Health section */}
+            {/* System Health section — bound to the real AdminHealthOut
+                shape from the backend: service, database, audit_chain,
+                worm_replication, ecs.  Each is a ComponentOut with
+                status/summary/details. */}
             <h2 style={{ margin: 0, marginBottom: 'var(--space-md)', fontSize: 'var(--font-size-section)', color: 'var(--text-primary)' }}>
-              System Health
+              System Health — Overall: {health.status}
             </h2>
             <div
               style={{
@@ -176,44 +179,40 @@ export default function AdminDashboard() {
                 marginBottom: 'var(--space-lg)',
               }}
             >
+              <HealthCard title="Service" status={health.service.status}>
+                <div style={{ marginTop: 'var(--space-xs)', fontSize: 'var(--font-size-badge)', color: 'var(--text-secondary)' }}>
+                  {health.service.summary}
+                </div>
+              </HealthCard>
+
               <HealthCard title="Database" status={health.database.status}>
                 <div style={{ marginTop: 'var(--space-xs)', fontSize: 'var(--font-size-badge)', color: 'var(--text-secondary)' }}>
-                  Latency: {health.database.latency_ms}ms
+                  {health.database.summary}
                 </div>
               </HealthCard>
-
-              <HealthCard title="S3 Storage" status={health.s3.status} />
 
               <HealthCard title="Audit Chain" status={health.audit_chain.status}>
-                {health.audit_chain.last_verified_at && (
-                  <div style={{ marginTop: 'var(--space-xs)', fontSize: 'var(--font-size-badge)', color: 'var(--text-secondary)' }}>
-                    Last verified: {new Date(health.audit_chain.last_verified_at).toLocaleString()}
-                  </div>
-                )}
+                <div style={{ marginTop: 'var(--space-xs)', fontSize: 'var(--font-size-badge)', color: 'var(--text-secondary)' }}>
+                  {health.audit_chain.summary}
+                </div>
               </HealthCard>
 
-              <HealthCard
-                title="Event Outbox"
-                status={health.outbox.dead_letter_count > 0 ? 'warning' : 'healthy'}
-              >
+              <HealthCard title="WORM Replication" status={health.worm_replication.status}>
                 <div style={{ marginTop: 'var(--space-xs)', fontSize: 'var(--font-size-badge)', color: 'var(--text-secondary)' }}>
-                  Pending: {health.outbox.pending_count}
+                  {health.worm_replication.summary}
                 </div>
-                <div
-                  style={{
-                    fontSize: 'var(--font-size-badge)',
-                    color: health.outbox.dead_letter_count > 0 ? '#eab308' : 'var(--text-secondary)',
-                    fontWeight: health.outbox.dead_letter_count > 0 ? 600 : 400,
-                  }}
-                >
-                  Dead letters: {health.outbox.dead_letter_count}
+              </HealthCard>
+
+              <HealthCard title="ECS" status={health.ecs.status}>
+                <div style={{ marginTop: 'var(--space-xs)', fontSize: 'var(--font-size-badge)', color: 'var(--text-secondary)' }}>
+                  {health.ecs.summary}
                 </div>
               </HealthCard>
             </div>
 
             {/* Last refreshed timestamp */}
             <p style={{ fontSize: 'var(--font-size-badge)', color: 'var(--text-secondary)', marginBottom: 'var(--space-lg)' }}>
-              Last refreshed: {new Date(health.timestamp).toLocaleString()}
+              Last refreshed: {new Date(health.generated_at).toLocaleString()}
             </p>
 
             {/* Navigation links */}

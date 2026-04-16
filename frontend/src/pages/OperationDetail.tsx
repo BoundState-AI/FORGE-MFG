@@ -451,7 +451,7 @@ export default function OperationDetail() {
             flexWrap: 'wrap',
           }}
         >
-          Op {op.sequence_number ?? op.sequence}: {op.description}
+          Op {op.sequence_number}: {op.description}
           <StatusBadge status={op.status} />
           <span
             style={{
@@ -485,7 +485,7 @@ export default function OperationDetail() {
             onClick={() =>
               setPendingAction({
                 title: 'Hold Operation',
-                message: `Place Op ${op.sequence_number ?? op.sequence} on hold?`,
+                message: `Place Op ${op.sequence_number} on hold?`,
                 action: () => holdMutation.mutate(),
                 destructive: true,
               })
@@ -505,7 +505,7 @@ export default function OperationDetail() {
             onClick={() =>
               setPendingAction({
                 title: 'Resume Operation',
-                message: `Resume Op ${op.sequence_number ?? op.sequence}?`,
+                message: `Resume Op ${op.sequence_number}?`,
                 action: () => resumeMutation.mutate(),
               })
             }

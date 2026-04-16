@@ -349,11 +349,22 @@ export default function InspectionForm() {
       .filter((e) => e.status === 'done' && e.s3_key)
       .map((e) => ({ s3_key: e.s3_key }));
 
+    /* measurements + evidence_refs cast through unknown:
+       The generated types widen dict[str, object] to Record<string, never> and
+       the evidence union to (string | Record<string, never>)[].  Both are
+       Pydantic→OpenAPI export quirks; the backend accepts real key/value
+       data and { s3_key } refs (spec §5.5.2, §5.5.3). */
     const body: InspectionCreate = {
       criteria,
       result,
-      measurements: Object.keys(measurementsObj).length > 0 ? measurementsObj : undefined,
-      evidence_refs: evidenceRefs.length > 0 ? evidenceRefs : undefined,
+      measurements:
+        Object.keys(measurementsObj).length > 0
+          ? (measurementsObj as unknown as InspectionCreate['measurements'])
+          : undefined,
+      evidence_refs:
+        evidenceRefs.length > 0
+          ? (evidenceRefs as unknown as InspectionCreate['evidence_refs'])
+          : undefined,
       notes: notes.trim() || undefined,
       supersedes_inspection_id: resolvesId ?? undefined,
     };

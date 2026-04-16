@@ -73,7 +73,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   setUser: (user: UserOut) => {
-    const roles = user.roles.map((r) => r.name);
+    /* The generated schema types role names as plain strings.  Narrow to
+       Role here so downstream hasRole() checks stay typed. */
+    const roles = user.roles.map((r) => r.name) as Role[];
     const programIds = user.program_memberships.map((p) => p.id);
     set({ user, roles, programIds });
 

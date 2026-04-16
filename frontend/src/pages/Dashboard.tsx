@@ -247,10 +247,13 @@ export default function Dashboard() {
     refetchInterval: REFETCH_INTERVAL_MS,
   });
 
-  /* Filter tiles to those visible to the current user's roles */
-  const visibleTiles = (summary?.tiles ?? []).filter((tile) =>
-    tile.visible_to_roles.some((r) => roles.includes(r as typeof roles[number])),
-  );
+  /* Filter tiles to those visible to the current user's roles.
+     visible_to_roles may be undefined on the wire; treat empty as "all roles". */
+  const visibleTiles = (summary?.tiles ?? []).filter((tile) => {
+    const vtr = tile.visible_to_roles ?? [];
+    if (vtr.length === 0) return true;
+    return vtr.some((r) => roles.includes(r as typeof roles[number]));
+  });
 
   /* ── Loading state ── */
   if (isLoading) {

@@ -287,7 +287,8 @@ export default function OperationExecution() {
   });
 
   const op = opQuery.data;
-  const laborEntries = laborQuery.data ?? [];
+  /* Memoize the list so downstream useMemo deps don't change every render. */
+  const laborEntries = useMemo(() => laborQuery.data ?? [], [laborQuery.data]);
 
   /* Active labor entries for the current user on this operation */
   const myActiveLabor = useMemo(
@@ -558,7 +559,7 @@ export default function OperationExecution() {
             gap: 'var(--space-sm)',
           }}
         >
-          Op {op.sequence_number ?? op.sequence}: {op.description}
+          Op {op.sequence_number}: {op.description}
           <StatusBadge status={op.status} />
         </h1>
         <div
@@ -666,7 +667,7 @@ export default function OperationExecution() {
               onClick={() =>
                 setPendingAction({
                   title: 'Complete Operation',
-                  message: `Mark Op ${op.sequence_number ?? op.sequence} as complete? This cannot be undone unless an NCR triggers a reopen.`,
+                  message: `Mark Op ${op.sequence_number} as complete? This cannot be undone unless an NCR triggers a reopen.`,
                   action: () => completeMutation.mutate(),
                 })
               }
@@ -691,7 +692,7 @@ export default function OperationExecution() {
             onClick={() =>
               setPendingAction({
                 title: 'Hold Operation',
-                message: `Place Op ${op.sequence_number ?? op.sequence} on hold?`,
+                message: `Place Op ${op.sequence_number} on hold?`,
                 action: () => holdMutation.mutate(),
                 destructive: true,
               })
@@ -712,7 +713,7 @@ export default function OperationExecution() {
             onClick={() =>
               setPendingAction({
                 title: 'Resume Operation',
-                message: `Resume Op ${op.sequence_number ?? op.sequence}?`,
+                message: `Resume Op ${op.sequence_number}?`,
                 action: () => resumeMutation.mutate(),
               })
             }

@@ -110,10 +110,13 @@ export function useOperationSSE(
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
+      let done = false;
 
-      while (true) {
-        const { done, value } = await reader.read();
+      while (!done) {
+        const chunk = await reader.read();
+        done = chunk.done;
         if (done) break;
+        const { value } = chunk;
 
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split('\n');

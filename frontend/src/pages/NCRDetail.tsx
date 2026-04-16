@@ -29,7 +29,7 @@ import { ErrorBanner } from '@/components/ErrorBanner';
 import { LoadingSkeleton } from '@/components/LoadingSkeleton';
 import { ConfirmationDialog } from '@/components/ConfirmationDialog';
 import { PageHeader } from '@/components/PageHeader';
-import type { Disposition, NCRDisposition, EvidenceRef } from '@/types/api';
+import type { Disposition, NCRDisposition, NCRPatch, EvidenceRef } from '@/types/api';
 
 /* ── Styles ── */
 
@@ -208,12 +208,20 @@ export default function NCRDetail() {
         prev.map((u, i) => (i === idx ? { ...u, status: 'done' } : u)),
       );
 
-      /* Patch NCR with updated evidence_refs */
+      /* Patch NCR with updated evidence_refs.
+         The generated type widens evidence_refs to (string | Record<string, never>)[]
+         because Pydantic exported the union as such.  The backend actually
+         accepts submission-time refs of shape { s3_key: string } and hydrates
+         the canonical EvidenceRef from the registry (spec §5.5.3).  We cast
+         through unknown to submit the structured shape the server expects. */
       const existingKeys = ncr.evidence_refs.map((ref) =>
-        typeof ref === 'string' ? ref : (ref as EvidenceRef).s3_key,
+        typeof ref === 'string' ? ref : (ref as unknown as EvidenceRef).s3_key,
       );
       const allKeys = [...existingKeys, urlResp.s3_key].map((k) => ({ s3_key: k }));
-      await patchNCR(ncr.id, { version: ncr.version, evidence_refs: allKeys });
+      await patchNCR(ncr.id, {
+        version: ncr.version,
+        evidence_refs: allKeys as unknown as NCRPatch['evidence_refs'],
+      });
       queryClient.invalidateQueries({ queryKey: ['ncr', id] });
     } catch (err) {
       setUploads((prev) =>
@@ -348,7 +356,12 @@ export default function NCRDetail() {
           </p>
         )}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-xs)' }}>
-          {ncr.evidence_refs.map((ref, i) => renderEvidenceRef(ref, i))}
+          {ncr.evidence_refs.map((ref, i) =>
+            /* Cast is safe: the server hydrates each ref to full EvidenceRef
+               shape in responses (spec §5.5.3).  The generated type widens
+               to Record<string, never> because of Pydantic's union export. */
+            renderEvidenceRef(ref as unknown as EvidenceRef | string, i),
+          )}
           {uploads.map((u, i) => (
             <div
               key={`upload-${i}`}

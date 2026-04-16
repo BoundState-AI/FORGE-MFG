@@ -12,7 +12,7 @@
  * cache so all program-scoped queries refetch with the new scope.
  */
 
-import { useCallback } from 'react';
+import { useCallback, useMemo } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { useAuthStore } from '@/auth/store';
 
@@ -22,7 +22,11 @@ export function ProgramSelector() {
   const setActiveProgram = useAuthStore((s) => s.setActiveProgram);
   const queryClient = useQueryClient();
 
-  const programs = user?.program_memberships ?? [];
+  /* Memoize the list so callback deps don't change on every render. */
+  const programs = useMemo(
+    () => user?.program_memberships ?? [],
+    [user?.program_memberships],
+  );
 
   const handleChange = useCallback(
     (e: React.ChangeEvent<HTMLSelectElement>) => {
