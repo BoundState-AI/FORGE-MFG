@@ -41,7 +41,12 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from forge.audit.integrity import IntegrityFailure, IntegrityResult
+from forge.audit.integrity import (
+    IntegrityFailure,
+    IntegrityResult,
+    ReplayRecord,
+    ReplayResult,
+)
 from forge.models.audit import AuditRecord
 
 
@@ -174,6 +179,87 @@ class AuditIntegrityOut(BaseModel):
             chain_length=result.records_checked,
             last_hash=last_hash,
             last_record_id=last_record_id,
+            failures=[
+                IntegrityFailureOut.from_dataclass(f) for f in result.failures
+            ],
+        )
+
+
+class ReplayRecordOut(BaseModel):
+    """Single record in a replay window — verification + provenance.
+
+    Mirrors forge.audit.integrity.ReplayRecord.  Carries the stored
+    previous_hash + record_hash AND the recomputed hash so an admin
+    inspecting the response can identify exactly which field diverges
+    when `verified` is False.  `audit_id` lets the admin click through
+    to GET /api/audit/events/{id} for full before/after_state context.
+    """
+
+    sequence_number: int
+    audit_id: uuid.UUID
+    event_id: uuid.UUID
+    timestamp: datetime
+    action_type: str
+    entity_type: str
+    entity_id: uuid.UUID
+    previous_hash: str
+    record_hash: str
+    recomputed_hash: str
+    verified: bool
+
+    @classmethod
+    def from_dataclass(cls, record: ReplayRecord) -> ReplayRecordOut:
+        return cls(
+            sequence_number=record.sequence_number,
+            audit_id=record.audit_id,
+            event_id=record.event_id,
+            timestamp=record.timestamp,
+            action_type=record.action_type,
+            entity_type=record.entity_type,
+            entity_id=record.entity_id,
+            previous_hash=record.previous_hash,
+            record_hash=record.record_hash,
+            recomputed_hash=record.recomputed_hash,
+            verified=record.verified,
+        )
+
+
+class AuditReplayOut(BaseModel):
+    """Replay-window verification result for the admin investigation surface.
+
+    `status` mirrors AuditIntegrityOut so the admin UI can use the same
+    pass/fail token across both surfaces.  `range_anchor_*` fields
+    surface the prior-record hash the verifier anchored against — an
+    admin investigating a chain break can confirm the anchor matches
+    their expectation without a second query.
+    `truncated` flips True when the underlying query returned more
+    rows than `limit`; the caller should narrow the window.
+    """
+
+    last_verified_at: datetime
+    status: str
+    records_checked: int
+    truncated: bool
+    range_anchor_sequence: int
+    range_anchor_hash: str
+    records: list[ReplayRecordOut]
+    failures: list[IntegrityFailureOut]
+
+    @classmethod
+    def from_result(
+        cls,
+        result: ReplayResult,
+        *,
+        last_verified_at: datetime,
+    ) -> AuditReplayOut:
+        return cls(
+            last_verified_at=last_verified_at,
+            status="ok" if result.valid else "failing",
+            records_checked=result.records_checked,
+            truncated=result.truncated,
+            range_anchor_sequence=result.range_anchor_sequence,
+            range_anchor_hash=result.range_anchor_hash,
+            records=[ReplayRecordOut.from_dataclass(r) for r in result.records],
             failures=[
                 IntegrityFailureOut.from_dataclass(f) for f in result.failures
             ],

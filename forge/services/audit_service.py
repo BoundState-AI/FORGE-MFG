@@ -50,7 +50,12 @@ from fastapi import HTTPException
 from sqlalchemy import Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from forge.audit.integrity import IntegrityResult, verify_audit_chain
+from forge.audit.integrity import (
+    IntegrityResult,
+    ReplayResult,
+    verify_audit_chain,
+    verify_audit_chain_range,
+)
 from forge.models.audit import AuditRecord
 from forge.models.user import User
 from forge.services.admin_service import _require_admin_manage
@@ -234,3 +239,36 @@ async def get_integrity_summary(
     last_hash = tail[1] if tail is not None else None
     last_record_id = tail[0] if tail is not None else None
     return result, last_verified_at, last_hash, last_record_id
+
+
+async def replay_range(
+    session: AsyncSession,
+    *,
+    actor_id: _uuid.UUID,
+    from_sequence: int | None = None,
+    to_sequence: int | None = None,
+    from_timestamp: datetime | None = None,
+    to_timestamp: datetime | None = None,
+    limit: int = 1000,
+) -> tuple[ReplayResult, datetime]:
+    """Run windowed integrity verification + return the segment.
+
+    Returns (result, last_verified_at).  The verifier itself raises
+    ReplayParamError on a bad parameter combination — the route layer
+    translates that to HTTP 400 with the spec error code.
+
+    Authorization: live-DB admin:manage check (zero-drift posture
+    consistent with the rest of this service).
+    """
+    await _require_admin_manage(session, actor_id)
+
+    result = await verify_audit_chain_range(
+        session,
+        from_sequence=from_sequence,
+        to_sequence=to_sequence,
+        from_timestamp=from_timestamp,
+        to_timestamp=to_timestamp,
+        limit=limit,
+    )
+    last_verified_at = datetime.now(UTC)
+    return result, last_verified_at

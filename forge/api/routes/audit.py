@@ -35,12 +35,13 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from forge.api.auth import AuthContext, require_permission
 from forge.api.deps import get_db
-from forge.schemas.audit import AuditEventOut, AuditIntegrityOut
+from forge.audit.integrity import REPLAY_LIMIT_MAX, ReplayParamError
+from forge.schemas.audit import AuditEventOut, AuditIntegrityOut, AuditReplayOut
 from forge.schemas.common import PaginatedResponse
 from forge.services import audit_service
 from forge.services.audit_service import AuditEventFilters
@@ -136,3 +137,59 @@ async def get_integrity(
         last_hash=last_hash,
         last_record_id=last_record_id,
     )
+
+
+@router.get("/replay", response_model=AuditReplayOut)
+async def replay_chain_segment(
+    from_sequence: int | None = Query(default=None, ge=1),
+    to_sequence: int | None = Query(default=None, ge=1),
+    from_timestamp: datetime | None = Query(default=None),
+    to_timestamp: datetime | None = Query(default=None),
+    limit: int = Query(default=REPLAY_LIMIT_MAX, ge=1, le=REPLAY_LIMIT_MAX),
+    auth: AuthContext = Depends(require_permission("admin:manage")),
+    session: AsyncSession = Depends(get_db),
+) -> AuditReplayOut:
+    """Verify a bounded segment of the audit chain (Item 15).
+
+    Investigative surface for the daily integrity job's failure
+    follow-up: the job tells the operator "sequence 5000 broke," and
+    the operator runs replay on a window around that record (e.g.
+    `?from_sequence=4990&to_sequence=5010`) to see exactly which
+    fields diverge.
+
+    Caller MUST specify either a sequence range OR a timestamp range
+    (not both, not neither).  Validation errors surface as HTTP 400
+    with the spec error code (REPLAY_PARAMS_MIXED,
+    REPLAY_RANGE_REQUIRED, REPLAY_RANGE_INCOMPLETE,
+    REPLAY_SEQUENCE_INVALID, REPLAY_TIMESTAMP_INVALID,
+    REPLAY_LIMIT_INVALID) so the CLI and an automated caller can
+    branch on the exact reason.
+
+    Range anchoring: the verifier loads the row immediately before the
+    requested window and uses its record_hash as the anchor for the
+    window's first row's previous_hash check — without this, a
+    legitimately-formed segment is indistinguishable from a tampered
+    one.
+
+    Truncation: the response includes `truncated=true` when more rows
+    matched than `limit`; the caller should narrow the window.
+    """
+    try:
+        result, last_verified_at = await audit_service.replay_range(
+            session,
+            actor_id=uuid.UUID(auth.sub),
+            from_sequence=from_sequence,
+            to_sequence=to_sequence,
+            from_timestamp=from_timestamp,
+            to_timestamp=to_timestamp,
+            limit=limit,
+        )
+    except ReplayParamError as exc:
+        # Route translates the validator's identifier-style code into
+        # the HTTP 400 detail envelope so a CLI / automated caller can
+        # branch on `code` rather than parsing free text.
+        raise HTTPException(
+            status_code=400,
+            detail={"code": exc.code, "message": exc.message},
+        ) from exc
+    return AuditReplayOut.from_result(result, last_verified_at=last_verified_at)
