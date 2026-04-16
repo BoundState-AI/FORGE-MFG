@@ -597,6 +597,11 @@ export default function OperationExecution() {
            more than one role, SignOffPanel renders the §9.2 second-
            signer banner after the first sign-off succeeds. */
         signOffRolesRequired={op.sign_off_roles_required ?? []}
+        /* GC-3 review round 3 finding 3: server-side per-cycle count.
+           SignOffPanel derives banner visibility from this so the
+           gate survives the second-signer full-page redirect (a
+           local counter would re-zero across the redirect). */
+        signoffsCompleted={op.signoffs_completed}
         onSignOffSuccess={invalidateAll}
       />
 

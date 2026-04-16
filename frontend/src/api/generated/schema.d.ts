@@ -1744,6 +1744,49 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/audit/replay": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Replay Chain Segment
+         * @description Verify a bounded segment of the audit chain (Item 15).
+         *
+         *     Investigative surface for the daily integrity job's failure
+         *     follow-up: the job tells the operator "sequence 5000 broke," and
+         *     the operator runs replay on a window around that record (e.g.
+         *     `?from_sequence=4990&to_sequence=5010`) to see exactly which
+         *     fields diverge.
+         *
+         *     Caller MUST specify either a sequence range OR a timestamp range
+         *     (not both, not neither).  Validation errors surface as HTTP 400
+         *     with the spec error code (REPLAY_PARAMS_MIXED,
+         *     REPLAY_RANGE_REQUIRED, REPLAY_RANGE_INCOMPLETE,
+         *     REPLAY_SEQUENCE_INVALID, REPLAY_TIMESTAMP_INVALID,
+         *     REPLAY_LIMIT_INVALID) so the CLI and an automated caller can
+         *     branch on the exact reason.
+         *
+         *     Range anchoring: the verifier loads the row immediately before the
+         *     requested window and uses its record_hash as the anchor for the
+         *     window's first row's previous_hash check — without this, a
+         *     legitimately-formed segment is indistinguishable from a tampered
+         *     one.
+         *
+         *     Truncation: the response includes `truncated=true` when more rows
+         *     matched than `limit`; the caller should narrow the window.
+         */
+        get: operations["replay_chain_segment_api_audit_replay_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/users/me": {
         parameters: {
             query?: never;
@@ -1907,6 +1950,39 @@ export interface components {
             last_hash: string | null;
             /** Last Record Id */
             last_record_id: string | null;
+            /** Failures */
+            failures: components["schemas"]["IntegrityFailureOut"][];
+        };
+        /**
+         * AuditReplayOut
+         * @description Replay-window verification result for the admin investigation surface.
+         *
+         *     `status` mirrors AuditIntegrityOut so the admin UI can use the same
+         *     pass/fail token across both surfaces.  `range_anchor_*` fields
+         *     surface the prior-record hash the verifier anchored against — an
+         *     admin investigating a chain break can confirm the anchor matches
+         *     their expectation without a second query.
+         *     `truncated` flips True when the underlying query returned more
+         *     rows than `limit`; the caller should narrow the window.
+         */
+        AuditReplayOut: {
+            /**
+             * Last Verified At
+             * Format: date-time
+             */
+            last_verified_at: string;
+            /** Status */
+            status: string;
+            /** Records Checked */
+            records_checked: number;
+            /** Truncated */
+            truncated: boolean;
+            /** Range Anchor Sequence */
+            range_anchor_sequence: number;
+            /** Range Anchor Hash */
+            range_anchor_hash: string;
+            /** Records */
+            records: components["schemas"]["ReplayRecordOut"][];
             /** Failures */
             failures: components["schemas"]["IntegrityFailureOut"][];
         };
@@ -3458,6 +3534,8 @@ export interface components {
             safety_critical: boolean;
             /** Sign Off Roles Required */
             sign_off_roles_required: string[];
+            /** Signoffs Completed */
+            signoffs_completed: number;
             /** Estimated Hours */
             estimated_hours: number;
             /** Started At */
@@ -3940,6 +4018,52 @@ export interface components {
             oracle_access?: boolean | null;
             /** Overdue Threshold Hours */
             overdue_threshold_hours?: number | null;
+        };
+        /**
+         * ReplayRecordOut
+         * @description Single record in a replay window — verification + provenance.
+         *
+         *     Mirrors forge.audit.integrity.ReplayRecord.  Carries the stored
+         *     previous_hash + record_hash AND the recomputed hash so an admin
+         *     inspecting the response can identify exactly which field diverges
+         *     when `verified` is False.  `audit_id` lets the admin click through
+         *     to GET /api/audit/events/{id} for full before/after_state context.
+         */
+        ReplayRecordOut: {
+            /** Sequence Number */
+            sequence_number: number;
+            /**
+             * Audit Id
+             * Format: uuid
+             */
+            audit_id: string;
+            /**
+             * Event Id
+             * Format: uuid
+             */
+            event_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Action Type */
+            action_type: string;
+            /** Entity Type */
+            entity_type: string;
+            /**
+             * Entity Id
+             * Format: uuid
+             */
+            entity_id: string;
+            /** Previous Hash */
+            previous_hash: string;
+            /** Record Hash */
+            record_hash: string;
+            /** Recomputed Hash */
+            recomputed_hash: string;
+            /** Verified */
+            verified: boolean;
         };
         /**
          * RoleAssign
@@ -7840,6 +7964,41 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AuditIntegrityOut"];
+                };
+            };
+        };
+    };
+    replay_chain_segment_api_audit_replay_get: {
+        parameters: {
+            query?: {
+                from_sequence?: number | null;
+                to_sequence?: number | null;
+                from_timestamp?: string | null;
+                to_timestamp?: string | null;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuditReplayOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

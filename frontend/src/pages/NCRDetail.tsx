@@ -167,7 +167,10 @@ export default function NCRDetail() {
       setFormError(null);
       setActiveIdempotencyKey(null);
     },
-    onError: (err: unknown) => {
+    onError: (
+      err: unknown,
+      vars: { body: NCRDisposition; idempotencyKey: string },
+    ) => {
       setShowConfirm(false);
       /* GC-3: REAUTH_REQUIRED gets first crack at the error so a stale
          disposition lands the user in the re-auth flow rather than a
@@ -179,11 +182,18 @@ export default function NCRDetail() {
         const reauth = extractReauthError(err);
         const keyForRetry =
           activeIdempotencyKey ?? crypto.randomUUID();
+        /* GC-3 review round 3 finding 1: buffer the FULL request body,
+           not just a summary string.  Spec §11.3 requires the protected
+           action be preserved across the round trip — without the
+           payload, the resume could submit different data if the user
+           changes the form between the original submit and the
+           post-redirect Confirm-and-Submit. */
         const buffer: ReauthBuffer = {
           createdAt: new Date().toISOString(),
           idempotencyKey: keyForRetry,
           action: 'ncr_disposition',
-          actionSummary: `Disposition NCR ${ncr?.ncr_number ?? id} as ${disposition}`,
+          payload: vars.body,
+          actionSummary: `Disposition NCR ${ncr?.ncr_number ?? id} as ${vars.body.disposition}`,
           returnTo: window.location.pathname,
           forceFreshPrincipal: false,
         };
@@ -246,30 +256,17 @@ export default function NCRDetail() {
 
   function handleResumeConfirm(): void {
     setResumeOpen(false);
-    /* Replay the disposition, reusing the buffered Idempotency-Key
-       so the server-side dedupe is honored (spec §9.3 line 1490).
-       Setting activeIdempotencyKey BEFORE handleDispositionSubmit
-       lets the ?? fallback in that function pick up the buffered
-       value instead of generating a new one. */
-    if (resumeBuffer) {
+    /* GC-3 review round 3 finding 1: replay the EXACT body the user
+       originally submitted — buffer.payload, not the current form
+       state.  If we read live form state here, a user who tweaked
+       the disposition dropdown between the original submit and this
+       confirm-and-submit would silently submit different data than
+       they were asked to confirm.  Spec §11.3 binds the protected
+       action across the round trip; the buffer IS the action. */
+    if (resumeBuffer && resumeBuffer.action === 'ncr_disposition') {
       setActiveIdempotencyKey(resumeBuffer.idempotencyKey);
-      /* handleDispositionSubmit reads activeIdempotencyKey via closure.
-         React's state-update batching means the above setter has not
-         actually applied yet when the function runs — so we pass the
-         key explicitly on the mutation, which handleDispositionSubmit
-         prefers via the ?? pattern.  To avoid that subtle ordering
-         bug we inline the mutate call here with the known key. */
-      if (!ncr) return;
-      const body: NCRDisposition = {
-        version: ncr.version,
-        disposition,
-        disposition_rationale: rationale,
-        mrb_disposition: ncr.mrb_required && mrbDisposition ? mrbDisposition : undefined,
-        mrb_authority_id: ncr.mrb_required && mrbAuthorityId ? mrbAuthorityId : undefined,
-        remediation_work_order_id: needsRemediationWo && remediationWoId ? remediationWoId : undefined,
-      };
       dispositionMutation.mutate({
-        body,
+        body: resumeBuffer.payload,
         idempotencyKey: resumeBuffer.idempotencyKey,
       });
     }

@@ -143,6 +143,7 @@ class TestOperationDetail:
                     "   OR action_type LIKE 'operation.%' "
                     "   OR action_type LIKE 'inspection.%'"
                 ))
+                conn.execute(text("DELETE FROM sign_off_events"))
                 conn.execute(text("DELETE FROM inspection_events"))
                 conn.execute(text("DELETE FROM labor_entries"))
                 conn.execute(text("UPDATE part_instances SET reason_ncr_id = NULL"))
@@ -321,6 +322,117 @@ class TestOperationDetail:
         # second-signer banner.  Default ORM value is an empty list.
         assert body["sign_off_roles_required"] == []
         assert body["version"] >= 1
+
+    @pytest.mark.asyncio
+    async def test_signoffs_completed_counts_current_cycle(self) -> None:
+        """GC-3 review round 3: `signoffs_completed` is the per-cycle count.
+
+        Why server-side instead of frontend-derived: the SignOffPanel
+        gates the second-signer banner on whether MORE sign-offs are
+        required.  A purely client-side counter is destroyed by the
+        re-auth full-page redirect, so the truth must live on the
+        server.  The count is scoped to `execution_cycle` because a
+        rework cycle resets the gate per spec §9 — sign-offs from
+        prior cycles do not count toward the current cycle's
+        completion.
+
+        Coverage:
+          0 sign-offs        -> count == 0
+          1 sign-off  cycle1 -> count == 1
+          2 sign-offs cycle1 -> count == 2
+          (sign-offs from a prior cycle would not count, but reaching
+           that state requires the rework path which lives in another
+           suite — covered there.)
+        """
+        from forge.audit.logger import create_audit_record
+        from forge.models.enums import ActorType, SignOffAction
+        from forge.models.inspection import SignOffEvent
+
+        self._clear_override()
+        async with await self._client() as client:
+            r = await client.post(
+                "/api/work-orders",
+                json={
+                    "program_id": self.prog_id,
+                    "engine_serial": f"E-SOC-{uuid.uuid4().hex[:6]}",
+                    "module": "Powerhead",
+                    "build_phase": "fabrication",
+                },
+                headers={"Idempotency-Key": str(uuid.uuid4())},
+            )
+            assert r.status_code == 201, r.text
+            wo = r.json()
+
+            r = await client.post(
+                f"/api/work-orders/{wo['id']}/operations",
+                json={
+                    "description": "Dual-signoff weld",
+                    "sequence": 1,
+                    "safety_critical": True,
+                    "sign_off_roles_required": ["operator", "inspector"],
+                },
+                headers={"Idempotency-Key": str(uuid.uuid4())},
+            )
+            assert r.status_code == 201, r.text
+            op = r.json()
+
+            # Initial state — no sign-offs yet.
+            r = await client.get(f"/api/operations/{op['id']}")
+            assert r.status_code == 200, r.text
+            assert r.json()["signoffs_completed"] == 0
+
+        # Insert two sign-off events directly via the model so this
+        # test stays focused on the read shape (the create-signoff
+        # surface has its own auth-freshness machinery covered
+        # elsewhere).  Same-transaction audit records keep the chain
+        # honest so the integrity verifier is unaffected.
+        from datetime import UTC
+        from datetime import datetime as _dt
+
+        from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+        engine = create_async_engine(_ASYNC_URL)
+        try:
+            async with AsyncSession(engine) as session, session.begin():
+                for role, user_id in (
+                    ("operator", uuid.UUID(RELEASER_USER_ID)),
+                    ("inspector", uuid.UUID(INSPECTOR_USER_ID)),
+                ):
+                    ev = SignOffEvent(
+                        operation_id=uuid.UUID(op["id"]),
+                        user_id=user_id,
+                        role=role,
+                        execution_cycle=op["execution_cycle"],
+                        action=SignOffAction.approve,
+                        signed_at=_dt.now(UTC),
+                        notes=None,
+                        created_by=user_id,
+                        updated_by=user_id,
+                    )
+                    session.add(ev)
+                    await session.flush()
+                    await create_audit_record(
+                        session,
+                        event_id=uuid.uuid4(),
+                        actor_type=ActorType.human,
+                        user_id=user_id,
+                        user_role=role,
+                        action_type="sign_off.record",
+                        entity_type="sign_off_event",
+                        entity_id=ev.id,
+                        after_state={
+                            "operation_id": op["id"],
+                            "execution_cycle": op["execution_cycle"],
+                            "role": role,
+                            "action": "approve",
+                        },
+                    )
+        finally:
+            await engine.dispose()
+
+        async with await self._client() as client:
+            r = await client.get(f"/api/operations/{op['id']}")
+        assert r.status_code == 200, r.text
+        assert r.json()["signoffs_completed"] == 2
 
     @pytest.mark.asyncio
     async def test_sign_off_roles_required_round_trips(self) -> None:

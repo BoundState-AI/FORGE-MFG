@@ -50,6 +50,7 @@ import {
   takeOauthState,
   takeReauthBuffer,
 } from './reauth';
+import { useAuthStore } from './store';
 
 export default function AuthCallback() {
   const navigate = useNavigate();
@@ -107,15 +108,25 @@ export default function AuthCallback() {
           }, 2500);
           return;
         }
-        sessionStorage.setItem('forge_access_token', accessToken);
+        /* GC-3 review round 3 finding 2: route the token through the
+           Zustand setToken action so `isAuthenticated` flips in the
+           same atomic update as the sessionStorage write.  A direct
+           sessionStorage.setItem leaves the store unchanged — AuthGate
+           reads `useAuthStore().isAuthenticated`, so the unauth branch
+           would render and the post-redirect resume modal would never
+           get the chance to fire. */
+        useAuthStore.getState().setToken(accessToken);
       } else {
         /* (C) Local-dev fallback: no ?code, no Cognito domain
            configured.  Restore the placeholder token so downstream
            routes can render.  Production deployments always arrive
            with a ?code; getting here in production means someone
-           navigated to /auth/callback directly. */
-        if (!sessionStorage.getItem('forge_access_token')) {
-          sessionStorage.setItem('forge_access_token', 'local-dev-token');
+           navigated to /auth/callback directly.
+
+           Same setToken posture as the PKCE happy path so AuthGate's
+           Zustand-backed isAuthenticated flips in lockstep. */
+        if (!useAuthStore.getState().isAuthenticated) {
+          useAuthStore.getState().setToken('local-dev-token');
         }
       }
 

@@ -4854,6 +4854,120 @@
         }
       }
     },
+    "/api/audit/replay": {
+      "get": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "Replay Chain Segment",
+        "description": "Verify a bounded segment of the audit chain (Item 15).\n\nInvestigative surface for the daily integrity job's failure\nfollow-up: the job tells the operator \"sequence 5000 broke,\" and\nthe operator runs replay on a window around that record (e.g.\n`?from_sequence=4990&to_sequence=5010`) to see exactly which\nfields diverge.\n\nCaller MUST specify either a sequence range OR a timestamp range\n(not both, not neither).  Validation errors surface as HTTP 400\nwith the spec error code (REPLAY_PARAMS_MIXED,\nREPLAY_RANGE_REQUIRED, REPLAY_RANGE_INCOMPLETE,\nREPLAY_SEQUENCE_INVALID, REPLAY_TIMESTAMP_INVALID,\nREPLAY_LIMIT_INVALID) so the CLI and an automated caller can\nbranch on the exact reason.\n\nRange anchoring: the verifier loads the row immediately before the\nrequested window and uses its record_hash as the anchor for the\nwindow's first row's previous_hash check \u2014 without this, a\nlegitimately-formed segment is indistinguishable from a tampered\none.\n\nTruncation: the response includes `truncated=true` when more rows\nmatched than `limit`; the caller should narrow the window.",
+        "operationId": "replay_chain_segment_api_audit_replay_get",
+        "parameters": [
+          {
+            "name": "from_sequence",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "From Sequence"
+            }
+          },
+          {
+            "name": "to_sequence",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "To Sequence"
+            }
+          },
+          {
+            "name": "from_timestamp",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "From Timestamp"
+            }
+          },
+          {
+            "name": "to_timestamp",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "To Timestamp"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 1000,
+              "minimum": 1,
+              "default": 1000,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditReplayOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/users/me": {
       "get": {
         "tags": [
@@ -5120,6 +5234,62 @@
         ],
         "title": "AuditIntegrityOut",
         "description": "Audit-chain integrity summary per UX spec v1.5.1 \u00a76.6.2.\n\n`status` is the high-level pass/fail flag the admin Audit\nIntegrity panel polls every five minutes (\u00a76.6.3).  The `failures`\nlist is exposed in full so an admin investigating a chain break\ncan identify the exact record + field without a follow-up call.\n\n`last_verified_at` is the wall-clock time of THIS verification\nrun (not a daemon-managed timestamp), so a manual poll always\nreflects the most recent data the server can see."
+      },
+      "AuditReplayOut": {
+        "properties": {
+          "last_verified_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Last Verified At"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "records_checked": {
+            "type": "integer",
+            "title": "Records Checked"
+          },
+          "truncated": {
+            "type": "boolean",
+            "title": "Truncated"
+          },
+          "range_anchor_sequence": {
+            "type": "integer",
+            "title": "Range Anchor Sequence"
+          },
+          "range_anchor_hash": {
+            "type": "string",
+            "title": "Range Anchor Hash"
+          },
+          "records": {
+            "items": {
+              "$ref": "#/components/schemas/ReplayRecordOut"
+            },
+            "type": "array",
+            "title": "Records"
+          },
+          "failures": {
+            "items": {
+              "$ref": "#/components/schemas/IntegrityFailureOut"
+            },
+            "type": "array",
+            "title": "Failures"
+          }
+        },
+        "type": "object",
+        "required": [
+          "last_verified_at",
+          "status",
+          "records_checked",
+          "truncated",
+          "range_anchor_sequence",
+          "range_anchor_hash",
+          "records",
+          "failures"
+        ],
+        "title": "AuditReplayOut",
+        "description": "Replay-window verification result for the admin investigation surface.\n\n`status` mirrors AuditIntegrityOut so the admin UI can use the same\npass/fail token across both surfaces.  `range_anchor_*` fields\nsurface the prior-record hash the verifier anchored against \u2014 an\nadmin investigating a chain break can confirm the anchor matches\ntheir expectation without a second query.\n`truncated` flips True when the underlying query returned more\nrows than `limit`; the caller should narrow the window."
       },
       "BuildPhase": {
         "type": "string",
@@ -7929,6 +8099,10 @@
             "type": "array",
             "title": "Sign Off Roles Required"
           },
+          "signoffs_completed": {
+            "type": "integer",
+            "title": "Signoffs Completed"
+          },
           "estimated_hours": {
             "type": "number",
             "title": "Estimated Hours"
@@ -8010,6 +8184,7 @@
           "inspection_hold",
           "safety_critical",
           "sign_off_roles_required",
+          "signoffs_completed",
           "estimated_hours",
           "started_at",
           "completed_at",
@@ -9023,6 +9198,74 @@
         "type": "object",
         "title": "ProgramUpdate",
         "description": "Request body for PATCH /api/admin/programs/{id}.\n\nAll mutable fields are optional \u2014 admin can toggle a single flag\nwithout re-sending the whole record.  None means \"leave unchanged\"\nat the service layer (model_dump(exclude_unset=True) is the\ncanonical pattern in admin_service).\n\n`version` is OPTIONAL on the wire: UX spec \u00a76.3.1 permits either\nbody-version OR an If-Match header.  The route reconciles via\n`resolve_version_assertion` and rejects missing-both with 400.\nAdmin updates are typically composite (name + flags in one\nrequest) so body-version is still the ergonomic default, but\ntooling that already sets If-Match globally works without\nduplicating the assertion."
+      },
+      "ReplayRecordOut": {
+        "properties": {
+          "sequence_number": {
+            "type": "integer",
+            "title": "Sequence Number"
+          },
+          "audit_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Audit Id"
+          },
+          "event_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Event Id"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Timestamp"
+          },
+          "action_type": {
+            "type": "string",
+            "title": "Action Type"
+          },
+          "entity_type": {
+            "type": "string",
+            "title": "Entity Type"
+          },
+          "entity_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Entity Id"
+          },
+          "previous_hash": {
+            "type": "string",
+            "title": "Previous Hash"
+          },
+          "record_hash": {
+            "type": "string",
+            "title": "Record Hash"
+          },
+          "recomputed_hash": {
+            "type": "string",
+            "title": "Recomputed Hash"
+          },
+          "verified": {
+            "type": "boolean",
+            "title": "Verified"
+          }
+        },
+        "type": "object",
+        "required": [
+          "sequence_number",
+          "audit_id",
+          "event_id",
+          "timestamp",
+          "action_type",
+          "entity_type",
+          "entity_id",
+          "previous_hash",
+          "record_hash",
+          "recomputed_hash",
+          "verified"
+        ],
+        "title": "ReplayRecordOut",
+        "description": "Single record in a replay window \u2014 verification + provenance.\n\nMirrors forge.audit.integrity.ReplayRecord.  Carries the stored\nprevious_hash + record_hash AND the recomputed hash so an admin\ninspecting the response can identify exactly which field diverges\nwhen `verified` is False.  `audit_id` lets the admin click through\nto GET /api/audit/events/{id} for full before/after_state context."
       },
       "RoleAssign": {
         "properties": {

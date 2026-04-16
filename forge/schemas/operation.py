@@ -212,6 +212,15 @@ class OperationDetailOut(BaseModel):
     # different user.") when more than one role is required.  Default
     # empty list to match the ORM model default.
     sign_off_roles_required: list[str]
+    # GC-3 review round 3: per-cycle count of recorded sign-offs.
+    # Source-of-truth for the SignOffPanel banner gate so the count
+    # survives the full-page Cognito redirect of the second-signer
+    # flow (component state is destroyed across the redirect; a
+    # purely-local counter would re-zero and incorrectly re-render
+    # the banner after the second sign-off lands).  Scoped to
+    # `execution_cycle` because rework resets the gate per spec §9 —
+    # sign-offs from prior cycles do not count.
+    signoffs_completed: int
     estimated_hours: float
     started_at: datetime | None
     completed_at: datetime | None

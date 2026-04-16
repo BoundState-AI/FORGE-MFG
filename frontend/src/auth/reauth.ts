@@ -38,20 +38,30 @@
  *   - no auto-replay (§11.3 explicit re-confirmation step)
  */
 
+import type { NCRDisposition, SignOffCreate } from '@/types/api';
 import type { ReauthRequiredError } from './reauth-types';
 
 const STORAGE_KEY_BUFFER = 'forge_reauth_buffer';
 const STORAGE_KEY_PKCE_VERIFIER = 'forge_pkce_verifier';
 const STORAGE_KEY_OAUTH_STATE = 'forge_oauth_state';
 
-/** Pending protected mutation snapshot persisted across the redirect. */
-export interface ReauthBuffer {
+/**
+ * Common fields every variant carries.  Discriminated by `action`.
+ *
+ * Why a discriminated union: GC-3 review round 3 finding 1 — a buffer
+ * that only stores the idempotency key + summary lets the user submit
+ * different data after re-auth (they could change form fields between
+ * the original submit and the post-redirect "Confirm and Submit").
+ * Spec §11.3 mandates the protected action be preserved across the
+ * round trip — which means the buffer carries the request payload
+ * itself, not just a label.  The exception is the second-signer path
+ * (see SignOffSecondSignerReauthBuffer below).
+ */
+export interface BaseReauthBuffer {
   /** ISO timestamp the buffer was created — used for staleness debug. */
   createdAt: string;
   /** Same Idempotency-Key the original request used (spec §9.3). */
   idempotencyKey: string;
-  /** Action label from the REAUTH envelope; drives modal copy. */
-  action: 'sign_off' | 'ncr_disposition';
   /**
    * Page-supplied human description of the pending action.
    * Surfaces in the post-callback re-confirmation modal so the user
@@ -69,6 +79,55 @@ export interface ReauthBuffer {
    */
   forceFreshPrincipal: boolean;
 }
+
+/**
+ * First-signer sign-off OR same-user re-auth replay.  The user picked
+ * a role + action at submit time; the buffer carries the full
+ * SignOffCreate body so the post-redirect resume submits exactly what
+ * was originally chosen, not the latest live form state.
+ */
+export interface SignOffFirstSignerReauthBuffer extends BaseReauthBuffer {
+  action: 'sign_off_first';
+  payload: SignOffCreate;
+}
+
+/**
+ * Second-signer sign-off.  No payload field — the second signer is a
+ * DIFFERENT user whose identity is unknown until after the fresh
+ * Cognito principal returns.  The post-redirect SignOffPanel resolves
+ * the eligible roles from the new principal's role set ∩ the
+ * operation's required roles, surfaces a role picker (or auto-selects
+ * if exactly one), and only then constructs the SignOffCreate body.
+ *
+ * `opMeta` is enough to reconstruct the request URL + summary copy
+ * after the redirect; `signoffRolesRequired` lets the post-redirect
+ * intersection compute without a refetch (the operation detail
+ * refetch will still happen, but the role picker can render
+ * immediately).
+ */
+export interface SignOffSecondSignerReauthBuffer extends BaseReauthBuffer {
+  action: 'sign_off_second';
+  opMeta: {
+    operationId: string;
+    operationSequence: number;
+    operationDescription: string;
+    signOffRolesRequired: string[];
+  };
+}
+
+/**
+ * NCR disposition replay.  Same payload-preservation rule as the
+ * first-signer sign-off path.
+ */
+export interface NCRDispositionReauthBuffer extends BaseReauthBuffer {
+  action: 'ncr_disposition';
+  payload: NCRDisposition;
+}
+
+export type ReauthBuffer =
+  | SignOffFirstSignerReauthBuffer
+  | SignOffSecondSignerReauthBuffer
+  | NCRDispositionReauthBuffer;
 
 /**
  * Type guard — does this thrown error look like the backend's

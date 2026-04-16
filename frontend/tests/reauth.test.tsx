@@ -116,6 +116,10 @@ function renderPanel(overrides?: Partial<React.ComponentProps<typeof SignOffPane
           operationDescription="Weld injector ports"
           isSafetyCritical
           signOffRolesRequired={['inspector', 'engineer']}
+          /* GC-3 round 3: server-side per-cycle count.  Default 0
+             (no sign-offs yet) — tests opt into >0 to exercise the
+             banner state. */
+          signoffsCompleted={0}
           onSignOffSuccess={vi.fn()}
           {...overrides}
         />
@@ -182,10 +186,15 @@ describe('reauth buffer', () => {
   beforeEach(() => sessionStorage.clear());
 
   it('preserves the Idempotency-Key across set → peek → take', () => {
+    /* GC-3 round 3: ReauthBuffer is now a discriminated union; the
+       sign_off_first variant carries the full SignOffCreate payload
+       so the post-redirect resume submits exactly what the user
+       originally chose (spec §11.3). */
     const buffer: ReauthBuffer = {
       createdAt: new Date().toISOString(),
       idempotencyKey: 'fixed-key-123',
-      action: 'sign_off',
+      action: 'sign_off_first',
+      payload: { role: 'inspector', action: 'approve' },
       actionSummary: 'Sign off Op 3 as inspector',
       returnTo: '/work-orders/wo-1/ops/op-1',
       forceFreshPrincipal: false,
@@ -245,7 +254,10 @@ describe('SignOffPanel reauth recovery', () => {
     /* The buffer must hold the same key the original request used. */
     const buffer = peekReauthBuffer();
     expect(buffer).not.toBeNull();
-    expect(buffer?.action).toBe('sign_off');
+    /* GC-3 round 3: the discriminator narrows to sign_off_first when
+       the panel buffers a same-user reauth retry (the original
+       submitter, not the second signer). */
+    expect(buffer?.action).toBe('sign_off_first');
     /* The mutation was called once with an Idempotency-Key argument
        — confirm createSignOff received the same key the buffer holds. */
     const callArgs = createSignOffMock.mock.calls[0];
@@ -253,44 +265,30 @@ describe('SignOffPanel reauth recovery', () => {
     expect(callArgs?.[2]).toBe(buffer?.idempotencyKey);
   });
 
-  it('shows the §9.2 second-signer banner after a successful first sign-off', async () => {
-    createSignOffMock.mockResolvedValueOnce({
-      id: 'so-1',
-      operation_id: 'op-1',
-      user_id: 'u1',
-      role: 'inspector',
-      execution_cycle: 1,
-      action: 'approve',
-      signed_at: '2026-04-16T00:00:00Z',
-      notes: null,
-      version: 1,
-      created_at: '2026-04-16T00:00:00Z',
-      updated_at: '2026-04-16T00:00:00Z',
-    });
+  it('renders the §9.2 second-signer banner from server-side count', () => {
+    /* GC-3 round 3 finding 3: banner visibility derives from
+       `signoffsCompleted` (server truth), not from a local mutation
+       success.  This keeps the banner correct across the full-page
+       Cognito redirect of the second-signer flow.  Test mirrors the
+       state the server reports after the first sign-off lands. */
+    renderPanel({ signoffsCompleted: 1 });
 
-    const onSuccess = vi.fn();
-    renderPanel({ onSignOffSuccess: onSuccess });
-
-    /* Trigger submit → confirm.  Two buttons share the "Sign Off"
-       label after the dialog opens — pick the dialog's. */
-    fireEvent.click(screen.getAllByRole('button', { name: /^Sign Off$/i })[0]);
-    const buttonsAfterOpen = await screen.findAllByRole('button', {
-      name: /^Sign Off$/i,
-    });
-    fireEvent.click(buttonsAfterOpen[1]);
-
-    await waitFor(() => expect(onSuccess).toHaveBeenCalled());
-
-    /* Spec §9.2 line 1480 verbatim copy. */
-    const banner = await screen.findByTestId('second-signer-banner');
+    const banner = screen.getByTestId('second-signer-banner');
     expect(banner).toHaveTextContent(/First sign-off recorded/i);
     expect(banner).toHaveTextContent(/Second sign-off required/i);
     expect(banner).toHaveTextContent(/different user/i);
-
-    /* Banner must offer the second-signer entry button. */
     expect(
       screen.getByRole('button', { name: /Sign Off as Second Signer/i }),
     ).toBeInTheDocument();
+  });
+
+  it('hides the banner once the server reports all required sign-offs are done', () => {
+    /* GC-3 round 3 finding 3: when count == required, the gate is
+       satisfied and the banner must disappear.  Pre-fix this stayed
+       true forever once flipped, so the user saw "second sign-off
+       required" even after BOTH sign-offs landed. */
+    renderPanel({ signoffsCompleted: 2 });
+    expect(screen.queryByTestId('second-signer-banner')).toBeNull();
   });
 });
 
