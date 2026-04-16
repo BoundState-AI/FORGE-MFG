@@ -89,9 +89,8 @@ export default function InspectionQueue() {
     error,
   } = useQuery({
     queryKey: ['inspections', programId, stateFilter, safetyCriticalOnly, page],
-    queryFn: () => fetchInspectionQueue(queryParams as Parameters<typeof fetchInspectionQueue>[0]),
+    queryFn: () => fetchInspectionQueue({ ...queryParams, programId } as Parameters<typeof fetchInspectionQueue>[0]),
     refetchInterval: 30_000,
-    meta: { programId },
   });
 
   /* Sort: oldest pending first, then safety_critical, then overdue_since */

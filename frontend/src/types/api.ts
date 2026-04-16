@@ -52,11 +52,12 @@ export type CertStatus =
   | 'scrapped';
 
 export type PartStatus =
+  | 'raw'
   | 'in_process'
-  | 'complete'
+  | 'completed'
   | 'installed'
   | 'scrapped'
-  | 'quarantine';
+  | 'quarantined';
 
 export type BuildPhase =
   | 'fabrication'

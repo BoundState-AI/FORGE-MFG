@@ -76,6 +76,7 @@ export default function NCRList() {
         page,
         page_size: PAGE_SIZE,
         status: statusFilter !== 'all' ? (statusFilter as NCRStatus) : undefined,
+        programId,
       }),
     refetchInterval: 60_000,
   });

@@ -50,6 +50,25 @@ const STATUS_COLOR_MAP: Record<string, string> = {
   consumed: 'var(--status-draft)',
   expired: 'var(--status-error)',
   scrapped: 'var(--status-error)',
+
+  /* PartStatus (backend enum: raw, in_process, completed, installed, scrapped, quarantined) */
+  raw: 'var(--status-draft)',
+  in_process: 'var(--status-active)',
+  completed: 'var(--status-complete)',
+  installed: 'var(--status-complete)',
+  quarantined: 'var(--status-hold)',
+  /* scrapped already mapped above */
+
+  /* HoldPointStatus */
+  none: 'var(--status-draft)',
+  satisfied: 'var(--status-complete)',
+  conditionally_satisfied: 'var(--status-hold)',
+  blocked: 'var(--status-error)',
+
+  /* Priority */
+  routine: 'var(--status-draft)',
+  urgent: 'var(--status-hold)',
+  critical: 'var(--status-error)',
 };
 
 /** Turns "in_progress" into "In Progress" for display. */

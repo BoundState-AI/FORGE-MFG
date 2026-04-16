@@ -111,6 +111,7 @@ export default function MaterialList() {
         page,
         page_size: PAGE_SIZE,
         status: statusFilter !== 'all' ? (statusFilter as CertStatus) : undefined,
+        programId,
       }),
     refetchInterval: 60_000,
   });

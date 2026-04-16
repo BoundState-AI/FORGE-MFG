@@ -266,11 +266,15 @@ export async function fetchInspectionQueue(
     state?: string;
     safety_critical?: boolean;
     operation_id?: string;
+    programId?: string;
   },
 ): Promise<PaginatedResponse<InspectionQueueRowOut>> {
+  const { programId, ...rest } = params ?? {};
+  const headers: Record<string, string> = {};
+  if (programId === '*') headers['X-Program-Id'] = '*';
   const { data } = await apiClient.get<
     PaginatedResponse<InspectionQueueRowOut>
-  >('/api/inspections', { params: { ...paginationQuery(params), ...params } });
+  >('/api/inspections', { params: { ...paginationQuery(rest), ...rest }, headers });
   return data;
 }
 
@@ -299,11 +303,13 @@ export async function createSignOff(
 /* ── NCRs ── */
 
 export async function fetchNCRs(
-  params?: PaginationParams & { status?: string },
+  params?: PaginationParams & { status?: string; programId?: string },
 ): Promise<PaginatedResponse<NCROut>> {
+  const headers: Record<string, string> = {};
+  if (params?.programId === '*') headers['X-Program-Id'] = '*';
   const { data } = await apiClient.get<PaginatedResponse<NCROut>>(
     '/api/ncrs',
-    { params: { ...paginationQuery(params), status: params?.status } },
+    { params: { ...paginationQuery(params), status: params?.status }, headers },
   );
   return data;
 }
@@ -337,11 +343,13 @@ export async function patchNCR(id: string, body: NCRPatch): Promise<NCROut> {
 /* ── Materials ── */
 
 export async function fetchMaterials(
-  params?: PaginationParams & { status?: string },
+  params?: PaginationParams & { status?: string; programId?: string },
 ): Promise<PaginatedResponse<MaterialCertOut>> {
+  const headers: Record<string, string> = {};
+  if (params?.programId === '*') headers['X-Program-Id'] = '*';
   const { data } = await apiClient.get<PaginatedResponse<MaterialCertOut>>(
     '/api/material-certs',
-    { params: { ...paginationQuery(params), status: params?.status } },
+    { params: { ...paginationQuery(params), status: params?.status }, headers },
   );
   return data;
 }
