@@ -38,14 +38,18 @@ Why this design:
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
+import jwt
 from cachetools import TTLCache
+from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicKey
 from fastapi import Depends, HTTPException, Request
-from jose import JWTError, jwt
+from jwt import PyJWTError
+from jwt.algorithms import RSAAlgorithm
 
 from forge.config import Settings
 
@@ -138,7 +142,7 @@ async def _fetch_jwks(
         resp.raise_for_status()
         keys: list[dict[str, Any]] = resp.json().get("keys", [])
     if not keys:
-        raise JWTError("JWKS key set is empty")
+        raise PyJWTError("JWKS key set is empty")
     _jwks_cache[jwks_url] = keys
     return keys
 
@@ -147,12 +151,16 @@ def _get_token_kid(token: str) -> str:
     """Extract the kid from a JWT header.
 
     Every Cognito token includes the kid of the signing key.
-    Returns the kid string or raises JWTError if absent.
+    Returns the kid string or raises PyJWTError if absent.
     """
-    headers = jwt.get_unverified_headers(token)
+    # PyJWT exposes ``get_unverified_header`` (singular) returning the
+    # JOSE header dict.  python-jose shipped ``get_unverified_headers``
+    # (plural) with the same semantics; the rename is the only
+    # behavioral difference between the two libraries at this call site.
+    headers = jwt.get_unverified_header(token)
     kid: str | None = headers.get("kid")
     if not kid:
-        raise JWTError("JWT missing kid header")
+        raise PyJWTError("JWT missing kid header")
     return kid
 
 
@@ -202,7 +210,7 @@ async def _resolve_signing_key(
     if key is not None:
         return key
 
-    raise JWTError(f"No matching JWKS key for kid={kid}")
+    raise PyJWTError(f"No matching JWKS key for kid={kid}")
 
 
 async def verify_access_token(
@@ -222,17 +230,37 @@ async def verify_access_token(
     )
     jwks_url = f"{issuer}/.well-known/jwks.json"
 
-    key = await _resolve_signing_key(token, jwks_url)
+    jwk_dict = await _resolve_signing_key(token, jwks_url)
+
+    # PyJWT does not accept a JWK dict directly — it expects a PEM-
+    # encoded key, a cryptography public-key object, or a JWK JSON
+    # string.  ``RSAAlgorithm.from_jwk`` converts the JWKS entry into
+    # the public-key object PyJWT's RS256 verifier consumes.  python-
+    # jose accepted the JWK dict directly; this conversion is the only
+    # semantic difference at the verify call site.
+    #
+    # ``from_jwk`` is typed as returning ``RSAPrivateKey | RSAPublicKey``
+    # because the same helper can parse either form.  A JWKS entry from
+    # Cognito is always a public key (the signing keys are never
+    # published in their private form); the runtime-asserted cast keeps
+    # the type checker strict without weakening the contract.
+    public_key = RSAAlgorithm.from_jwk(json.dumps(jwk_dict))
+    assert isinstance(public_key, RSAPublicKey)
 
     try:
+        # ``verify_at_hash`` was a python-jose option that guarded the
+        # ID-token access-token-hash binding.  PyJWT has no such option
+        # (it never checks at_hash), and ID tokens are explicitly
+        # rejected below regardless — so dropping the flag is a
+        # no-op in semantics while keeping the Options TypedDict valid.
         claims: dict[str, Any] = jwt.decode(
             token,
-            key,
+            public_key,
             algorithms=["RS256"],
             issuer=issuer,
-            options={"verify_aud": False, "verify_at_hash": False},
+            options={"verify_aud": False},
         )
-    except JWTError as exc:
+    except PyJWTError as exc:
         raise HTTPException(
             status_code=401, detail="Invalid or expired token"
         ) from exc

@@ -33,12 +33,12 @@ from collections.abc import AsyncGenerator
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
+import jwt
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import Depends, FastAPI
 from httpx import ASGITransport, AsyncClient
-from jose import jwt
 
 from forge.api.app import create_app
 from forge.api.auth import AuthContext, get_auth_context, require_permission
@@ -54,7 +54,7 @@ _PRIVATE_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 
 _PUBLIC_KEY = _PRIVATE_KEY.public_key()
 
-# PEM for python-jose signing
+# PEM for PyJWT test signing
 _PRIVATE_PEM = _PRIVATE_KEY.private_bytes(
     encoding=serialization.Encoding.PEM,
     format=serialization.PrivateFormat.PKCS8,
@@ -462,10 +462,10 @@ async def test_jwks_rotation_unknown_kid_fails_after_refresh() -> None:
 
     Tests _resolve_signing_key directly.  Proves: when a token's kid is
     not in the cached JWKS, the system force-refreshes once.  If the
-    refreshed JWKS still lacks the kid, a JWTError is raised — no
+    refreshed JWKS still lacks the kid, a PyJWTError is raised — no
     infinite retry loop.
     """
-    from jose import JWTError as JoseJWTError
+    from jwt import PyJWTError as JoseJWTError
 
     from forge.api.auth import _jwks_cache, _resolve_signing_key
 
