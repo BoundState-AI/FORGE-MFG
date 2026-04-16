@@ -500,30 +500,46 @@ async def record_sign_off(
     user_id: _uuid.UUID,
     program_codes: list[str] | None = None,
     *,
-    auth_context: AuthContext | None = None,
+    auth_context: AuthContext,
 ) -> SignOffEvent:
     """Record a role-based sign-off against an in-progress operation.
 
     State leaving: in_progress.  State entering: in_progress.
     Invariants (in order):
       1. Op must be in_progress.
-      2. GC-3 freshness gate (only if safety_critical AND auth_context
-         is provided): caller's auth_time must be within
-         ``MAX_AUTH_AGE_SECONDS``.  Stale auth raises
-         ``StaleAuthError`` (401 REAUTH_REQUIRED) BEFORE any rows or
-         audit records are written, so the same Idempotency-Key retry
-         after fresh login lands on a clean slate (UX spec §11.3).
-      3. SOD-005 (only if safety_critical): the new (user_id, role) pair
+      2. GC-3 freshness gate (safety_critical only): caller's
+         auth_time must be within ``MAX_AUTH_AGE_SECONDS``.  Stale
+         auth raises ``StaleAuthError`` (401 REAUTH_REQUIRED) BEFORE
+         any rows or audit records are written, so the same
+         Idempotency-Key retry after fresh login lands on a clean
+         slate (UX spec §11.3).
+      3. GC-3 round 5 — role authenticity (always):
+         a. ``data.role`` MUST be one of ``auth_context.roles`` —
+            i.e. the caller actually holds the role they're claiming.
+            Rejected as ``SIGNOFF_ROLE_NOT_HELD`` (422).
+         b. If ``op.sign_off_roles_required`` is non-empty,
+            ``data.role`` MUST be a member.  Rejected as
+            ``SIGNOFF_ROLE_NOT_REQUIRED`` (422).  A held-but-not-
+            required sign-off cannot advance COMP-003 / the
+            ``signoffs_completed_roles`` gate, so we reject it
+            outright instead of letting it drop a misleading audit
+            row.
+         Pre-round-5 the backend trusted ``data.role`` verbatim; that
+         meant required-role coverage could be faked by client input
+         and SOD-005 could be sidestepped by claiming a role you
+         don't actually hold.  Codex round-5 review caught this; the
+         gate above is the fix.
+      4. SOD-005 (safety_critical only): the new (user_id, role) pair
          cannot reuse a user_id already present on a *different* role
          in the current execution_cycle.  Re-signing the same role is
          rejected by the unique DB constraint, not by SoD.
-      4. execution_cycle is taken server-side from op.execution_cycle.
+      5. execution_cycle is taken server-side from op.execution_cycle.
 
-    auth_context is keyword-only and optional so callers that already
-    pre-validated freshness (or operate outside the HTTP layer, like
-    background workers) do not need to construct one.  In Phase 1 only
-    the HTTP route layer calls this, and it always passes the live
-    AuthContext.
+    ``auth_context`` is keyword-only and REQUIRED — without it the
+    role-authenticity gate cannot run, and there is no honest call
+    site that needs to bypass it.  If a future internal/system caller
+    needs to seed a sign-off, add a separate explicitly-documented
+    helper rather than weakening this one.
     """
     op = await _get_op(session, op_id, program_codes=program_codes)
     _require_op_in_progress(op)
@@ -534,7 +550,7 @@ async def record_sign_off(
     # Idempotency retry path depends on this ordering — a partial
     # commit before REAUTH_REQUIRED would let the cached idempotent
     # response permanently shadow the user's intent.
-    if op.safety_critical and auth_context is not None:
+    if op.safety_critical:
         from forge.api.auth_freshness import (
             AuthFreshnessAction,
             require_fresh_auth,
@@ -542,6 +558,40 @@ async def record_sign_off(
 
         await require_fresh_auth(
             auth_context, session, AuthFreshnessAction.sign_off
+        )
+
+    # GC-3 round 5 (Codex High): role-authenticity gate.  Both checks
+    # land BEFORE SOD-005 + insert + audit, so a forged claim never
+    # produces a sign_off_event row OR an audit record (clean slate
+    # for the rejected attempt — important for the same-key retry
+    # contract: a 422 is not cached, so the caller can re-submit
+    # with the right role using a fresh attempt).
+    if data.role not in auth_context.roles:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "SIGNOFF_ROLE_NOT_HELD",
+                "message": (
+                    f"Cannot sign off as '{data.role}': you do not hold "
+                    f"that role.  Your roles: "
+                    f"{sorted(auth_context.roles)}."
+                ),
+            },
+        )
+    if (
+        op.sign_off_roles_required
+        and data.role not in op.sign_off_roles_required
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "SIGNOFF_ROLE_NOT_REQUIRED",
+                "message": (
+                    f"Role '{data.role}' is not in this operation's "
+                    f"required sign-off roles "
+                    f"({sorted(op.sign_off_roles_required)})."
+                ),
+            },
         )
 
     existing = await _signoffs_for_op(session, op_id)

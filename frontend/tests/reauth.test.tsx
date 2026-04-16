@@ -293,6 +293,42 @@ describe('SignOffPanel reauth recovery', () => {
     expect(screen.queryByTestId('second-signer-banner')).toBeNull();
   });
 
+  it('shows the eligibility explainer when user holds none of the required roles', () => {
+    /* GC-3 round 5 (Codex High): the initial sign-off form must NOT
+       fall back to arbitrary user roles when the required-role
+       intersection is empty.  Pre-fix, an `engineer` looking at an
+       op that required `inspector` saw a working "Sign Off as
+       engineer" form — the picker offered all held roles.  The
+       backend now rejects with SIGNOFF_ROLE_NOT_REQUIRED, but the
+       UI must also stop offering them so the operator knows why
+       they can't act, not be dead-ended by a 422. */
+    /* Override the panel's mocked auth store to a user with a role
+       that is NOT in the operation's required set. */
+    mockAuthState.roles.length = 0;
+    mockAuthState.roles.push('engineer');
+    try {
+      renderPanel({
+        signOffRolesRequired: ['inspector', 'qa_manager'],
+        signoffsCompletedRoles: [],
+      });
+
+      /* Eligibility message visible, lists the required roles. */
+      const explainer = screen.getByTestId('signoff-ineligible-message');
+      expect(explainer).toHaveTextContent(/not eligible/i);
+      expect(explainer).toHaveTextContent(/inspector/i);
+      expect(explainer).toHaveTextContent(/qa_manager/i);
+
+      /* No actionable form: no role select, no Sign Off button. */
+      expect(screen.queryByLabelText(/Role/i)).toBeNull();
+      expect(
+        screen.queryByRole('button', { name: /^Sign Off$/i }),
+      ).toBeNull();
+    } finally {
+      mockAuthState.roles.length = 0;
+      mockAuthState.roles.push('inspector');
+    }
+  });
+
   it('keeps the banner up when two users covered only the SAME required role', () => {
     /* GC-3 round 4 (Codex Medium): with a count-based gate, two
        different users signing as 'inspector' against a

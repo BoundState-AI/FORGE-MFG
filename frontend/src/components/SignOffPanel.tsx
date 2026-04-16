@@ -110,18 +110,27 @@ export function SignOffPanel({
   signoffsCompletedRoles,
   onSignOffSuccess,
 }: SignOffPanelProps) {
-  const { roles: userRoles, hasRole } = useAuthStore();
+  const { roles: userRoles } = useAuthStore();
   const [searchParams, setSearchParams] = useSearchParams();
 
-  /* The role this user is signing as.  Defaulted to the first role
-     they hold that's also in the operation's required list. */
-  const eligibleRoles = useMemo(
+  /* The roles this user is eligible to sign off as.
+     - When the op declares required roles, eligible = required ∩ held.
+     - When the op declares no required roles, eligible = held.
+     GC-3 round 5 (Codex High): we no longer fall back to "all user
+     roles" when the required-role intersection is empty.  Pre-fix
+     the picker offered roles the user held but the op did not
+     require, and the backend trusted them.  The backend now rejects
+     those with SIGNOFF_ROLE_NOT_REQUIRED, but the UI must also stop
+     offering them so we don't dead-end the user with a 422. */
+  const eligibleRoles = useMemo<string[]>(
     () =>
-      signOffRolesRequired.filter((r) => userRoles.includes(r as never)),
+      signOffRolesRequired.length > 0
+        ? signOffRolesRequired.filter((r) => userRoles.includes(r as never))
+        : (userRoles as readonly string[]).slice(),
     [signOffRolesRequired, userRoles],
   );
   const [selectedRole, setSelectedRole] = useState<string>(
-    eligibleRoles[0] ?? userRoles[0] ?? 'inspector',
+    eligibleRoles[0] ?? '',
   );
   const [pendingConfirm, setPendingConfirm] = useState(false);
   const [reauthOpen, setReauthOpen] = useState(false);
@@ -150,9 +159,12 @@ export function SignOffPanel({
   const moreSignoffsNeeded =
     signoffsCompletedRoles.length >= 1 && remainingRequiredRoles.length > 0;
 
-  /** True when the operator can sign off (has at least one eligible role). */
-  const canSignOff =
-    eligibleRoles.length > 0 || hasRole('inspector') || hasRole('engineer');
+  /** True when the operator holds at least one role this op accepts.
+      GC-3 round 5: the prior "fall back to inspector/engineer" hint
+      let the panel render an actionable form for users who would
+      have been rejected server-side.  Now the panel either shows
+      the form (eligible) or the eligibility-explainer (not). */
+  const canSignOff = eligibleRoles.length > 0;
 
   /**
    * The Idempotency-Key for the in-flight or pending sign-off.  Stable
@@ -354,7 +366,22 @@ export function SignOffPanel({
     setReauthOpen(true);
   }
 
-  if (!canSignOff) return null;
+  /* Whether to render the panel at all.  We render when EITHER:
+     - the current user could record a sign-off (form path), OR
+     - a second-signer banner is needed (anyone reading the op can
+       invite a different user via the fresh-principal flow).
+     - the form path is active for an op WITH required roles but the
+       current user holds none — surface the eligibility message
+       instead of silently disappearing.
+
+     GC-3 round 5: dropping the silent return-null when the user has
+     no eligible role makes the "you can't sign this" state explicit
+     so an operator who lands on the page knows why no controls show. */
+  const showIneligibleExplainer =
+    formVisible && !canSignOff && signOffRolesRequired.length > 0;
+  const renderPanel =
+    canSignOff || moreSignoffsNeeded || showIneligibleExplainer;
+  if (!renderPanel) return null;
 
   /* Resolve the eligible-role list for the second-signer resume
      dialog.  Computed at render-time so a re-auth that returns with
@@ -434,7 +461,30 @@ export function SignOffPanel({
         </div>
       )}
 
-      {formVisible && (
+      {showIneligibleExplainer && (
+        /* GC-3 round 5: required-role coverage is real — surface why
+           this user can't sign off rather than silently hiding the
+           form.  Lists the required roles so the operator knows who
+           IS eligible. */
+        <div
+          role="status"
+          style={{
+            padding: 'var(--space-sm) var(--space-md)',
+            background: 'var(--bg-elevated)',
+            borderLeft: '3px solid var(--text-muted)',
+            borderRadius: '0 var(--radius-md) var(--radius-md) 0',
+            color: 'var(--text-secondary)',
+            fontSize: 'var(--font-size-body)',
+          }}
+          data-testid="signoff-ineligible-message"
+        >
+          You are not eligible to sign off this operation.{' '}
+          Required role{signOffRolesRequired.length === 1 ? '' : 's'}:{' '}
+          {signOffRolesRequired.join(', ')}.
+        </div>
+      )}
+
+      {formVisible && canSignOff && (
         <div style={{ display: 'flex', gap: 'var(--space-sm)', alignItems: 'flex-end' }}>
           <div>
             <label htmlFor="signoff-role">Role</label>
@@ -443,7 +493,11 @@ export function SignOffPanel({
               value={selectedRole}
               onChange={(e) => setSelectedRole(e.target.value)}
             >
-              {(eligibleRoles.length > 0 ? eligibleRoles : userRoles).map((r) => (
+              {/* GC-3 round 5: only eligible roles are offered — no
+                  fallback to arbitrary user roles.  When required
+                  roles are declared, eligible = required ∩ held;
+                  otherwise eligible = held. */}
+              {eligibleRoles.map((r) => (
                 <option key={r} value={r}>
                   {r}
                 </option>
@@ -461,7 +515,7 @@ export function SignOffPanel({
         </div>
       )}
 
-      {isSafetyCritical && formVisible && (
+      {isSafetyCritical && formVisible && canSignOff && (
         <div
           style={{
             marginTop: 'var(--space-sm)',

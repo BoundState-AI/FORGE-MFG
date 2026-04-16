@@ -340,15 +340,90 @@ class TestInspectionSignOff:
         assert body["execution_cycle"] == 1
 
     @pytest.mark.asyncio
+    async def test_signoff_role_not_held_rejected(self) -> None:
+        """GC-3 round 5: claiming a role the user does not hold is
+        rejected with 422 SIGNOFF_ROLE_NOT_HELD before any insert.
+
+        Prior to round 5 the backend trusted the client-claimed role
+        verbatim, so an inspector could submit role="operator" and
+        falsely advance the covered-role gate.  The check fires AFTER
+        scope/state checks and BEFORE SOD-005 + insert + audit, so a
+        forged role never produces a sign_off_event row OR an audit
+        record (clean slate for the rejected attempt).
+        """
+        op = await self._make_op(
+            safety_critical=False,
+            sign_off_roles=["operator", "inspector"],
+        )
+
+        # User holds inspector ONLY but tries to sign as operator.
+        self._override_as(INSPECTOR_USER_ID, roles=["inspector"])
+        async with await self._client() as client:
+            r = await client.post(
+                f"/api/operations/{op['id']}/sign-off",
+                json={"role": "operator", "action": "approve"},
+                headers={"Idempotency-Key": str(uuid.uuid4())},
+            )
+        self._clear_override()
+        assert r.status_code == 422, r.text
+        body = r.json()
+        # Stable code surface — the route-layer 422 envelope wraps
+        # the service exception's detail dict in `detail`.
+        detail = body.get("detail", body)
+        assert detail.get("code") == "SIGNOFF_ROLE_NOT_HELD", body
+
+    @pytest.mark.asyncio
+    async def test_signoff_role_not_in_required_set_rejected(self) -> None:
+        """GC-3 round 5: an op with non-empty sign_off_roles_required
+        rejects a sign-off whose role is outside that set, even if the
+        caller legitimately holds it.
+
+        Reason: a held-but-not-required sign-off cannot advance
+        completion (it isn't in COMP-003's required set), so accepting
+        it would write an audit-log row that misleads future readers
+        into thinking the gate moved.  The signoffs_completed_roles
+        gate is also strictly stronger when only required roles can
+        be recorded.
+        """
+        op = await self._make_op(
+            safety_critical=False,
+            sign_off_roles=["inspector"],
+        )
+
+        # User holds engineer + inspector; engineer is not required.
+        self._override_as(
+            INSPECTOR_USER_ID, roles=["engineer", "inspector"],
+        )
+        async with await self._client() as client:
+            r = await client.post(
+                f"/api/operations/{op['id']}/sign-off",
+                json={"role": "engineer", "action": "approve"},
+                headers={"Idempotency-Key": str(uuid.uuid4())},
+            )
+        self._clear_override()
+        assert r.status_code == 422, r.text
+        detail = r.json().get("detail", r.json())
+        assert detail.get("code") == "SIGNOFF_ROLE_NOT_REQUIRED", r.text
+
+    @pytest.mark.asyncio
     async def test_sod005_blocks_same_user_two_roles(self) -> None:
-        """SOD-005: on safety-critical, one user cannot sign two roles."""
+        """SOD-005: on safety-critical, one user cannot sign two
+        DIFFERENT required roles even if they legitimately hold both.
+
+        GC-3 round 5: caller now legitimately holds both roles (the
+        round-5 role-authenticity gate would otherwise reject the
+        first sign-off as SIGNOFF_ROLE_NOT_HELD).  This keeps the
+        test honest — SOD-005 is the actual subject under test.
+        """
         op = await self._make_op(
             safety_critical=True,
             sign_off_roles=["operator", "inspector"],
         )
 
-        # Same user signs both roles in the same cycle
-        self._override_as(INSPECTOR_USER_ID, roles=["inspector"])
+        # Same user holds BOTH roles legitimately and signs both.
+        self._override_as(
+            INSPECTOR_USER_ID, roles=["operator", "inspector"],
+        )
         async with await self._client() as client:
             r1 = await client.post(
                 f"/api/operations/{op['id']}/sign-off",
@@ -368,13 +443,19 @@ class TestInspectionSignOff:
 
     @pytest.mark.asyncio
     async def test_sod005_distinct_users_allowed(self) -> None:
-        """SOD-005 allow-path: distinct users can satisfy two roles."""
+        """SOD-005 allow-path: distinct users covering distinct
+        required roles both succeed.
+
+        GC-3 round 5: each caller legitimately holds the role they
+        sign as — no forged-role assumption.
+        """
         op = await self._make_op(
             safety_critical=True,
             sign_off_roles=["operator", "inspector"],
         )
 
-        self._override_as(INSPECTOR_USER_ID, roles=["inspector"])
+        # User A holds operator and signs operator.
+        self._override_as(INSPECTOR_USER_ID, roles=["operator"])
         async with await self._client() as client:
             r1 = await client.post(
                 f"/api/operations/{op['id']}/sign-off",
@@ -383,6 +464,7 @@ class TestInspectionSignOff:
             )
         assert r1.status_code == 201, r1.text
 
+        # User B holds inspector and signs inspector.
         self._override_as(SECOND_INSPECTOR_ID, roles=["inspector"])
         async with await self._client() as client:
             r2 = await client.post(
@@ -496,8 +578,14 @@ class TestInspectionSignOff:
             sign_off_roles=["operator", "inspector"],
         )
 
-        # Inspector (no labor) accepts inspection
-        self._override_as(INSPECTOR_USER_ID, roles=["inspector"])
+        # GC-3 round 5: caller legitimately holds the role they sign
+        # as.  Inspector here also holds operator so the operator
+        # sign-off is honest under the new role-authenticity gate.
+        # (Inspector does the inspection separately so SOD-001 still
+        # uses a no-labor user.)
+        self._override_as(
+            INSPECTOR_USER_ID, roles=["operator", "inspector"],
+        )
         async with await self._client() as client:
             r = await client.post(
                 f"/api/operations/{op['id']}/inspect",
