@@ -3534,8 +3534,8 @@ export interface components {
             safety_critical: boolean;
             /** Sign Off Roles Required */
             sign_off_roles_required: string[];
-            /** Signoffs Completed */
-            signoffs_completed: number;
+            /** Signoffs Completed Roles */
+            signoffs_completed_roles: string[];
             /** Estimated Hours */
             estimated_hours: number;
             /** Started At */

@@ -35,11 +35,13 @@
  *     NOT pin a payload pre-redirect because the second signer's
  *     identity (and therefore eligible role set) is unknown until the
  *     fresh Cognito principal returns.
- *   - Finding 2 (LOW): banner visibility is derived from the
- *     `signoffsCompleted` prop (server-side per-cycle count from
- *     OperationDetailOut.signoffs_completed).  A purely-local counter
- *     would re-zero across the second-signer redirect and re-fire the
- *     banner after the second sign-off lands.
+ *   - Finding 2 (LOW) + Round 4 (Codex Medium): banner visibility is
+ *     derived from `signoffsCompletedRoles` — the server-side DISTINCT
+ *     covered-role list (OperationDetailOut.signoffs_completed_roles).
+ *     Form/banner gate on `required \ covered`, not on a raw count.
+ *     A count would re-zero across the second-signer redirect AND
+ *     would falsely satisfy the gate when two different users signed
+ *     the same role (the model unique constraint allows that).
  *
  * Spec invariants pinned here:
  *   - same Idempotency-Key reused on retry (§9.3 / §11.3 line 1538)
@@ -75,20 +77,26 @@ interface SignOffPanelProps {
   /** True when the operation requires the same-device dual-signoff dance. */
   isSafetyCritical: boolean;
   /**
-   * Roles the operation expects to see signed off.  When non-empty AND
-   * `signoffsCompleted` is between 1 and (length - 1) inclusive, the
-   * second-signer banner surfaces.  Spec §9.2 line 1480 copy is shown
-   * verbatim regardless of which role(s) are still missing.
+   * Roles the operation expects to see signed off.  The banner shows
+   * when at least one required role has been covered AND at least one
+   * remains uncovered.  Spec §9.2 line 1480 copy is shown verbatim
+   * regardless of which role(s) are still missing.
    */
   signOffRolesRequired: string[];
   /**
-   * Server-side count of sign-offs recorded against this operation in
-   * its current execution_cycle (from OperationDetailOut.signoffs_completed).
-   * Source-of-truth for the banner gate so the count survives the
-   * full-page Cognito redirect of the second-signer flow — a purely
-   * local counter would re-zero on redirect and mis-fire the banner.
+   * Server-side DISTINCT covered-role list for this operation in its
+   * current execution_cycle (OperationDetailOut.signoffs_completed_roles).
+   * Source-of-truth for the banner gate so coverage survives the
+   * full-page Cognito redirect of the second-signer flow.
+   *
+   * GC-3 review round 4 (Codex Medium): a count would falsely satisfy
+   * the gate when two different users sign the SAME role — the model
+   * unique constraint allows that, and the previous count contract
+   * hid both the form AND the banner before required-role coverage
+   * was actually complete.  The role-list contract lets the panel
+   * compute  remaining = required ∖ covered  honestly.
    */
-  signoffsCompleted: number;
+  signoffsCompletedRoles: string[];
   /** Called after a successful sign-off so the parent can refetch state. */
   onSignOffSuccess: () => void;
 }
@@ -99,7 +107,7 @@ export function SignOffPanel({
   operationDescription,
   isSafetyCritical,
   signOffRolesRequired,
-  signoffsCompleted,
+  signoffsCompletedRoles,
   onSignOffSuccess,
 }: SignOffPanelProps) {
   const { roles: userRoles, hasRole } = useAuthStore();
@@ -125,16 +133,22 @@ export function SignOffPanel({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   /**
-   * UI mode is derived from the server-side count + remaining required
-   * roles, NOT from local state.  This keeps the banner honest across
-   * the full-page Cognito redirect of the second-signer flow.
+   * UI mode is derived from the server-side ROLE COVERAGE list, NOT
+   * from a raw count.  This keeps the banner honest across the
+   * full-page Cognito redirect of the second-signer flow AND across
+   * the duplicate-role case (two different users signing the same
+   * role would falsely advance a count-based gate).  See spec §9.2.
    */
-  const remainingSignoffs = Math.max(
-    signOffRolesRequired.length - signoffsCompleted, 0,
+  const remainingRequiredRoles = useMemo(
+    () =>
+      signOffRolesRequired.filter(
+        (r) => !signoffsCompletedRoles.includes(r),
+      ),
+    [signOffRolesRequired, signoffsCompletedRoles],
   );
-  const formVisible = signoffsCompleted === 0;
+  const formVisible = signoffsCompletedRoles.length === 0;
   const moreSignoffsNeeded =
-    signoffsCompleted >= 1 && signoffsCompleted < signOffRolesRequired.length;
+    signoffsCompletedRoles.length >= 1 && remainingRequiredRoles.length > 0;
 
   /** True when the operator can sign off (has at least one eligible role). */
   const canSignOff =
@@ -164,9 +178,15 @@ export function SignOffPanel({
       setResumeOpen(true);
       if (buffer.action === 'sign_off_second') {
         /* Compute which of the operation's required roles the new
-           principal can satisfy.  Auto-select when exactly one. */
+           principal can satisfy AND that have not already been
+           covered this cycle.  GC-3 round 4: the picker must NOT
+           offer roles already signed by another user — that would
+           leave the actual remaining role uncovered while satisfying
+           the picker.  Auto-select when exactly one. */
         const eligible = buffer.opMeta.signOffRolesRequired.filter(
-          (r) => userRoles.includes(r as never),
+          (r) =>
+            userRoles.includes(r as never) &&
+            !signoffsCompletedRoles.includes(r),
         );
         setSecondSignerRole(eligible.length === 1 ? eligible[0] : null);
       }
@@ -175,7 +195,7 @@ export function SignOffPanel({
     const next = new URLSearchParams(searchParams);
     next.delete('reauth');
     setSearchParams(next, { replace: true });
-  }, [searchParams, setSearchParams, userRoles]);
+  }, [searchParams, setSearchParams, userRoles, signoffsCompletedRoles]);
 
   const signOffMutation = useMutation({
     mutationFn: async (vars: {
@@ -338,12 +358,20 @@ export function SignOffPanel({
 
   /* Resolve the eligible-role list for the second-signer resume
      dialog.  Computed at render-time so a re-auth that returns with
-     an unexpected role set surfaces immediately. */
+     an unexpected role set surfaces immediately.
+
+     GC-3 round 4: also subtract roles that have already been signed
+     this cycle — the picker must not let the second signer pick a
+     role that wouldn't actually advance the gate. */
   const isSecondSignerResume =
     resumeBuffer?.action === 'sign_off_second';
   const secondSignerEligibleRoles = isSecondSignerResume
     ? (resumeBuffer as SignOffSecondSignerReauthBuffer).opMeta
-        .signOffRolesRequired.filter((r) => userRoles.includes(r as never))
+        .signOffRolesRequired.filter(
+          (r) =>
+            userRoles.includes(r as never) &&
+            !signoffsCompletedRoles.includes(r),
+        )
     : [];
   const secondSignerSubmitDisabled =
     isSecondSignerResume &&
@@ -389,9 +417,9 @@ export function SignOffPanel({
         >
           <strong>First sign-off recorded.</strong>{' '}
           Second sign-off required from a different user.
-          {remainingSignoffs > 1 && (
+          {remainingRequiredRoles.length > 1 && (
             <span style={{ color: 'var(--text-secondary)' }}>
-              {' '}({remainingSignoffs} remaining)
+              {' '}({remainingRequiredRoles.length} roles remaining)
             </span>
           )}
           <div style={{ marginTop: 'var(--space-sm)' }}>

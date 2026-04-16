@@ -8099,9 +8099,12 @@
             "type": "array",
             "title": "Sign Off Roles Required"
           },
-          "signoffs_completed": {
-            "type": "integer",
-            "title": "Signoffs Completed"
+          "signoffs_completed_roles": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Signoffs Completed Roles"
           },
           "estimated_hours": {
             "type": "number",
@@ -8184,7 +8187,7 @@
           "inspection_hold",
           "safety_critical",
           "sign_off_roles_required",
-          "signoffs_completed",
+          "signoffs_completed_roles",
           "estimated_hours",
           "started_at",
           "completed_at",

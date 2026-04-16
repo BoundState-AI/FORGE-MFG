@@ -35,7 +35,7 @@ import uuid as _uuid
 from datetime import UTC, datetime
 
 from fastapi import HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from forge.api.concurrency import (
@@ -302,26 +302,41 @@ def _serialize_predecessor_summary(pred: Operation) -> dict[str, object]:
     }
 
 
-async def _count_signoffs_for_cycle(
+async def _distinct_signoff_roles_for_cycle(
     session: AsyncSession,
     op_id: _uuid.UUID,
     execution_cycle: int,
-) -> int:
-    """Count sign-off events recorded against `op_id` in `execution_cycle`.
+) -> list[str]:
+    """Return the DISTINCT roles signed off against `op_id` in `cycle`.
 
-    Why a dedicated COUNT instead of len(_signoffs_for_op(...)): the
-    detail endpoint needs only the cardinality, and an explicit COUNT
-    lets the planner skip row materialization.  Cycle-scoped because
-    spec §9 resets the gate on rework — sign-offs from a prior cycle
-    must not count toward the current cycle's completion.
+    GC-3 review round 4 (Codex Medium): the SignOffEvent unique
+    constraint is (operation_id, user_id, role, execution_cycle) —
+    two DIFFERENT users may sign the SAME role.  A raw count of those
+    rows is therefore NOT a faithful proxy for required-role coverage.
+    The frontend gate must compare required roles against the DISTINCT
+    set of roles that have at least one sign-off this cycle, not
+    against the cardinality of the underlying rows.
+
+    Returned ASCENDING-sorted so the wire shape (and therefore the
+    frontend banner derivation) is stable across runs.
+
+    Cycle-scoped because spec §9 resets the gate on rework — sign-offs
+    from a prior cycle must not count toward the current cycle's
+    completion.
     """
     from forge.models.inspection import SignOffEvent
 
-    stmt = select(func.count()).select_from(SignOffEvent).where(
-        SignOffEvent.operation_id == op_id,
-        SignOffEvent.execution_cycle == execution_cycle,
+    stmt = (
+        select(SignOffEvent.role)
+        .where(
+            SignOffEvent.operation_id == op_id,
+            SignOffEvent.execution_cycle == execution_cycle,
+        )
+        .distinct()
+        .order_by(SignOffEvent.role.asc())
     )
-    return int((await session.execute(stmt)).scalar() or 0)
+    result = await session.execute(stmt)
+    return [str(row[0]) for row in result.all()]
 
 
 async def get_operation_detail(
@@ -378,12 +393,14 @@ async def get_operation_detail(
         # column defaults to an empty list; normalize to list so the
         # Pydantic validator doesn't choke on None from legacy rows.
         "sign_off_roles_required": list(op.sign_off_roles_required or []),
-        # GC-3 review round 3: per-cycle sign-off count.  Server-side
-        # truth so the frontend banner gate survives the full-page
-        # Cognito redirect of the second-signer flow (a purely-local
-        # counter would re-zero on redirect, then mis-fire the banner
-        # after the second sign-off lands).
-        "signoffs_completed": await _count_signoffs_for_cycle(
+        # GC-3 review round 4 (Codex Medium): per-cycle DISTINCT
+        # covered-role list.  Server-side truth so the frontend banner
+        # gate survives the full-page Cognito redirect of the
+        # second-signer flow.  A list — not a count — because the
+        # SignOffEvent unique constraint allows two different users
+        # to sign the SAME role; a raw count would falsely satisfy a
+        # multi-role gate covered only redundantly.
+        "signoffs_completed_roles": await _distinct_signoff_roles_for_cycle(
             session, op.id, op.execution_cycle,
         ),
         "estimated_hours": op.estimated_hours,

@@ -52,6 +52,10 @@ _ASYNC_URL = os.getenv(
 SYSTEM_USER_ID = "00000000-0000-0000-0000-000000000001"
 RELEASER_USER_ID = "00000000-0000-0000-0000-0000000000B0"
 INSPECTOR_USER_ID = "00000000-0000-0000-0000-0000000000B1"
+# Third user for the round-4 duplicate-role guard test — proves that
+# two different users signing the SAME role do NOT satisfy a multi-role
+# gate (the role list dedupes; the underlying count does not).
+SECOND_INSPECTOR_USER_ID = "00000000-0000-0000-0000-0000000000B2"
 
 
 def _db_available() -> bool:
@@ -119,6 +123,10 @@ class TestOperationDetail:
         self.prog_id = _ensure_test_program()
         _ensure_user(RELEASER_USER_ID, "rel-opdet@test.com", "Releaser OpDet")
         _ensure_user(INSPECTOR_USER_ID, "insp-opdet@test.com", "Inspector OpDet")
+        _ensure_user(
+            SECOND_INSPECTOR_USER_ID,
+            "insp2-opdet@test.com", "Inspector2 OpDet",
+        )
 
         settings = Settings(
             env="test", debug=False, auth_mode="local",
@@ -323,80 +331,32 @@ class TestOperationDetail:
         assert body["sign_off_roles_required"] == []
         assert body["version"] >= 1
 
-    @pytest.mark.asyncio
-    async def test_signoffs_completed_counts_current_cycle(self) -> None:
-        """GC-3 review round 3: `signoffs_completed` is the per-cycle count.
+    async def _seed_signoffs(
+        self,
+        op: dict[str, Any],
+        rows: list[tuple[str, uuid.UUID]],
+    ) -> None:
+        """Insert sign-off events directly via the model.
 
-        Why server-side instead of frontend-derived: the SignOffPanel
-        gates the second-signer banner on whether MORE sign-offs are
-        required.  A purely client-side counter is destroyed by the
-        re-auth full-page redirect, so the truth must live on the
-        server.  The count is scoped to `execution_cycle` because a
-        rework cycle resets the gate per spec §9 — sign-offs from
-        prior cycles do not count toward the current cycle's
-        completion.
-
-        Coverage:
-          0 sign-offs        -> count == 0
-          1 sign-off  cycle1 -> count == 1
-          2 sign-offs cycle1 -> count == 2
-          (sign-offs from a prior cycle would not count, but reaching
-           that state requires the rework path which lives in another
-           suite — covered there.)
+        Each row is `(role, user_id)`.  The create-signoff API surface
+        has its own auth-freshness + SoD machinery covered elsewhere;
+        this read-detail suite needs deterministic seed-state without
+        re-driving that flow.  Same-transaction audit records keep the
+        hash chain honest so the integrity verifier is unaffected.
         """
-        from forge.audit.logger import create_audit_record
-        from forge.models.enums import ActorType, SignOffAction
-        from forge.models.inspection import SignOffEvent
-
-        self._clear_override()
-        async with await self._client() as client:
-            r = await client.post(
-                "/api/work-orders",
-                json={
-                    "program_id": self.prog_id,
-                    "engine_serial": f"E-SOC-{uuid.uuid4().hex[:6]}",
-                    "module": "Powerhead",
-                    "build_phase": "fabrication",
-                },
-                headers={"Idempotency-Key": str(uuid.uuid4())},
-            )
-            assert r.status_code == 201, r.text
-            wo = r.json()
-
-            r = await client.post(
-                f"/api/work-orders/{wo['id']}/operations",
-                json={
-                    "description": "Dual-signoff weld",
-                    "sequence": 1,
-                    "safety_critical": True,
-                    "sign_off_roles_required": ["operator", "inspector"],
-                },
-                headers={"Idempotency-Key": str(uuid.uuid4())},
-            )
-            assert r.status_code == 201, r.text
-            op = r.json()
-
-            # Initial state — no sign-offs yet.
-            r = await client.get(f"/api/operations/{op['id']}")
-            assert r.status_code == 200, r.text
-            assert r.json()["signoffs_completed"] == 0
-
-        # Insert two sign-off events directly via the model so this
-        # test stays focused on the read shape (the create-signoff
-        # surface has its own auth-freshness machinery covered
-        # elsewhere).  Same-transaction audit records keep the chain
-        # honest so the integrity verifier is unaffected.
         from datetime import UTC
         from datetime import datetime as _dt
 
         from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+
+        from forge.audit.logger import create_audit_record
+        from forge.models.enums import ActorType, SignOffAction
+        from forge.models.inspection import SignOffEvent
+
         engine = create_async_engine(_ASYNC_URL)
         try:
             async with AsyncSession(engine) as session, session.begin():
-                for role, user_id in (
-                    ("operator", uuid.UUID(RELEASER_USER_ID)),
-                    ("inspector", uuid.UUID(INSPECTOR_USER_ID)),
-                ):
+                for role, user_id in rows:
                     ev = SignOffEvent(
                         operation_id=uuid.UUID(op["id"]),
                         user_id=user_id,
@@ -429,10 +389,104 @@ class TestOperationDetail:
         finally:
             await engine.dispose()
 
+    async def _create_dual_signoff_op(
+        self, sign_off_roles: list[str],
+    ) -> dict[str, Any]:
+        """Create a WO + a single safety-critical op with the given
+        sign_off_roles_required.  Returns the op JSON."""
+        self._clear_override()
+        async with await self._client() as client:
+            r = await client.post(
+                "/api/work-orders",
+                json={
+                    "program_id": self.prog_id,
+                    "engine_serial": f"E-SO-{uuid.uuid4().hex[:6]}",
+                    "module": "Powerhead",
+                    "build_phase": "fabrication",
+                },
+                headers={"Idempotency-Key": str(uuid.uuid4())},
+            )
+            assert r.status_code == 201, r.text
+            wo = r.json()
+
+            r = await client.post(
+                f"/api/work-orders/{wo['id']}/operations",
+                json={
+                    "description": "Dual-signoff op",
+                    "sequence": 1,
+                    "safety_critical": True,
+                    "sign_off_roles_required": sign_off_roles,
+                },
+                headers={"Idempotency-Key": str(uuid.uuid4())},
+            )
+            assert r.status_code == 201, r.text
+            return r.json()  # type: ignore[no-any-return]
+
+    @pytest.mark.asyncio
+    async def test_signoffs_completed_roles_lists_distinct_roles(self) -> None:
+        """GC-3 review round 4: `signoffs_completed_roles` is the
+        per-cycle DISTINCT role list (not a raw count).
+
+        Why a list instead of a count: the model only forbids duplicate
+        (op, user, role, cycle) tuples, so two DIFFERENT users can sign
+        the SAME role.  A raw count of 2 against a 2-role required set
+        would falsely satisfy the gate even when one of the required
+        roles is still uncovered.  See test_duplicate_role_does_not_*
+        below for the bug case directly.
+
+        Coverage in this test:
+          0 sign-offs                                  -> []
+          operator + inspector signed                  -> ['inspector','operator']
+          (sorted ascending so the wire shape is stable across runs)
+        """
+        op = await self._create_dual_signoff_op(["operator", "inspector"])
+
+        async with await self._client() as client:
+            r = await client.get(f"/api/operations/{op['id']}")
+            assert r.status_code == 200, r.text
+            assert r.json()["signoffs_completed_roles"] == []
+
+        await self._seed_signoffs(op, [
+            ("operator", uuid.UUID(RELEASER_USER_ID)),
+            ("inspector", uuid.UUID(INSPECTOR_USER_ID)),
+        ])
+
         async with await self._client() as client:
             r = await client.get(f"/api/operations/{op['id']}")
         assert r.status_code == 200, r.text
-        assert r.json()["signoffs_completed"] == 2
+        roles = r.json()["signoffs_completed_roles"]
+        assert sorted(roles) == ["inspector", "operator"]
+
+    @pytest.mark.asyncio
+    async def test_duplicate_role_does_not_falsely_satisfy_gate(self) -> None:
+        """GC-3 round 4 (Codex Medium): two users signing the SAME role
+        must NOT pass the multi-role gate.
+
+        The previous round-3 contract returned a raw count, so:
+          required = ['inspector', 'qa_manager']
+          users    = [user_A as inspector, user_B as inspector]
+          count    = 2 == len(required)  -> falsely "satisfied"
+          coverage = ['inspector']        -> qa_manager STILL missing
+
+        With the role-list contract this surface returns the
+        DISTINCT covered-role set, so the frontend can compute
+        `remaining = required - covered` and keep the banner up.
+        """
+        op = await self._create_dual_signoff_op(["inspector", "qa_manager"])
+
+        # Two DIFFERENT users sign the SAME role.
+        await self._seed_signoffs(op, [
+            ("inspector", uuid.UUID(INSPECTOR_USER_ID)),
+            ("inspector", uuid.UUID(SECOND_INSPECTOR_USER_ID)),
+        ])
+
+        async with await self._client() as client:
+            r = await client.get(f"/api/operations/{op['id']}")
+        assert r.status_code == 200, r.text
+        roles = r.json()["signoffs_completed_roles"]
+        # The gate is NOT satisfied — qa_manager remains uncovered.
+        assert roles == ["inspector"]
+        assert "qa_manager" not in roles
 
     @pytest.mark.asyncio
     async def test_sign_off_roles_required_round_trips(self) -> None:

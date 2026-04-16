@@ -212,15 +212,30 @@ class OperationDetailOut(BaseModel):
     # different user.") when more than one role is required.  Default
     # empty list to match the ORM model default.
     sign_off_roles_required: list[str]
-    # GC-3 review round 3: per-cycle count of recorded sign-offs.
-    # Source-of-truth for the SignOffPanel banner gate so the count
+    # GC-3 review round 4 (Codex Medium): per-cycle DISTINCT covered-role
+    # list — NOT a raw count.
+    #
+    # Source-of-truth for the SignOffPanel banner gate so the gate
     # survives the full-page Cognito redirect of the second-signer
     # flow (component state is destroyed across the redirect; a
     # purely-local counter would re-zero and incorrectly re-render
-    # the banner after the second sign-off lands).  Scoped to
-    # `execution_cycle` because rework resets the gate per spec §9 —
-    # sign-offs from prior cycles do not count.
-    signoffs_completed: int
+    # the banner after the second sign-off lands).
+    #
+    # Why a list instead of a count: the SignOffEvent model only
+    # forbids duplicate (operation_id, user_id, role, execution_cycle)
+    # tuples — two DIFFERENT users may sign the SAME role.  A raw
+    # count of 2 against a 2-role required set would falsely satisfy
+    # the gate even when one of the required roles is still uncovered.
+    # The frontend computes
+    #   remainingRequiredRoles = required \ signoffs_completed_roles
+    # and keeps the banner up while remainingRequiredRoles is non-empty.
+    #
+    # Scoped to `execution_cycle` because rework resets the gate per
+    # spec §9 — sign-offs from prior cycles do not count.
+    #
+    # Sorted ascending so the wire shape is stable across runs (the
+    # service's ORDER BY enforces this).
+    signoffs_completed_roles: list[str]
     estimated_hours: float
     started_at: datetime | None
     completed_at: datetime | None

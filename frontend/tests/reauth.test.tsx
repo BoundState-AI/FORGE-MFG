@@ -116,10 +116,10 @@ function renderPanel(overrides?: Partial<React.ComponentProps<typeof SignOffPane
           operationDescription="Weld injector ports"
           isSafetyCritical
           signOffRolesRequired={['inspector', 'engineer']}
-          /* GC-3 round 3: server-side per-cycle count.  Default 0
-             (no sign-offs yet) — tests opt into >0 to exercise the
-             banner state. */
-          signoffsCompleted={0}
+          /* GC-3 round 4: server-side DISTINCT covered-role list.
+             Default empty (no sign-offs yet) — tests opt into a
+             non-empty list to exercise the banner state. */
+          signoffsCompletedRoles={[]}
           onSignOffSuccess={vi.fn()}
           {...overrides}
         />
@@ -265,13 +265,12 @@ describe('SignOffPanel reauth recovery', () => {
     expect(callArgs?.[2]).toBe(buffer?.idempotencyKey);
   });
 
-  it('renders the §9.2 second-signer banner from server-side count', () => {
-    /* GC-3 round 3 finding 3: banner visibility derives from
-       `signoffsCompleted` (server truth), not from a local mutation
-       success.  This keeps the banner correct across the full-page
-       Cognito redirect of the second-signer flow.  Test mirrors the
-       state the server reports after the first sign-off lands. */
-    renderPanel({ signoffsCompleted: 1 });
+  it('renders the §9.2 second-signer banner from server-side coverage', () => {
+    /* GC-3 round 3/4: banner visibility derives from
+       `signoffsCompletedRoles` (server truth), not from a local
+       mutation success.  This keeps the banner correct across the
+       full-page Cognito redirect of the second-signer flow. */
+    renderPanel({ signoffsCompletedRoles: ['inspector'] });
 
     const banner = screen.getByTestId('second-signer-banner');
     expect(banner).toHaveTextContent(/First sign-off recorded/i);
@@ -282,13 +281,41 @@ describe('SignOffPanel reauth recovery', () => {
     ).toBeInTheDocument();
   });
 
-  it('hides the banner once the server reports all required sign-offs are done', () => {
-    /* GC-3 round 3 finding 3: when count == required, the gate is
-       satisfied and the banner must disappear.  Pre-fix this stayed
-       true forever once flipped, so the user saw "second sign-off
+  it('hides the banner only when every required role is actually covered', () => {
+    /* When required ⊆ covered, the gate is satisfied and the banner
+       must disappear.  Pre-fix the count-based gate stayed true
+       forever once flipped, so the user saw "second sign-off
        required" even after BOTH sign-offs landed. */
-    renderPanel({ signoffsCompleted: 2 });
+    renderPanel({
+      signOffRolesRequired: ['inspector', 'engineer'],
+      signoffsCompletedRoles: ['inspector', 'engineer'],
+    });
     expect(screen.queryByTestId('second-signer-banner')).toBeNull();
+  });
+
+  it('keeps the banner up when two users covered only the SAME required role', () => {
+    /* GC-3 round 4 (Codex Medium): with a count-based gate, two
+       different users signing as 'inspector' against a
+       ['inspector','engineer'] requirement would push count == 2 ==
+       required.length and FALSELY satisfy the gate, hiding both the
+       banner AND the form even though 'engineer' was still missing.
+       The role-list contract makes this impossible — the panel sees
+       coverage = ['inspector'] (deduped on the server) and surfaces
+       the banner because 'engineer' remains uncovered. */
+    renderPanel({
+      signOffRolesRequired: ['inspector', 'engineer'],
+      signoffsCompletedRoles: ['inspector'],
+    });
+
+    const banner = screen.getByTestId('second-signer-banner');
+    expect(banner).toBeInTheDocument();
+    expect(banner).toHaveTextContent(/Second sign-off required/i);
+    /* The first-attempt form must ALSO be hidden — coverage > 0 means
+       this op already has a sign-off; only the second-signer flow
+       advances the gate. */
+    expect(
+      screen.queryByRole('button', { name: /^Sign Off$/i }),
+    ).toBeNull();
   });
 });
 
