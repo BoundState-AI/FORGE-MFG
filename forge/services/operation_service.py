@@ -582,28 +582,33 @@ async def start_operation(
 ) -> Operation:
     """Start operation: pending|rework|hold → in_progress, create labor entry.
 
-    State leaving: pending, rework, or hold.  State entering: in_progress.
+    State leaving: pending or hold.  State entering: in_progress.
     Invariant: valid transition per spec §4.3.  Also transitions WO to
     in_progress if it is currently released (first op start drives WO state).
 
-    If resuming from rework, execution_cycle is incremented per spec §3.1:
-    "execution_cycle is incremented on each rework → in_progress transition."
+    Reopen (complete → in_progress) is NOT handled by this route —
+    GC-2 routes reopen through NCR disposition
+    (ncr_service._reopen_operation) which bypasses the start
+    surface entirely.  A client attempting to /start a completed
+    op gets a 422 so a second /start on a reopened-elsewhere op
+    cannot double-bump cycle or overwrite active_since.
     """
-    # Capture pre-transition status to detect rework → in_progress
     op = await _get_op(session, op_id, program_codes=program_codes)
-    was_rework = op.status == OpStatus.rework
+    if op.status == OpStatus.complete:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Completed operations cannot be restarted directly; "
+                "reopen is driven by NCR disposition"
+            ),
+        )
 
     op = await _transition_op(
         session, op_id, OpStatus.in_progress, version, user_id,
         program_codes=program_codes,
     )
     now = datetime.now(UTC)
-    if not was_rework:
-        op.started_at = now
-
-    # Spec §3.1: increment execution_cycle on rework → in_progress
-    if was_rework:
-        op.execution_cycle += 1
+    op.started_at = op.started_at or now
 
     # UX spec v1.5.1 §5.1: active_since is the overdue-clock source and
     # MUST reset on every entry into in_progress (including rework and
@@ -868,44 +873,23 @@ async def hold_operation(
     )
 
 
-async def rework_operation(
-    session: AsyncSession, op_id: _uuid.UUID, version: int, user_id: _uuid.UUID,
-    program_codes: list[str] | None = None,
-) -> Operation:
-    """Rework: in_progress → rework.
-
-    State leaving: in_progress.  State entering: rework.
-    Invariant: valid transition per spec §4.3.
-    Does NOT increment execution_cycle here — that happens on the
-    subsequent rework → in_progress transition (resume after rework).
-    """
-    return await _transition_op(
-        session, op_id, OpStatus.rework, version, user_id,
-        program_codes=program_codes,
-    )
-
-
 async def resume_operation(
     session: AsyncSession, op_id: _uuid.UUID, version: int, user_id: _uuid.UUID,
     role: str, shift: str,
 ) -> Operation:
-    """Resume from hold or rework → in_progress.
+    """Resume from hold → in_progress.
 
-    State leaving: hold or rework.  State entering: in_progress.
-    Invariant: valid transition per spec §4.3.  If resuming from
-    rework, execution_cycle is incremented per spec §3.1 before any
-    new inspection/sign-off events are recorded against the operation.
-    A new labor entry is created for the resuming operator.
+    State leaving: hold.  State entering: in_progress.
+    Invariant: valid transition per spec §4.3.  The transient
+    rework state is retired in GC-2 (build spec v1.4.2) — reopen
+    now flows through NCR disposition (ncr_service._reopen_operation)
+    which bypasses this resume surface and increments
+    execution_cycle directly.  A new labor entry is created for
+    the resuming operator with the current execution_cycle.
     """
     op = await _get_op(session, op_id)
-    was_rework = op.status == OpStatus.rework
 
     op = await _transition_op(session, op_id, OpStatus.in_progress, version, user_id)
-
-    if was_rework:
-        # Spec §3.1: "execution_cycle is incremented on each
-        # rework → in_progress transition"
-        op.execution_cycle += 1
 
     now = datetime.now(UTC)
     # Spec §5.1: reset active_since on every entry into in_progress so

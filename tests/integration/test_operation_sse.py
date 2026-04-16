@@ -571,21 +571,77 @@ class TestOperationSSE:
         assert "done" in names, f"events: {names}"
 
     @pytest.mark.asyncio
-    async def test_no_operation_reopened_event_in_slice(self) -> None:
-        """Provisional operation_reopened is NOT wired in this slice."""
-        op = await self._make_started_op(inspection_hold=True)
+    async def test_operation_reopened_published_on_ncr_rework_disposition(
+        self,
+    ) -> None:
+        """GC-2: NCR rework disposition publishes operation_reopened.
 
-        # Run a representative sequence: start, inspect, try to trigger
-        # any codepath that used to publish reopened.
+        Drives an op through complete, creates + dispositions an
+        NCR with disposition=rework, and asserts the Operation
+        Execution stream saw the `operation_reopened` event with
+        the ncr_id + disposition + new execution_cycle payload the
+        UX spec §6.5.2 names.
+        """
+        op = await self._make_started_op()
+        wo_id = op["_wo_id"]
+
+        # Stop + complete the op via public API.
+        version = op["version"]
+        async with await self._client() as client:
+            r = await client.post(
+                f"/api/operations/{op['id']}/stop",
+                json={"version": version},
+                headers={"Idempotency-Key": str(uuid.uuid4())},
+            )
+            assert r.status_code == 200, r.text
+            version = r.json()["version"]
+
+            r = await client.post(
+                f"/api/operations/{op['id']}/complete",
+                json={"version": version},
+                headers={"Idempotency-Key": str(uuid.uuid4())},
+            )
+            assert r.status_code == 200, r.text
+
+        # Drain start / complete / WO state events so we can locate
+        # the operation_reopened signal unambiguously.
+        await self._drain_bus_for(op["id"], n=2)
+
+        # Create NCR as inspector, disposition as engineer — SOD-002
+        # forbids the initiator from dispositioning the same NCR.
         self._override_as(INSPECTOR_USER_ID, roles=["inspector"])
         async with await self._client() as client:
             r = await client.post(
-                f"/api/operations/{op['id']}/inspect",
-                json={"criteria": "x", "result": "accept"},
+                "/api/ncrs",
+                json={
+                    "work_order_id": wo_id,
+                    "operation_id": op["id"],
+                    "description": "reopen via SSE test",
+                },
                 headers={"Idempotency-Key": str(uuid.uuid4())},
             )
-            assert r.status_code == 201
+            assert r.status_code == 201, r.text
+            ncr = r.json()
+        self._override_as(ENGINEER_USER_ID, roles=["engineer"])
+        async with await self._client() as client:
+            r = await client.patch(
+                f"/api/ncrs/{ncr['id']}/disposition",
+                json={
+                    "version": ncr["version"],
+                    "disposition": "rework",
+                    "disposition_rationale": "reopen for SSE",
+                },
+            )
+            assert r.status_code == 200, r.text
         self._clear_override()
 
-        events = await self._drain_bus_for(op["id"], n=2)
-        assert all(e.event != "operation_reopened" for e in events)
+        events = await self._drain_bus_for(op["id"], n=4)
+        reopened = next(
+            (e for e in events if e.event == "operation_reopened"),
+            None,
+        )
+        assert reopened is not None, f"events: {[e.event for e in events]}"
+        assert reopened.data["operation_id"] == op["id"]
+        assert reopened.data["ncr_id"] == ncr["id"]
+        assert reopened.data["disposition"] == "rework"
+        assert reopened.data["execution_cycle"] == 2

@@ -410,45 +410,59 @@ class TestOperationDetail:
         )
         op = ops[0]
 
-        # Cycle 1: start, accept, then send to rework.
+        # Cycle 1: start, accept, stop, complete so the GC-2 reopen
+        # path (NCR disposition) can drive the cycle bump.
         await self._start_op(op)
         await self._record_inspection(op["id"], "accept")
 
-        # Reload to get the post-inspection version (started state moves
-        # to in_progress; we need the latest version for the rework call).
         async with await self._client() as client:
             resp = await client.get(f"/api/operations/{op['id']}")
         assert resp.status_code == 200
         cycle1_view = resp.json()
         assert cycle1_view["execution_cycle"] == 1
         assert cycle1_view["hold_point_status"] == "satisfied"
-        cycle1_version = cycle1_view["version"]
 
-        # Send the op to rework — engineer permission required.
+        async with await self._client() as client:
+            resp = await client.post(
+                f"/api/operations/{op['id']}/stop",
+                json={"version": cycle1_view["version"]},
+                headers={"Idempotency-Key": str(uuid.uuid4())},
+            )
+            assert resp.status_code == 200, resp.text
+            stopped = resp.json()
+            resp = await client.post(
+                f"/api/operations/{op['id']}/complete",
+                json={"version": stopped["version"]},
+                headers={"Idempotency-Key": str(uuid.uuid4())},
+            )
+            assert resp.status_code == 200, resp.text
+
+        # Reopen via NCR disposition (build spec v1.4.2 GC-2).
+        # Create the NCR as RELEASER_USER_ID (a different user from
+        # the SYSTEM dispositioner so SOD-002 passes).
         self._override_as(RELEASER_USER_ID, roles=["engineer"])
         async with await self._client() as client:
             resp = await client.post(
-                f"/api/operations/{op['id']}/rework",
-                json={"version": cycle1_version},
+                "/api/ncrs",
+                json={
+                    "work_order_id": _wo["id"],
+                    "operation_id": op["id"],
+                    "description": "rework driver",
+                },
                 headers={"Idempotency-Key": str(uuid.uuid4())},
             )
         self._clear_override()
-        assert resp.status_code == 200, resp.text
-        rework_view = resp.json()
+        assert resp.status_code == 201, resp.text
+        ncr = resp.json()
 
-        # Cycle 2: restart the op.  Per operation_service.start_operation,
-        # rework -> in_progress transitions atomically increment
-        # execution_cycle.
-        self._clear_override()
         async with await self._client() as client:
-            resp = await client.post(
-                f"/api/operations/{op['id']}/start",
+            resp = await client.patch(
+                f"/api/ncrs/{ncr['id']}/disposition",
                 json={
-                    "version": rework_view["version"],
-                    "role": "operator",
-                    "shift": "day",
+                    "version": ncr["version"],
+                    "disposition": "rework",
+                    "disposition_rationale": "reopen for cycle 2",
                 },
-                headers={"Idempotency-Key": str(uuid.uuid4())},
             )
         assert resp.status_code == 200, resp.text
 
@@ -456,7 +470,6 @@ class TestOperationDetail:
             resp = await client.get(f"/api/operations/{op['id']}")
         assert resp.status_code == 200
         body = resp.json()
-        # Cycle has advanced and the cycle-1 accept must NOT count.
         assert body["execution_cycle"] == 2
         assert body["hold_point_status"] == "pending"
 

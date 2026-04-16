@@ -474,56 +474,14 @@ class TestInspectionSignOff:
             )
         assert resp.status_code == 200, resp.text
 
-    @pytest.mark.asyncio
-    async def test_rework_invalidates_prior_inspection(self) -> None:
-        """COMP-001 cycle invariant: inspection from cycle 1 does not satisfy
-        the hold in cycle 2 after rework → in_progress.
-
-        Spec §3.1: execution_cycle increments on each rework→in_progress.
-        """
-        op = await self._make_op(inspection_hold=True)
-
-        # Cycle 1 inspection accepts
-        self._override_as(INSPECTOR_USER_ID, roles=["inspector"])
-        async with await self._client() as client:
-            r = await client.post(
-                f"/api/operations/{op['id']}/inspect",
-                json={"criteria": "x", "result": "accept"},
-                headers={"Idempotency-Key": str(uuid.uuid4())},
-            )
-            assert r.status_code == 201, r.text
-
-        # Operator reworks then resumes (cycle 1 → 2)
-        self._clear_override()
-        async with await self._client() as client:
-            r = await client.post(
-                f"/api/operations/{op['id']}/rework",
-                json={"version": op["version"]},
-                headers={"Idempotency-Key": str(uuid.uuid4())},
-            )
-            assert r.status_code == 200, r.text
-            reworked = r.json()
-
-            r = await client.post(
-                f"/api/operations/{op['id']}/start",
-                json={
-                    "version": reworked["version"],
-                    "role": "operator", "shift": "day",
-                },
-                headers={"Idempotency-Key": str(uuid.uuid4())},
-            )
-            assert r.status_code == 200, r.text
-            resumed = r.json()
-            assert resumed["execution_cycle"] == 2
-
-            # Try to complete — old-cycle inspection must not satisfy hold
-            r = await client.post(
-                f"/api/operations/{op['id']}/complete",
-                json={"version": resumed["version"]},
-                headers={"Idempotency-Key": str(uuid.uuid4())},
-            )
-        assert r.status_code == 422
-        assert "COMP-001" in str(r.json())
+    # The prior-cycle inspection-invalidation invariant (COMP-001
+    # over current execution_cycle) is exercised end-to-end via the
+    # GC-2 NCR-driven reopen path in
+    # tests/integration/test_reopen_reactivate.py::
+    # test_prior_cycle_inspection_does_not_satisfy_after_reopen.
+    # The original test here went through the /rework surface which
+    # is retired (build spec v1.4.2 GC-2 removes the transient
+    # rework state).
 
     # ------------------------------------------------------------------
     # Full happy path on a safety-critical operation

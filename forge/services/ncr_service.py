@@ -37,6 +37,10 @@ from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from forge.api.concurrency import (
+    build_version_conflict_detail,
+    composite_conflict_response,
+)
 from forge.audit.logger import create_audit_record
 from forge.models.enums import (
     ActorType,
@@ -548,6 +552,109 @@ async def _apply_reopen_side_effect(
         )
 
 
+async def _check_disposition_version_assertions(
+    session: AsyncSession,
+    ncr: NonconformanceReport,
+    data: NCRDisposition,
+) -> None:
+    """UX spec v1.5.1 §6.3.3 composite check for NCR disposition.
+
+    Validates every supplied assertion against the live row BEFORE
+    any mutation.  A single stale version triggers a composite 409
+    listing every mismatched entity (NCR, operation, work_order) so
+    the client can render per-entity diffs without a second round
+    trip.  Only entities named in `version_assertions` are checked
+    — absent assertions fall through to the existing single-entity
+    version handling.
+
+    Serializes fresh entity snapshots using the matching XxxOut
+    schemas so the §6.3.2 `current_entity` field carries the shape
+    the read endpoints would return.
+    """
+    assertions = data.version_assertions
+    if assertions is None:
+        return
+
+    from forge.models.operation import Operation
+    from forge.models.work_order import WorkOrder
+    from forge.schemas.ncr import NCROut
+    from forge.schemas.operation import OperationOut
+    from forge.schemas.work_order import WorkOrderOut
+
+    conflicts: list[dict[str, object]] = []
+
+    if (
+        assertions.ncr is not None
+        and ncr.version != assertions.ncr
+    ):
+        conflicts.append(build_version_conflict_detail(
+            entity_type="NonconformanceReport",
+            entity_id=str(ncr.id),
+            your_version=assertions.ncr,
+            current_version=ncr.version,
+            current_entity=NCROut.model_validate(ncr).model_dump(
+                mode="json",
+            ),
+        ))
+
+    if assertions.operation is not None:
+        if ncr.operation_id is None:
+            # Client asserted an operation version for an NCR that
+            # has no linked operation — reject as a mis-built
+            # request rather than silently skip.
+            conflicts.append(build_version_conflict_detail(
+                entity_type="Operation",
+                entity_id="",
+                your_version=assertions.operation,
+                current_version=0,
+                current_entity=None,
+            ))
+        else:
+            op = await session.get(Operation, ncr.operation_id)
+            if op is None:
+                conflicts.append(build_version_conflict_detail(
+                    entity_type="Operation",
+                    entity_id=str(ncr.operation_id),
+                    your_version=assertions.operation,
+                    current_version=0,
+                    current_entity=None,
+                ))
+            elif op.version != assertions.operation:
+                conflicts.append(build_version_conflict_detail(
+                    entity_type="Operation",
+                    entity_id=str(op.id),
+                    your_version=assertions.operation,
+                    current_version=op.version,
+                    current_entity=OperationOut.model_validate(op).model_dump(
+                        mode="json",
+                    ),
+                ))
+
+    if assertions.work_order is not None:
+        wo = await session.get(WorkOrder, ncr.work_order_id)
+        if wo is None:
+            conflicts.append(build_version_conflict_detail(
+                entity_type="WorkOrder",
+                entity_id=str(ncr.work_order_id),
+                your_version=assertions.work_order,
+                current_version=0,
+                current_entity=None,
+            ))
+        elif wo.version != assertions.work_order:
+            conflicts.append(build_version_conflict_detail(
+                entity_type="WorkOrder",
+                entity_id=str(wo.id),
+                your_version=assertions.work_order,
+                current_version=wo.version,
+                current_entity=WorkOrderOut.model_validate(wo).model_dump(
+                    mode="json",
+                ),
+            ))
+
+    if conflicts:
+        raise composite_conflict_response(conflicts)
+
+
 async def disposition_ncr(
     session: AsyncSession,
     ncr_id: _uuid.UUID,
@@ -584,6 +691,14 @@ async def disposition_ncr(
         check_version(ncr, data.version, entity_type="NonconformanceReport")
     except VersionConflictError as e:
         raise version_conflict_response(e) from e
+
+    # UX spec v1.5.1 §6.3.3 composite concurrency: when the client
+    # supplied per-entity version_assertions, validate ALL of them
+    # up-front so a single stale version surfaces as a composite
+    # 409 before any mutation fires.  The legacy single-NCR
+    # `version` field above remains the primary gate; this is
+    # additive.
+    await _check_disposition_version_assertions(session, ncr, data)
 
     if not validate_ncr_transition(ncr.status, NCRStatus.dispositioned):
         raise HTTPException(

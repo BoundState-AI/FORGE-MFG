@@ -273,25 +273,13 @@ async def hold_operation(
     return OperationOut.model_validate(op)
 
 
-@router.post("/api/operations/{op_id}/rework", response_model=OperationOut)
-async def rework_operation(
-    op_id: uuid.UUID,
-    body: OperationTransition,
-    response: Response,
-    if_match: str | None = Header(default=None, alias="If-Match"),
-    auth: AuthContext = Depends(require_permission("op:rework")),
-    session: AsyncSession = Depends(get_db),
-) -> OperationOut:
-    """Send operation to rework."""
-    expected = resolve_version_assertion(body.version, if_match)
-    op = await op_svc.rework_operation(
-        session, op_id, expected, uuid.UUID(auth.sub),
-        program_codes=auth.programs,
-    )
-    await session.commit()
-    await session.refresh(op)
-    response.headers["ETag"] = strong_etag(op.version)
-    return OperationOut.model_validate(op)
+# The legacy POST /api/operations/{op_id}/rework endpoint was removed
+# in GC-2 (build spec v1.4.2).  The frozen Phase-1 contract declares
+# "no transient rework status": reopen is a direct complete →
+# in_progress transition driven by NCR disposition, handled in
+# forge.services.ncr_service._reopen_operation.  OpStatus.rework
+# remains in the enum for schema compatibility but is unreachable
+# via any live surface.
 
 
 # ---------------------------------------------------------------------------
@@ -371,14 +359,15 @@ async def stream_operation_events_route(
     """Subscribe to sub-second operation updates (UX spec v1.5.1 §6.5.2).
 
     Events emitted: hold_point_changed, wo_state_changed,
-    labor_activity, ping (20s heartbeat), auth_expired (on token
+    labor_activity, operation_reopened (GC-2 reopen — fires when an
+    NCR disposition drives the op from complete → in_progress;
+    payload carries ncr_id, disposition, and the new
+    execution_cycle), ping (20s heartbeat), auth_expired (on token
     expiry), buffer_reset (when `Last-Event-ID` replay is
     unsatisfiable), error (on internal stream failure — client
     falls back to 30s polling per §6.5.2 error mapping), done
     (when the parent WO transitions to `closed` — the op stream is
-    permanently terminal at that point).  The operation_reopened
-    event is explicitly provisional per §5.3 / §6.5.2 and is NOT
-    emitted by this slice.
+    permanently terminal at that point).
 
     Authorization:
       - op:read permission at the route level.

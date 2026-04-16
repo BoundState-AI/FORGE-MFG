@@ -56,8 +56,30 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 
+def _strip_op_rework_permission() -> None:
+    """Remove op:rework from every role's permissions JSON array.
+
+    GC-2 retires the transient rework state and its /rework route.
+    Keeping op:rework seeded on engineer / qa_manager would leave
+    the DB's effective-permissions set out of sync with
+    ROLE_PERMISSIONS in auth.py — the same drift class the
+    inspect:read migration (c4a7d2e91b38) already documented.
+    The jsonb-dedupe idiom matches d68f3c2a10b9's precedent.
+    """
+    op.execute(
+        sa.text("""
+            UPDATE roles
+            SET permissions = (
+                cast(permissions AS jsonb) - :perm
+            )::json
+            WHERE cast(permissions AS jsonb) ? :perm
+        """).bindparams(perm="op:rework")
+    )
+
+
 def upgrade() -> None:
     """Add execution_cycle to labor + remediation_work_order_id to NCR."""
+    _strip_op_rework_permission()
     op.add_column(
         "labor_entries",
         sa.Column(

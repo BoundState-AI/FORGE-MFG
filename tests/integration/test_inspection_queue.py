@@ -494,38 +494,64 @@ class TestInspectionQueue:
 
     @pytest.mark.asyncio
     async def test_rework_invalidates_prior_cycle_accept(self) -> None:
-        """After rework → restart, cycle-1 accept must not satisfy cycle-2.
+        """After NCR-driven reopen, cycle-1 accept must not satisfy cycle-2.
 
         Mirrors COMP-001 semantics in the read surface: the queue must
-        show state=pending after the op returns to in_progress, even
-        though a historical accept exists for the prior cycle.
+        show state=pending after the op returns to in_progress via the
+        GC-2 reopen path, even though a historical accept exists for
+        the prior cycle.
         """
         wo, op = await self._seed_op(inspection_hold=True)
         insp = await self._inspect(op["id"], "accept")
 
-        # Load current op version to drive the rework → resume transition.
+        # Drive the op to complete so the NCR disposition reopen path
+        # is available (build spec v1.4.2 GC-2 retires the /rework
+        # surface; reopen is now direct complete → in_progress).
         self._clear_override()
         async with await self._client() as client:
             resp = await client.get(f"/api/operations/{op['id']}")
-            assert resp.status_code == 200, resp.text
             op_now = resp.json()
-
             resp = await client.post(
-                f"/api/operations/{op['id']}/rework",
+                f"/api/operations/{op['id']}/stop",
                 json={"version": op_now["version"]},
                 headers={"Idempotency-Key": str(uuid.uuid4())},
             )
             assert resp.status_code == 200, resp.text
             op_now = resp.json()
-
             resp = await client.post(
-                f"/api/operations/{op['id']}/start",
+                f"/api/operations/{op['id']}/complete",
+                json={"version": op_now["version"]},
+                headers={"Idempotency-Key": str(uuid.uuid4())},
+            )
+            assert resp.status_code == 200, resp.text
+
+        # Create + disposition the NCR as RELEASER_USER_ID so
+        # SOD-002 (initiator != dispositioner) passes — the
+        # default no-override SYSTEM user created the NCR, so a
+        # non-SYSTEM dispositioner is required.
+        self._override_as(RELEASER_USER_ID, roles=["engineer"])
+        async with await self._client() as client:
+            resp = await client.post(
+                "/api/ncrs",
                 json={
-                    "version": op_now["version"],
-                    "role": "operator",
-                    "shift": "day",
+                    "work_order_id": wo["id"],
+                    "operation_id": op["id"],
+                    "description": "reopen for cycle-2 check",
                 },
                 headers={"Idempotency-Key": str(uuid.uuid4())},
+            )
+            assert resp.status_code == 201, resp.text
+        self._clear_override()
+        ncr = resp.json()
+
+        async with await self._client() as client:
+            resp = await client.patch(
+                f"/api/ncrs/{ncr['id']}/disposition",
+                json={
+                    "version": ncr["version"],
+                    "disposition": "rework",
+                    "disposition_rationale": "test reopen",
+                },
             )
             assert resp.status_code == 200, resp.text
 
@@ -536,14 +562,11 @@ class TestInspectionQueue:
             "Prior-cycle accept leaked into the current cycle's "
             "queue state — regression of COMP-001 read semantics"
         )
-        # And the old `completed` row must NOT show this op under cycle 2.
         body_completed = await self._list(state="completed")
         assert op["id"] not in [
             r["operation_id"] for r in body_completed["items"]
         ]
-        # Suppress unused-variable warnings — `wo` and `insp` clarify
-        # the fixture setup for readers.
-        del wo, insp
+        del insp
 
     # ------------------------------------------------------------------
     # Per-cycle overdue reset — guard against started_at regression
@@ -551,16 +574,17 @@ class TestInspectionQueue:
 
     @pytest.mark.asyncio
     async def test_rework_restart_resets_overdue_clock(self) -> None:
-        """active_since must reset on rework → in_progress (§5.1).
+        """active_since must reset on NCR-driven reopen (§5.1).
 
         Seeds an op, backdates active_since to 3h ago → overdue.
-        Then rework + restart.  The start_operation service sets
-        active_since = now(), so the fresh cycle MUST bucket as
-        pending, not overdue.  Using started_at as the clock (the
-        pre-fix behavior) would fail this test because started_at
-        is not reset on rework restart.
+        Drives the op through complete + NCR rework disposition so
+        GC-2's direct-reopen path (ncr_service._reopen_operation)
+        sets active_since = now().  The fresh cycle MUST bucket as
+        pending, not overdue.
         """
-        _wo, op = await self._seed_op(inspection_hold=True)
+        wo, op = await self._seed_op(inspection_hold=True)
+        # Backdate first, while the op is still pending inspection,
+        # so the overdue-derivation precondition holds.
         _backdate_op_active_since(op["id"], hours_ago=3)
 
         body = await self._list(state="overdue")
@@ -568,31 +592,57 @@ class TestInspectionQueue:
             "Pre-condition: backdated op must start as overdue"
         )
 
-        # Drive rework → restart.
+        # Accept so the op can be completed (COMP-001).  The queue
+        # state flips away from overdue once hold_point_status is
+        # satisfied; that is expected — we only need the
+        # pre-condition above to have held.
+        await self._inspect(op["id"], "accept")
+
         self._clear_override()
         async with await self._client() as client:
             resp = await client.get(f"/api/operations/{op['id']}")
-            assert resp.status_code == 200
             op_now = resp.json()
-
             resp = await client.post(
-                f"/api/operations/{op['id']}/rework",
+                f"/api/operations/{op['id']}/stop",
                 json={"version": op_now["version"]},
                 headers={"Idempotency-Key": str(uuid.uuid4())},
             )
-            assert resp.status_code == 200
+            assert resp.status_code == 200, resp.text
             op_now = resp.json()
-
             resp = await client.post(
-                f"/api/operations/{op['id']}/start",
+                f"/api/operations/{op['id']}/complete",
+                json={"version": op_now["version"]},
+                headers={"Idempotency-Key": str(uuid.uuid4())},
+            )
+            assert resp.status_code == 200, resp.text
+
+        # Create NCR as RELEASER, disposition as SYSTEM (SOD-002
+        # initiator != dispositioner).
+        self._override_as(RELEASER_USER_ID, roles=["engineer"])
+        async with await self._client() as client:
+            resp = await client.post(
+                "/api/ncrs",
                 json={
-                    "version": op_now["version"],
-                    "role": "operator",
-                    "shift": "day",
+                    "work_order_id": wo["id"],
+                    "operation_id": op["id"],
+                    "description": "reopen for overdue-clock test",
                 },
                 headers={"Idempotency-Key": str(uuid.uuid4())},
             )
-            assert resp.status_code == 200
+            assert resp.status_code == 201, resp.text
+        self._clear_override()
+        ncr = resp.json()
+
+        async with await self._client() as client:
+            resp = await client.patch(
+                f"/api/ncrs/{ncr['id']}/disposition",
+                json={
+                    "version": ncr["version"],
+                    "disposition": "rework",
+                    "disposition_rationale": "reopen",
+                },
+            )
+            assert resp.status_code == 200, resp.text
 
         # Fresh cycle → active_since reset by start_operation → pending.
         body_pending = await self._list(state="pending")

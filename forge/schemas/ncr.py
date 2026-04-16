@@ -46,6 +46,34 @@ class NCRCreate(BaseModel):
     mrb_required: bool = False
 
 
+class NCRDispositionVersionAssertions(BaseModel):
+    """UX spec v1.5.1 §6.3.3 composite version assertions for NCR disposition.
+
+    NCR disposition is a composite mutation — a single call can
+    mutate the NCR (new status + disposition), reopen the linked
+    operation (complete → in_progress, cycle++), and reactivate the
+    parent work order (complete → in_progress).  Each entity gets
+    its own optional assertion; a single stale version triggers a
+    §6.3.3 composite 409 listing every mismatched entity in one
+    response.
+
+      - ncr:          the NCR being dispositioned.
+      - operation:    the linked operation that will reopen.
+      - work_order:   the parent WO that will reactivate.
+
+    All fields are optional — callers submit only the versions they
+    observed.  A missing field means "no assertion"; the server
+    proceeds without checking that entity's version beyond the
+    legacy single-NCR `version` field still validated below.  For
+    rework/repair with side effects, front-ends that care about
+    exact-match semantics SHOULD supply all three.
+    """
+
+    ncr: int | None = None
+    operation: int | None = None
+    work_order: int | None = None
+
+
 class NCRDisposition(BaseModel):
     """Request body for PATCH /api/ncrs/{id}/disposition (open → dispositioned).
 
@@ -57,6 +85,13 @@ class NCRDisposition(BaseModel):
     already `closed` (build spec v1.4.2 GC-2).  In the common case
     (parent WO not closed) the field is ignored — the parent WO is
     reactivated in place.
+
+    `version_assertions` is optional per UX spec §6.3.3 composite-
+    mutation concurrency.  When supplied, the service layer
+    validates each named entity's version against the live row
+    BEFORE any mutation, raising a single composite 409 listing
+    every mismatch.  When absent, only the legacy NCR-scoped
+    `version` field is checked — existing clients remain compatible.
     """
 
     version: int
@@ -67,6 +102,7 @@ class NCRDisposition(BaseModel):
     mrb_authority_id: uuid.UUID | None = None
     schedule_impact_days: int | None = None
     remediation_work_order_id: uuid.UUID | None = None
+    version_assertions: NCRDispositionVersionAssertions | None = None
 
 
 class NCRClose(BaseModel):

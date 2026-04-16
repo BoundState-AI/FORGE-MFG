@@ -56,16 +56,19 @@ VALID_WO_TRANSITIONS: dict[WOStatus, set[WOStatus]] = {
     WOStatus.closed: set(),
 }
 
-# Spec §4.3 + build spec v1.4.2 GC-2: valid operation transitions.
-# complete → in_progress is the Phase-1 direct-reopen path (driven by
-# NCR disposition rework / repair).  The legacy in_progress → rework →
-# in_progress path is preserved so the manual rework surface continues
-# to work; GC-2 live reopen skips the transient rework state.
+# Build spec v1.4.2 GC-2: valid operation transitions.  The
+# Phase-1 reopen path is a direct complete → in_progress transition
+# driven by NCR disposition (rework / repair).  The frozen spec
+# declares "no transient rework status"; the legacy
+# in_progress → rework → in_progress path is retired and
+# OpStatus.rework is no longer reachable via any live surface.
+# The enum value itself is retained so existing DB rows with that
+# value (if any) deserialize, but the transition map excludes it.
 VALID_OP_TRANSITIONS: dict[OpStatus, set[OpStatus]] = {
     OpStatus.pending: {OpStatus.in_progress},
-    OpStatus.in_progress: {OpStatus.complete, OpStatus.hold, OpStatus.rework},
+    OpStatus.in_progress: {OpStatus.complete, OpStatus.hold},
     OpStatus.hold: {OpStatus.in_progress},
-    OpStatus.rework: {OpStatus.in_progress},
+    OpStatus.rework: set(),
     OpStatus.complete: {OpStatus.in_progress},
 }
 

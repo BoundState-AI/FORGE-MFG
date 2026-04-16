@@ -288,7 +288,7 @@ ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
     "qa_manager": frozenset({
         "wo:create", "wo:update", "wo:release", "wo:hold", "wo:resume",
         "wo:complete", "wo:close", "op:create", "op:update", "op:delete",
-        "op:hold", "op:rework", "ncr:create", "ncr:disposition", "ncr:close",
+        "op:hold", "ncr:create", "ncr:disposition", "ncr:close",
         "sched:create", "sched:baseline", "sched:what_if", "labor:update_any",
         "doc:create", "doc:read", "doc:upload", "doc:finalize", "wo:read",
         "op:read", "ncr:read", "part:read", "sched:read", "dash:read",

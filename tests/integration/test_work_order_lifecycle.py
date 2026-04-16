@@ -395,13 +395,20 @@ class TestWorkOrderLifecycle:
         assert resp.status_code == 422
 
     @pytest.mark.asyncio
-    async def test_rework_increments_execution_cycle(self) -> None:
-        """Spec §3.1: rework → in_progress increments execution_cycle."""
+    async def test_rework_endpoint_is_retired(self) -> None:
+        """Build spec v1.4.2 GC-2: the /rework route is retired.
+
+        The transient rework state was removed from the live state
+        machine; cycle increments now flow through NCR disposition
+        (see tests/integration/test_reopen_reactivate.py).  This
+        test pins the retirement — a client hitting the old
+        endpoint gets a 404, not a successful transition to a
+        `rework` state the frontend would render incorrectly.
+        """
         async with await self._client() as client:
             wo = await self._create_wo(client)
             op = await self._add_op(client, wo["id"])
 
-        # Release with different user (SOD-004)
         await self._release_wo(wo)
 
         async with await self._client() as client:
@@ -417,31 +424,12 @@ class TestWorkOrderLifecycle:
             started = resp.json()
             assert started["execution_cycle"] == 1
 
-            # Rework
             resp = await client.post(
                 f"/api/operations/{op['id']}/rework",
                 json={"version": started["version"]},
                 headers={"Idempotency-Key": str(uuid.uuid4())},
             )
-            reworked = resp.json()
-            assert reworked["status"] == "rework"
-            assert reworked["execution_cycle"] == 1  # not yet incremented
-
-            # Resume from rework via start (rework → in_progress)
-            # This should increment execution_cycle to 2
-            resp = await client.post(
-                f"/api/operations/{op['id']}/start",
-                json={
-                    "version": reworked["version"],
-                    "role": "operator",
-                    "shift": "day",
-                },
-                headers={"Idempotency-Key": str(uuid.uuid4())},
-            )
-            assert resp.status_code == 200
-            resumed = resp.json()
-            assert resumed["status"] == "in_progress"
-            assert resumed["execution_cycle"] == 2
+        assert resp.status_code == 404
 
     @pytest.mark.asyncio
     async def test_rate_limit_smoke(self) -> None:

@@ -676,6 +676,81 @@ class TestReopenReactivate:
         assert r.json()["status"] == "closed"
 
     # ------------------------------------------------------------------
+    # Composite version_assertions (UX spec §6.3.3)
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_disposition_stale_operation_version_returns_composite_409(
+        self,
+    ) -> None:
+        """Stale op version in version_assertions → composite 409."""
+        op, wo = await self._make_completed_op_and_wo()
+        ncr = await self._create_ncr(wo["id"], op_id=op["id"])
+
+        self._override_as(DISPOSITIONER_ID, roles=["engineer"])
+        async with await self._client() as client:
+            r = await client.patch(
+                f"/api/ncrs/{ncr['id']}/disposition",
+                json={
+                    "version": ncr["version"],
+                    "disposition": "rework",
+                    "disposition_rationale": "x",
+                    "version_assertions": {
+                        "ncr": ncr["version"],
+                        # Stale op version — live op.version is
+                        # something else (2 after start).  Sending
+                        # 999 guarantees a mismatch.
+                        "operation": 999,
+                        "work_order": wo["version"],
+                    },
+                },
+            )
+        self._clear_override()
+        assert r.status_code == 409
+        body = r.json()
+        # Composite shape per §6.3.3: detail.conflicts is a list.
+        detail = body.get("detail") or body
+        assert detail.get("code") == "VERSION_CONFLICT"
+        assert isinstance(detail.get("conflicts"), list)
+        op_conflict = next(
+            (c for c in detail["conflicts"]
+             if c.get("entity_type") == "Operation"),
+            None,
+        )
+        assert op_conflict is not None
+        assert op_conflict["your_version"] == 999
+
+        # Confirm NO mutation — op is still complete, cycle 1.
+        async with await self._client() as client:
+            detail_op = await client.get(f"/api/operations/{op['id']}")
+        assert detail_op.json()["status"] == "complete"
+        assert detail_op.json()["execution_cycle"] == 1
+
+    @pytest.mark.asyncio
+    async def test_disposition_composite_assertions_happy_path(self) -> None:
+        """All assertions match → disposition proceeds normally."""
+        op, wo = await self._make_completed_op_and_wo()
+        ncr = await self._create_ncr(wo["id"], op_id=op["id"])
+
+        self._override_as(DISPOSITIONER_ID, roles=["engineer"])
+        async with await self._client() as client:
+            r = await client.patch(
+                f"/api/ncrs/{ncr['id']}/disposition",
+                json={
+                    "version": ncr["version"],
+                    "disposition": "rework",
+                    "disposition_rationale": "x",
+                    "version_assertions": {
+                        "ncr": ncr["version"],
+                        "operation": op["version"],
+                        "work_order": wo["version"],
+                    },
+                },
+            )
+        self._clear_override()
+        assert r.status_code == 200, r.text
+
+    # ------------------------------------------------------------------
     # Prior-cycle inspection must not satisfy current-cycle completion
     # ------------------------------------------------------------------
 
