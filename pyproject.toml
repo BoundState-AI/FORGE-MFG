@@ -20,7 +20,17 @@ dependencies = [
     "cachetools>=5.3,<6",
     "httpx>=0.27,<1",
     "boto3>=1.34,<2",
-    "psycopg2-binary>=2.9,<3",
+    # psycopg2 (source build, NOT psycopg2-binary) — Build Spec §9.3 /
+    # GovCloud posture.  The -binary wheel statically links its own copy
+    # of libpq, which drifts from the system libpq on SSL/TLS cipher
+    # selection and locale handling in ways that are hard to diagnose
+    # in production.  Source builds link against the libpq we install
+    # via the Dockerfile (libpq-dev + gcc in the build stage).  Local
+    # development needs a system libpq installation; on Windows the
+    # PostgreSQL server installer already ships it, on macOS use
+    # ``brew install libpq``, on Debian/Ubuntu ``apt-get install
+    # libpq-dev``.  See Dockerfile comments for the build-stage deps.
+    "psycopg2>=2.9,<3",
 ]
 
 [project.optional-dependencies]

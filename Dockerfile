@@ -1,10 +1,22 @@
-FROM python:3.11-slim AS base
+FROM python:3.11-slim AS build
 
 WORKDIR /app
 
-# System deps
+# Build-stage system deps.
+#   curl      — retained for healthcheck parity if the runtime stage ever
+#               collapses into this one; cheap to keep.
+#   gcc       — required to compile psycopg2 from source.  We pin the
+#               source build (not psycopg2-binary) because the -binary
+#               wheel statically links libpq and can diverge from the
+#               system libpq in subtle SSL/locale ways that are hard to
+#               diagnose on GovCloud.  Source builds against the libpq
+#               we control below.
+#   libpq-dev — PostgreSQL client headers, needed for psycopg2's
+#               C extension build step.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
+    gcc \
+    libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy source first — pip install needs the package present for hatchling
