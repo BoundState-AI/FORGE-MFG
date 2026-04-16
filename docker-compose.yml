@@ -38,6 +38,14 @@ services:
       timeout: 3s
       retries: 5
 
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      api:
+        condition: service_healthy
+
   localstack:
     image: localstack/localstack:3
     ports:

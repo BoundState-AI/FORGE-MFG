@@ -1,0 +1,76 @@
+/**
+ * Module:   Design Tokens
+ * Purpose:  CSS custom properties from UX Spec §4.1–4.3.
+ * Rev:      0.1.0
+ *
+ * BoundState Proprietary
+ * Co-Authored-By: Dr. Joseph Wilde, BoundState AI
+ * Co-Authored-By: Claude "Beth" (Opus 4.6)
+ */
+
+:root {
+  /* ── Status palette (spec §4.1) ── */
+  --bg-primary: #fafafa;
+  --bg-surface: #ffffff;
+  --bg-elevated: #f5f5f5;
+  --text-primary: #1a1a1a;
+  --text-secondary: #6b6b6b;
+  --text-muted: #999999;
+  --border: #e0e0e0;
+
+  --status-draft: #9e9e9e;
+  --status-active: #1565c0;
+  --status-hold: #f57c00;
+  --status-complete: #2e7d32;
+  --status-error: #c62828;
+  --status-rework: #7b1fa2;
+
+  --safety-critical-bg: #ffebee;
+  --safety-critical-border: #c62828;
+
+  --interactive: #1565c0;
+  --interactive-hover: #0d47a1;
+  --destructive: #c62828;
+  --destructive-hover: #b71c1c;
+
+  /* ── Spacing (spec §4.3, base 8px) ── */
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 16px;
+  --space-lg: 24px;
+  --space-xl: 32px;
+  --space-2xl: 48px;
+
+  /* ── Typography (spec §4.2) ── */
+  --font-stack: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+    Oxygen, Ubuntu, Cantarell, sans-serif;
+  --font-size-title: 24px;
+  --font-size-section: 18px;
+  --font-size-body: 16px;
+  --font-size-table: 14px;
+  --font-size-label: 14px;
+  --font-size-caption: 12px;
+  --font-size-badge: 12px;
+  --font-size-floor: 20px;
+
+  /* ── Borders ── */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+
+  /* ── Sidebar ── */
+  --sidebar-width: 240px;
+  --sidebar-collapsed-width: 56px;
+
+  /* ── Admin header (spec §5.10) ── */
+  --admin-header-bg: #1a1a1a;
+  --admin-header-text: #ffffff;
+}
+
+/* ── Floor mode typography bump (spec §7.2) ── */
+@media (max-width: 768px) {
+  :root {
+    --font-size-body: 18px;
+    --font-size-floor: 22px;
+  }
+}
