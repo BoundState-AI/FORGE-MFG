@@ -280,7 +280,7 @@ ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
         # "Caller does not have engineer role" is explicit.
         "labor:force_stop",
         "wo:complete", "op:create", "op:update", "op:delete", "op:hold",
-        "op:rework", "ncr:create", "ncr:disposition", "sched:create",
+        "ncr:create", "ncr:disposition", "sched:create",
         "sched:baseline", "sched:what_if", "labor:update_any", "doc:create",
         "doc:read", "doc:upload", "doc:finalize", "wo:read", "op:read",
         "ncr:read", "part:read", "sched:read", "dash:read", "chat:query",
