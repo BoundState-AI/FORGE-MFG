@@ -37,12 +37,12 @@ RUN pip install --no-cache-dir .
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
+    CMD curl -f "http://localhost:${PORT:-8000}/health" || exit 1
 
-CMD ["gunicorn", "forge.api.app:app", \
-     "-k", "uvicorn.workers.UvicornWorker", \
-     "--bind", "0.0.0.0:8000", \
-     "--workers", "3", \
-     "--timeout", "120", \
-     "--max-requests", "1000", \
-     "--max-requests-jitter", "50"]
+CMD ["/bin/sh", "-c", "gunicorn forge.api.app:app \
+    -k uvicorn.workers.UvicornWorker \
+    --bind 0.0.0.0:${PORT:-8000} \
+    --workers 3 \
+    --timeout 120 \
+    --max-requests 1000 \
+    --max-requests-jitter 50"]
