@@ -37,10 +37,11 @@ from forge.schemas.graph import (
     GraphPatchOut,
     GraphValidateOut,
 )
-from forge.schemas.operation import OperationDetailOut
+from forge.schemas.operation import OperationDetailOut, OperationOut
 from forge.schemas.work_order import (
     StoppedLaborEntryOut,
     WorkOrderCreate,
+    WorkOrderDetailOut,
     WorkOrderHoldIn,
     WorkOrderHoldOut,
     WorkOrderOut,
@@ -89,22 +90,43 @@ async def list_work_orders(
     }
 
 
-@router.get("/{wo_id}", response_model=WorkOrderOut)
+@router.get("/{wo_id}", response_model=WorkOrderDetailOut)
 async def get_work_order(
     wo_id: uuid.UUID,
     response: Response,
     auth: AuthContext = Depends(require_permission("wo:read")),
     session: AsyncSession = Depends(get_db),
-) -> WorkOrderOut:
+) -> WorkOrderDetailOut:
     """Get work order detail with operations (program-scoped).
+
+    Build Spec §5.1 documents this endpoint as "Get work order detail
+    with operations" and §3.1 names ``operations: list[Operation]`` on
+    the WorkOrder entity.  The list endpoint continues to return the
+    lighter ``WorkOrderOut`` (no operations) so paginated responses
+    stay small; this detail endpoint hydrates the operations array so
+    the frontend WO detail page (UX spec §5.3) renders its Operations
+    tab without a follow-up fetch.
+
+    Ordering: operations are returned by ``sequence`` ascending, which
+    matches the UX spec's operations table display order and avoids
+    client-side re-sorting.
 
     Emits `ETag: "<version>"` per UX spec v1.5.1 §6.3.1 so the
     client can send it back as `If-Match` on a subsequent mutation
     without re-reading the body.
     """
     wo = await wo_svc.get_work_order(session, wo_id, program_codes=auth.programs)
+    # Hydrate the operations relationship.  Kept in the route rather
+    # than inside the service so the other service callers (state
+    # transitions, release validation) aren't paying for a load they
+    # don't need.
+    await session.refresh(wo, ["operations"])
     response.headers["ETag"] = strong_etag(wo.version)
-    return WorkOrderOut.model_validate(wo)
+    ops = sorted(wo.operations, key=lambda op: op.sequence)
+    return WorkOrderDetailOut(
+        **WorkOrderOut.model_validate(wo).model_dump(),
+        operations=[OperationOut.model_validate(op) for op in ops],
+    )
 
 
 @router.patch("/{wo_id}", response_model=WorkOrderOut)

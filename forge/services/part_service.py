@@ -29,7 +29,7 @@ from __future__ import annotations
 import uuid as _uuid
 
 from fastapi import HTTPException
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from forge.audit.logger import create_audit_record
@@ -379,6 +379,51 @@ async def get_part(
 ) -> PartInstance:
     """Load a part with program-scope enforcement."""
     return await _load_part_in_scope(session, part_id, program_codes)
+
+
+async def list_parts(
+    session: AsyncSession,
+    *,
+    program_codes: list[str] | None = None,
+    page: int = 1,
+    page_size: int = 50,
+) -> tuple[list[PartInstance], int]:
+    """List parts in the caller's programs, paginated.
+
+    UX spec v1.5.1 §5.8 Part List surface (implied by the §3.2 URL
+    table ``/parts`` and the §6.7.1 "All (assigned programs)" list set
+    including Part List).  Parity patch adds the read endpoint that
+    Build Spec §5.7 previously left out — the service scope pattern
+    mirrors ``list_material_certs`` exactly so both lists behave the
+    same under ``X-Program-Id: *``.
+
+    Program scope is enforced by joining Program on ``code``, matching
+    the existing ``_load_part_in_scope`` pattern.  Wildcard ``"*"`` in
+    the caller's claim bypasses the membership filter (local-dev
+    parity with other list endpoints).
+    """
+    base_query = select(PartInstance)
+    count_query = select(func.count(PartInstance.id))
+
+    if program_codes is not None and "*" not in program_codes:
+        base_query = base_query.join(
+            Program, Program.id == PartInstance.program_id
+        ).where(Program.code.in_(program_codes))
+        count_query = count_query.join(
+            Program, Program.id == PartInstance.program_id
+        ).where(Program.code.in_(program_codes))
+
+    count_result = await session.execute(count_query)
+    total = count_result.scalar() or 0
+
+    offset = (page - 1) * page_size
+    result = await session.execute(
+        base_query
+        .order_by(PartInstance.created_at.desc())
+        .offset(offset)
+        .limit(page_size)
+    )
+    return list(result.scalars().all()), total
 
 
 async def _walk_assembly_chain(

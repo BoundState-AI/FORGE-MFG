@@ -81,6 +81,7 @@ export type UserOut = Schemas['UserOut'];
 
 /* Work Order */
 export type WorkOrderOut = Schemas['WorkOrderOut'];
+export type WorkOrderDetailOut = Schemas['WorkOrderDetailOut'];
 export type WorkOrderCreate = Schemas['WorkOrderCreate'];
 export type WorkOrderUpdate = Schemas['WorkOrderUpdate'];
 export type WorkOrderTransition = Schemas['WorkOrderTransition'];

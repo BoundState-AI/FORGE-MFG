@@ -28,6 +28,7 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 
 from forge.models.enums import BuildPhase, Priority, WOStatus
+from forge.schemas.operation import OperationOut
 
 
 class WorkOrderCreate(BaseModel):
@@ -151,5 +152,27 @@ class WorkOrderOut(BaseModel):
     version: int
     created_at: datetime
     updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class WorkOrderDetailOut(WorkOrderOut):
+    """Detail response for GET /api/work-orders/{id} (Build Spec §5.1).
+
+    Why this shape: Build Spec §5.1 routes table documents the detail
+    endpoint as "Get work order detail with operations", and §3.1
+    WorkOrder class carries ``operations: list[Operation]`` in its
+    relationships.  The list endpoint continues to return the lighter
+    ``WorkOrderOut`` (no operations) so paginated responses stay small.
+    The detail endpoint returns this subtype so the frontend work-order
+    detail page (UX spec §5.3) can render the Operations tab without a
+    second round trip.
+
+    Operations are ordered by ``sequence`` ascending — matches the
+    UX spec's operations table column order and avoids the client
+    having to re-sort a paginated list.
+    """
+
+    operations: list[OperationOut] = Field(default_factory=list)
 
     model_config = {"from_attributes": True}

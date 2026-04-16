@@ -59,6 +59,18 @@ export interface paths {
          * Get Work Order
          * @description Get work order detail with operations (program-scoped).
          *
+         *     Build Spec §5.1 documents this endpoint as "Get work order detail
+         *     with operations" and §3.1 names ``operations: list[Operation]`` on
+         *     the WorkOrder entity.  The list endpoint continues to return the
+         *     lighter ``WorkOrderOut`` (no operations) so paginated responses
+         *     stay small; this detail endpoint hydrates the operations array so
+         *     the frontend WO detail page (UX spec §5.3) renders its Operations
+         *     tab without a follow-up fetch.
+         *
+         *     Ordering: operations are returned by ``sequence`` ascending, which
+         *     matches the UX spec's operations table display order and avoids
+         *     client-side re-sorting.
+         *
          *     Emits `ETag: "<version>"` per UX spec v1.5.1 §6.3.1 so the
          *     client can send it back as `If-Match` on a subsequent mutation
          *     without re-reading the body.
@@ -796,7 +808,17 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /**
+         * List Material Certs
+         * @description List material certifications (paginated, program-scoped).
+         *
+         *     UX spec v1.5.1 §5.7 Material Certification List: status filter
+         *     (quarantine / accepted / rejected / consumed / expired / scrapped)
+         *     and "All (assigned programs)" multi-program read per §6.7.1.
+         *     Parity patch closes the gap between Build Spec §5.6 (write routes
+         *     only) and the UX spec's requirement for a real list surface.
+         */
+        get: operations["list_material_certs_api_material_certs_get"];
         put?: never;
         /**
          * Receive Material
@@ -856,7 +878,22 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /**
+         * List Parts
+         * @description List parts (paginated, program-scoped).
+         *
+         *     UX spec v1.5.1 §3.2 routes ``/parts`` to a Part Instance List
+         *     surface and §6.7.1 includes Part List in the "All (assigned
+         *     programs)" multi-program read set.  Parity patch closes the gap
+         *     between Build Spec §5.7 (write-only + traceability) and the UX
+         *     spec's list requirement.
+         *
+         *     No server-side filters are added in this patch — spec §5.8 does
+         *     not enumerate filter controls for the part list and the service
+         *     stays minimal.  Clients that need client-side filters already
+         *     have enough data in PartOut.
+         */
+        get: operations["list_parts_api_parts_get"];
         put?: never;
         /**
          * Create Part
@@ -876,7 +913,23 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /**
+         * Get Part
+         * @description Get a single part by ID (program-scoped).
+         *
+         *     UX spec v1.5.1 §6.7.4 entity-detail authorization exception:
+         *     cross-program access returns **404, not 403** — surfacing 403 would
+         *     confirm the part exists in a program the caller cannot see.  The
+         *     shape is intentionally indistinguishable from "no such record."
+         *     ``part_service.get_part`` enforces that contract directly (via
+         *     ``_load_part_in_scope``).
+         *
+         *     Separate from ``/{part_id}/traceability``: the traceability
+         *     endpoint carries the full assembly + child chain which is more
+         *     expensive; the frontend part detail page wants to render the
+         *     part header first, then fetch traceability in parallel.
+         */
+        get: operations["get_part_api_parts__part_id__get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -4566,6 +4619,71 @@ export interface components {
             bom_revision_ref?: string | null;
         };
         /**
+         * WorkOrderDetailOut
+         * @description Detail response for GET /api/work-orders/{id} (Build Spec §5.1).
+         *
+         *     Why this shape: Build Spec §5.1 routes table documents the detail
+         *     endpoint as "Get work order detail with operations", and §3.1
+         *     WorkOrder class carries ``operations: list[Operation]`` in its
+         *     relationships.  The list endpoint continues to return the lighter
+         *     ``WorkOrderOut`` (no operations) so paginated responses stay small.
+         *     The detail endpoint returns this subtype so the frontend work-order
+         *     detail page (UX spec §5.3) can render the Operations tab without a
+         *     second round trip.
+         *
+         *     Operations are ordered by ``sequence`` ascending — matches the
+         *     UX spec's operations table column order and avoids the client
+         *     having to re-sort a paginated list.
+         */
+        WorkOrderDetailOut: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Wo Number */
+            wo_number: string;
+            /**
+             * Program Id
+             * Format: uuid
+             */
+            program_id: string;
+            /** Engine Serial */
+            engine_serial: string;
+            /** Module */
+            module: string;
+            build_phase: components["schemas"]["BuildPhase"];
+            status: components["schemas"]["WOStatus"];
+            priority: components["schemas"]["Priority"];
+            /**
+             * Authored By Id
+             * Format: uuid
+             */
+            authored_by_id: string;
+            /** Bom Revision Ref */
+            bom_revision_ref: string | null;
+            /** Released At */
+            released_at: string | null;
+            /** Released By */
+            released_by: string | null;
+            /** Has Graph Issue */
+            has_graph_issue: boolean;
+            /** Version */
+            version: number;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /** Operations */
+            operations?: components["schemas"]["OperationOut"][];
+        };
+        /**
          * WorkOrderHoldIn
          * @description Request body for POST /api/work-orders/{id}/hold (UX spec v1.5.1
          *     §5.3 Hold Cascading).
@@ -4856,7 +4974,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["WorkOrderOut"];
+                    "application/json": components["schemas"]["WorkOrderDetailOut"];
                 };
             };
             /** @description Validation Error */
@@ -6070,6 +6188,39 @@ export interface operations {
             };
         };
     };
+    list_material_certs_api_material_certs_get: {
+        parameters: {
+            query?: {
+                page?: number;
+                page_size?: number;
+                status?: components["schemas"]["CertStatus"] | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Record<string, never>;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     receive_material_api_material_certs_post: {
         parameters: {
             query?: never;
@@ -6173,6 +6324,38 @@ export interface operations {
             };
         };
     };
+    list_parts_api_parts_get: {
+        parameters: {
+            query?: {
+                page?: number;
+                page_size?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Record<string, never>;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     create_part_api_parts_post: {
         parameters: {
             query?: never;
@@ -6188,6 +6371,37 @@ export interface operations {
         responses: {
             /** @description Successful Response */
             201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PartOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_part_api_parts__part_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                part_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
                 headers: {
                     [name: string]: unknown;
                 };

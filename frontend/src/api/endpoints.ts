@@ -19,27 +19,27 @@
  * the typed client, so paths, params, request bodies, and response bodies
  * are all derived from the backend OpenAPI spec.
  *
- * Endpoints intentionally NOT wrapped here (no backend route exists yet;
- * the generated schema confirms these paths have `get: never` or no
- * matching route at all; see 5C commit notes for the list deferred to a
- * future backend slice):
- *   - GET /api/work-orders/{wo_id}/operations   (list operations)
+ * Endpoints intentionally NOT wrapped here (no backend route yet):
  *   - GET /api/operations/{op_id}/labor          (labor entries)
  *   - GET /api/operations/{op_id}/inspections    (inspection history)
- *   - GET /api/operations/{op_id}/resume         (hold → in_progress)
+ *   - POST /api/operations/{op_id}/resume        (hold → in_progress)
+ *
+ * 5C parity patch (2026-04-15) restored the list/detail reads that
+ * were previously stubbed out:
+ *   - GET /api/material-certs                    (materials list)
  *   - GET /api/parts                             (parts list)
  *   - GET /api/parts/{part_id}                   (part detail)
- *   - GET /api/material-certs                    (materials list)
- *
- * Pages that wanted those reads render an explicit "not yet available"
- * placeholder rather than calling a 404-bound URL.
+ *   - GET /api/work-orders/{id} now returns WorkOrderDetailOut with
+ *     operations inline (removes the dependency on a separate list GET)
  */
 
 import { typedClient, unwrap } from './typed-client';
 import type {
   PaginatedResponse,
   PaginationParams,
+  CertStatus,
   WorkOrderOut,
+  WorkOrderDetailOut,
   WorkOrderCreate,
   WorkOrderUpdate,
   WorkOrderTransition,
@@ -61,6 +61,8 @@ import type {
   NCRCreate,
   NCRDisposition,
   NCRPatch,
+  MaterialCertOut,
+  PartOut,
   TraceabilityOut,
   DashboardSummaryOut,
   UserOut,
@@ -115,7 +117,10 @@ export async function fetchWorkOrders(
   return envelope;
 }
 
-export async function fetchWorkOrder(id: string): Promise<WorkOrderOut> {
+export async function fetchWorkOrder(id: string): Promise<WorkOrderDetailOut> {
+  /* Returns the detail shape with operations inline (Build Spec §5.1,
+     parity patch).  Clients that only need the lightweight shape can
+     still destructure the fields in common with WorkOrderOut. */
   return unwrap(
     await typedClient.GET('/api/work-orders/{wo_id}', {
       params: { path: { wo_id: id } },
@@ -401,7 +406,45 @@ export async function patchNCR(id: string, body: NCRPatch): Promise<NCROut> {
   );
 }
 
-/* ── Parts — traceability only (list + detail GETs not on backend yet) ── */
+/* ── Materials list (5C parity patch) ── */
+
+export async function fetchMaterials(
+  params?: PaginationParams & {
+    status?: CertStatus;
+    programId?: string;
+  },
+): Promise<PaginatedResponse<MaterialCertOut>> {
+  const result = await typedClient.GET('/api/material-certs', {
+    params: {
+      query: {
+        ...pageQuery(params),
+        ...(params?.status ? { status: params.status } : {}),
+      },
+    },
+    headers: programHeaders(params?.programId),
+  });
+  return unwrap(result) as unknown as PaginatedResponse<MaterialCertOut>;
+}
+
+/* ── Parts list + detail + traceability (5C parity patch) ── */
+
+export async function fetchParts(
+  params?: PaginationParams & { programId?: string },
+): Promise<PaginatedResponse<PartOut>> {
+  const result = await typedClient.GET('/api/parts', {
+    params: { query: pageQuery(params) },
+    headers: programHeaders(params?.programId),
+  });
+  return unwrap(result) as unknown as PaginatedResponse<PartOut>;
+}
+
+export async function fetchPart(id: string): Promise<PartOut> {
+  return unwrap(
+    await typedClient.GET('/api/parts/{part_id}', {
+      params: { path: { part_id: id } },
+    }),
+  );
+}
 
 export async function fetchTraceability(id: string): Promise<TraceabilityOut> {
   return unwrap(

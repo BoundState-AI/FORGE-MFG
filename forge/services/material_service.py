@@ -478,10 +478,17 @@ async def list_material_certs(
     program_codes: list[str] | None = None,
     page: int = 1,
     page_size: int = 50,
+    status: CertStatus | None = None,
 ) -> tuple[list[MaterialCertification], int]:
     """List certs in the caller's programs, paginated.
 
     Program scope is enforced by joining Program and filtering on code.
+
+    The optional ``status`` filter supports the UX spec §5.7 Material
+    List "Filter by status" control (quarantine / accepted / rejected /
+    consumed / expired / scrapped).  Passing ``None`` preserves the
+    pre-existing contract — every non-filtered caller keeps the same
+    behavior.
     """
     base_query = select(MaterialCertification)
     count_query = select(func.count(MaterialCertification.id))
@@ -493,6 +500,10 @@ async def list_material_certs(
         count_query = count_query.join(
             Program, Program.id == MaterialCertification.program_id
         ).where(Program.code.in_(program_codes))
+
+    if status is not None:
+        base_query = base_query.where(MaterialCertification.status == status)
+        count_query = count_query.where(MaterialCertification.status == status)
 
     count_result = await session.execute(count_query)
     total = count_result.scalar() or 0

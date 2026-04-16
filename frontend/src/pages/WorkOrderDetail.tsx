@@ -15,7 +15,7 @@
  */
 
 import { useState, useMemo, useCallback } from 'react';
-import { useParams } from 'react-router-dom';
+import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   fetchWorkOrder,
@@ -32,7 +32,7 @@ import { ErrorBanner } from '@/components/ErrorBanner';
 import { ConfirmationDialog } from '@/components/ConfirmationDialog';
 import { ConflictModal } from '@/components/ConflictModal';
 import type {
-  WorkOrderOut,
+  WorkOrderDetailOut,
   WOStatus,
   VersionConflictError,
 } from '@/types/api';
@@ -171,6 +171,7 @@ function HeaderField({ label, value }: { label: string; value: React.ReactNode }
 
 export default function WorkOrderDetail() {
   const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { hasRole, hasAnyRole, activeProgram } = useAuthStore();
   const programId = activeProgram?.id ?? 'none';
@@ -183,7 +184,7 @@ export default function WorkOrderDetail() {
 
   /* ── Queries ── */
 
-  const woQuery = useQuery<WorkOrderOut>({
+  const woQuery = useQuery<WorkOrderDetailOut>({
     queryKey: ['work-order', programId, id],
     queryFn: () => fetchWorkOrder(id!),
     enabled: !!id,
@@ -316,8 +317,15 @@ export default function WorkOrderDetail() {
     return btns;
   }, [wo, hasRole, hasAnyRole]);
 
-  /* Operations table is deferred (backend list endpoint not yet exposed).
-     The WO complete precondition will be checked by the server. */
+  /* Operations are embedded on the WO detail response now that the
+     5C parity patch extended it to WorkOrderDetailOut (Build Spec §5.1).
+     Sort ascending by sequence for the Operations tab display. */
+  const ops = useMemo(
+    () => [...(wo?.operations ?? [])].sort((a, b) => a.sequence - b.sequence),
+    [wo?.operations],
+  );
+  const allOpsComplete =
+    ops.length > 0 && ops.every((op) => op.status === 'complete');
 
   /* ── Loading ── */
   if (woQuery.isLoading) {
@@ -383,10 +391,11 @@ export default function WorkOrderDetail() {
         {/* Action buttons */}
         <div style={{ display: 'flex', gap: 'var(--space-sm)', flexWrap: 'wrap' }}>
           {actionButtons.map((btn) => {
-            /* Client-side "all ops complete" gate removed — the operations
-               list endpoint is deferred.  The server still rejects Complete
-               if preconditions are unmet (OP-COMP-* codes in spec §5.4.1). */
-            const disabled = false;
+            /* Client-side hint that Complete is premature until every
+               operation is complete.  The server remains authoritative —
+               OP-COMP-* codes still fire on submit — but surfacing the
+               tooltip early avoids wasted round trips. */
+            const disabled = btn.action === 'complete' && !allOpsComplete;
 
             return (
               <div key={btn.action} style={{ position: 'relative' }}>
@@ -461,22 +470,77 @@ export default function WorkOrderDetail() {
         </button>
       </div>
 
-      {/* Tab content.  The operations listing depends on a backend GET
-         that has not been exposed yet (see endpoints.ts header notes).
-         When that endpoint ships the OperationsTab can re-attach — the
-         existing implementation is preserved at the bottom of this file
-         for that integration work. */}
+      {/* Tab content.  5C parity patch: operations are embedded on the
+         WO detail response, so this renders a real table now (UX spec
+         §5.3 Operations tab).  Rows click through to the operation
+         page at /work-orders/:id/ops/:opId. */}
       {activeTab === 'operations' && (
-        <div
-          style={{
-            padding: 'var(--space-lg)',
-            color: 'var(--text-secondary)',
-            textAlign: 'center',
-          }}
-        >
-          The backend list endpoint (GET /api/work-orders/:id/operations)
-          has not been implemented yet. Individual operations remain
-          reachable via their direct URLs.
+        <div style={{ padding: 'var(--space-md) 0' }}>
+          {ops.length === 0 ? (
+            <div
+              style={{
+                padding: 'var(--space-lg)',
+                color: 'var(--text-secondary)',
+                textAlign: 'center',
+              }}
+            >
+              This work order has no operations defined yet.
+            </div>
+          ) : (
+            <table>
+              <thead>
+                <tr>
+                  <th style={{ width: 64 }}>Seq</th>
+                  <th>Description</th>
+                  <th>Status</th>
+                  <th style={{ textAlign: 'center' }}>Safety Critical</th>
+                  <th>Est. Hours</th>
+                </tr>
+              </thead>
+              <tbody>
+                {ops.map((op) => (
+                  <tr
+                    key={op.id}
+                    style={{ cursor: 'pointer' }}
+                    onClick={() =>
+                      navigate(`/work-orders/${wo.id}/ops/${op.id}`)
+                    }
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        navigate(`/work-orders/${wo.id}/ops/${op.id}`);
+                      }
+                    }}
+                    aria-label={`Operation ${op.sequence}: ${op.description}`}
+                  >
+                    <td style={{ fontWeight: 600 }}>{op.sequence}</td>
+                    <td>{op.description}</td>
+                    <td>
+                      <StatusBadge status={op.status} />
+                    </td>
+                    <td style={{ textAlign: 'center' }}>
+                      {op.safety_critical ? (
+                        <span
+                          style={{
+                            color: 'var(--safety-critical-border)',
+                            fontWeight: 700,
+                          }}
+                          title="Safety-critical operation"
+                        >
+                          ⚠ SC
+                        </span>
+                      ) : (
+                        <span style={{ color: 'var(--text-muted)' }}>—</span>
+                      )}
+                    </td>
+                    <td>{op.estimated_hours}h</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
         </div>
       )}
       {activeTab === 'audit' && (

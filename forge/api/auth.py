@@ -260,12 +260,20 @@ ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
         # initiate an escalation to the engineer.
         "labor:request_stop", "labor:flag_correction",
         "mat:consume",
+        # mat:read — parity patch post-5C.  UX spec §5.7 Material
+        # Certification List is gated by the nav matrix in §3.1 which
+        # grants operators read access ("consume" implies "read the
+        # cert you are about to consume from").  Build Spec §5.6
+        # previously only covered write actions; the GET list added
+        # in this patch needs an explicit read permission.  Mirrors
+        # the part:read universal-read posture.
+        "mat:read",
         "part:create", "part:update", "wo:read", "op:read", "ncr:read",
         "part:read", "doc:read", "sched:read", "dash:read", "chat:query",
     }),
     "inspector": frozenset({
         "inspect:create", "inspect:sign_off", "inspect:read",
-        "mat:receive", "mat:accept",
+        "mat:receive", "mat:accept", "mat:read",
         "ncr:create", "doc:read", "doc:upload", "wo:read", "op:read",
         "ncr:read", "part:read", "sched:read", "dash:read", "chat:query",
     }),
@@ -284,6 +292,7 @@ ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
         "sched:baseline", "sched:what_if", "labor:update_any", "doc:create",
         "doc:read", "doc:upload", "doc:finalize", "wo:read", "op:read",
         "ncr:read", "part:read", "sched:read", "dash:read", "chat:query",
+        "mat:read",
     }),
     "qa_manager": frozenset({
         "wo:create", "wo:update", "wo:release", "wo:hold", "wo:resume",
@@ -292,6 +301,7 @@ ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
         "sched:create", "sched:baseline", "sched:what_if", "labor:update_any",
         "doc:create", "doc:read", "doc:upload", "doc:finalize", "wo:read",
         "op:read", "ncr:read", "part:read", "sched:read", "dash:read",
+        "mat:read",
         # inspect:read: drill-through read-only per UX spec v1.5.1 §3.1
         # footnote 4.  qa_manager cannot record inspections (no
         # inspect:create) but must see the queue to resolve Dashboard
@@ -310,11 +320,11 @@ ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
     }),
     "program_manager": frozenset({
         "wo:read", "op:read", "ncr:read", "part:read", "doc:read",
-        "sched:read", "dash:read", "chat:query",
+        "sched:read", "dash:read", "chat:query", "mat:read",
     }),
     "admin": frozenset({
         "admin:manage", "wo:read", "op:read", "ncr:read", "part:read",
-        "doc:read", "sched:read", "dash:read",
+        "doc:read", "sched:read", "dash:read", "mat:read",
         # Admin carries both part:update and part:scrap as a
         # break-glass override lane — Phase-1 admin needs coverage
         # of every gated action for hotfix scenarios, and the

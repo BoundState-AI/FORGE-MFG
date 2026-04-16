@@ -135,7 +135,7 @@
           "work-orders"
         ],
         "summary": "Get Work Order",
-        "description": "Get work order detail with operations (program-scoped).\n\nEmits `ETag: \"<version>\"` per UX spec v1.5.1 \u00a76.3.1 so the\nclient can send it back as `If-Match` on a subsequent mutation\nwithout re-reading the body.",
+        "description": "Get work order detail with operations (program-scoped).\n\nBuild Spec \u00a75.1 documents this endpoint as \"Get work order detail\nwith operations\" and \u00a73.1 names ``operations: list[Operation]`` on\nthe WorkOrder entity.  The list endpoint continues to return the\nlighter ``WorkOrderOut`` (no operations) so paginated responses\nstay small; this detail endpoint hydrates the operations array so\nthe frontend WO detail page (UX spec \u00a75.3) renders its Operations\ntab without a follow-up fetch.\n\nOrdering: operations are returned by ``sequence`` ascending, which\nmatches the UX spec's operations table display order and avoids\nclient-side re-sorting.\n\nEmits `ETag: \"<version>\"` per UX spec v1.5.1 \u00a76.3.1 so the\nclient can send it back as `If-Match` on a subsequent mutation\nwithout re-reading the body.",
         "operationId": "get_work_order_api_work_orders__wo_id__get",
         "parameters": [
           {
@@ -155,7 +155,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/WorkOrderOut"
+                  "$ref": "#/components/schemas/WorkOrderDetailOut"
                 }
               }
             }
@@ -2281,6 +2281,78 @@
       }
     },
     "/api/material-certs": {
+      "get": {
+        "tags": [
+          "materials"
+        ],
+        "summary": "List Material Certs",
+        "description": "List material certifications (paginated, program-scoped).\n\nUX spec v1.5.1 \u00a75.7 Material Certification List: status filter\n(quarantine / accepted / rejected / consumed / expired / scrapped)\nand \"All (assigned programs)\" multi-program read per \u00a76.7.1.\nParity patch closes the gap between Build Spec \u00a75.6 (write routes\nonly) and the UX spec's requirement for a real list surface.",
+        "operationId": "list_material_certs_api_material_certs_get",
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1,
+              "title": "Page"
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 50,
+              "title": "Page Size"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/CertStatus"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "title": "Response List Material Certs Api Material Certs Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
       "post": {
         "tags": [
           "materials"
@@ -2289,14 +2361,14 @@
         "description": "Receive a material lot into quarantine.",
         "operationId": "receive_material_api_material_certs_post",
         "requestBody": {
+          "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/MaterialReceive"
               }
             }
-          },
-          "required": true
+          }
         },
         "responses": {
           "201": {
@@ -2431,6 +2503,62 @@
       }
     },
     "/api/parts": {
+      "get": {
+        "tags": [
+          "parts"
+        ],
+        "summary": "List Parts",
+        "description": "List parts (paginated, program-scoped).\n\nUX spec v1.5.1 \u00a73.2 routes ``/parts`` to a Part Instance List\nsurface and \u00a76.7.1 includes Part List in the \"All (assigned\nprograms)\" multi-program read set.  Parity patch closes the gap\nbetween Build Spec \u00a75.7 (write-only + traceability) and the UX\nspec's list requirement.\n\nNo server-side filters are added in this patch \u2014 spec \u00a75.8 does\nnot enumerate filter controls for the part list and the service\nstays minimal.  Clients that need client-side filters already\nhave enough data in PartOut.",
+        "operationId": "list_parts_api_parts_get",
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1,
+              "title": "Page"
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 50,
+              "title": "Page Size"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "title": "Response List Parts Api Parts Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
       "post": {
         "tags": [
           "parts"
@@ -2439,14 +2567,14 @@
         "description": "Create a serialized part instance in `raw` status.",
         "operationId": "create_part_api_parts_post",
         "requestBody": {
+          "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/PartCreate"
               }
             }
-          },
-          "required": true
+          }
         },
         "responses": {
           "201": {
@@ -2502,6 +2630,48 @@
             }
           }
         },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PartOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "parts"
+        ],
+        "summary": "Get Part",
+        "description": "Get a single part by ID (program-scoped).\n\nUX spec v1.5.1 \u00a76.7.4 entity-detail authorization exception:\ncross-program access returns **404, not 403** \u2014 surfacing 403 would\nconfirm the part exists in a program the caller cannot see.  The\nshape is intentionally indistinguishable from \"no such record.\"\n``part_service.get_part`` enforces that contract directly (via\n``_load_part_in_scope``).\n\nSeparate from ``/{part_id}/traceability``: the traceability\nendpoint carries the full assembly + child chain which is more\nexpensive; the frontend part detail page wants to render the\npart header first, then fetch traceability in parallel.",
+        "operationId": "get_part_api_parts__part_id__get",
+        "parameters": [
+          {
+            "name": "part_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Part Id"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -9958,6 +10128,127 @@
         ],
         "title": "WorkOrderCreate",
         "description": "Request body for POST /api/work-orders (creates in draft)."
+      },
+      "WorkOrderDetailOut": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "wo_number": {
+            "type": "string",
+            "title": "Wo Number"
+          },
+          "program_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Program Id"
+          },
+          "engine_serial": {
+            "type": "string",
+            "title": "Engine Serial"
+          },
+          "module": {
+            "type": "string",
+            "title": "Module"
+          },
+          "build_phase": {
+            "$ref": "#/components/schemas/BuildPhase"
+          },
+          "status": {
+            "$ref": "#/components/schemas/WOStatus"
+          },
+          "priority": {
+            "$ref": "#/components/schemas/Priority"
+          },
+          "authored_by_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Authored By Id"
+          },
+          "bom_revision_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bom Revision Ref"
+          },
+          "released_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Released At"
+          },
+          "released_by": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Released By"
+          },
+          "has_graph_issue": {
+            "type": "boolean",
+            "title": "Has Graph Issue"
+          },
+          "version": {
+            "type": "integer",
+            "title": "Version"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          },
+          "operations": {
+            "items": {
+              "$ref": "#/components/schemas/OperationOut"
+            },
+            "type": "array",
+            "title": "Operations"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "wo_number",
+          "program_id",
+          "engine_serial",
+          "module",
+          "build_phase",
+          "status",
+          "priority",
+          "authored_by_id",
+          "bom_revision_ref",
+          "released_at",
+          "released_by",
+          "has_graph_issue",
+          "version",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "WorkOrderDetailOut",
+        "description": "Detail response for GET /api/work-orders/{id} (Build Spec \u00a75.1).\n\nWhy this shape: Build Spec \u00a75.1 routes table documents the detail\nendpoint as \"Get work order detail with operations\", and \u00a73.1\nWorkOrder class carries ``operations: list[Operation]`` in its\nrelationships.  The list endpoint continues to return the lighter\n``WorkOrderOut`` (no operations) so paginated responses stay small.\nThe detail endpoint returns this subtype so the frontend work-order\ndetail page (UX spec \u00a75.3) can render the Operations tab without a\nsecond round trip.\n\nOperations are ordered by ``sequence`` ascending \u2014 matches the\nUX spec's operations table column order and avoids the client\nhaving to re-sort a paginated list."
       },
       "WorkOrderHoldIn": {
         "properties": {

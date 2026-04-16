@@ -24,11 +24,12 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from forge.api.auth import AuthContext, require_permission
 from forge.api.deps import get_db
+from forge.models.enums import CertStatus
 from forge.schemas.material import (
     MaterialAccept,
     MaterialCertOut,
@@ -39,6 +40,38 @@ from forge.schemas.material import (
 from forge.services import material_service as mat_svc
 
 router = APIRouter(prefix="/api/material-certs", tags=["materials"])
+
+
+@router.get("", response_model=dict[str, object])
+async def list_material_certs(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    status: CertStatus | None = Query(default=None),
+    auth: AuthContext = Depends(require_permission("mat:read")),
+    session: AsyncSession = Depends(get_db),
+) -> dict[str, object]:
+    """List material certifications (paginated, program-scoped).
+
+    UX spec v1.5.1 §5.7 Material Certification List: status filter
+    (quarantine / accepted / rejected / consumed / expired / scrapped)
+    and "All (assigned programs)" multi-program read per §6.7.1.
+    Parity patch closes the gap between Build Spec §5.6 (write routes
+    only) and the UX spec's requirement for a real list surface.
+    """
+    items, total = await mat_svc.list_material_certs(
+        session,
+        program_codes=auth.programs,
+        page=page,
+        page_size=page_size,
+        status=status,
+    )
+    return {
+        "items": [MaterialCertOut.model_validate(c) for c in items],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "pages": (total + page_size - 1) // page_size if total > 0 else 0,
+    }
 
 
 @router.post("", response_model=MaterialCertOut, status_code=201)
