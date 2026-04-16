@@ -118,6 +118,19 @@ class Settings(BaseSettings):
     outbox_backoff_base_seconds: float = 5.0
     outbox_backoff_cap_seconds: float = 300.0
 
+    # --- Auth freshness (spec §9.1, §9.2, §9.3.6) ---
+    # GC-3: safety-critical sign-off and NCR disposition require recent
+    # authentication.  Primary source is the JWT `auth_time` claim;
+    # spec §9.1 documents an explicit fallback to a database-backed
+    # `users.last_auth_at` column when the Cognito Pre-Token-Generation
+    # trigger has not been verified to surface `auth_time` correctly.
+    # Switch to "db" only when the JWT path has been ruled out — the
+    # fallback adds a per-protected-action DB read on the hot path.
+    auth_freshness_source: str = Field(
+        default="jwt",
+        description="Freshness source: 'jwt' (auth_time claim) | 'db' (users.last_auth_at)",
+    )
+
     # --- WORM replication worker (spec §7.2) ---
     # Spec §7.2: "Worker polls every 30 seconds.  Exponential backoff
     # retry (max 10 attempts).  Escalation alerts at 15-minute

@@ -30,9 +30,10 @@ Why this design:
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, Column, ForeignKey, String, Table
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, String, Table
 from sqlalchemy.dialects.postgresql import JSON, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -100,6 +101,16 @@ class User(AuditableMixin, Base):
         Boolean, default=False, nullable=False
     )
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # GC-3: last successful authentication timestamp.  UX spec v1.5.1 §9.1
+    # documents this as the explicit fallback source for re-auth
+    # freshness checks when the JWT ``auth_time`` claim is unavailable.
+    # Selected by ``Settings.auth_freshness_source = "db"``; otherwise
+    # the column is read but never written by the application.  Null
+    # means "no auth history" — the freshness helper treats that as a
+    # required re-authentication on the DB-fallback path.
+    last_auth_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     # M2M relationships
     roles: Mapped[list[Role]] = relationship(secondary=user_roles, lazy="selectin")

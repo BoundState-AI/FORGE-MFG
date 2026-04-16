@@ -1673,7 +1673,7 @@
           "inspections"
         ],
         "summary": "Record Sign Off",
-        "description": "Record a sign-off event (SOD-005 enforced in service).",
+        "description": "Record a sign-off event.\n\nSOD-005 distinct-user check, and (for safety_critical operations)\nthe GC-3 fresh-auth gate, are both enforced in the service layer\nbefore any inserts.  Stale auth raises 401 REAUTH_REQUIRED with\nenough context for the frontend retry path (UX spec \u00a79.2).",
         "operationId": "record_sign_off_api_operations__op_id__sign_off_post",
         "parameters": [
           {
@@ -2178,7 +2178,7 @@
           "ncrs"
         ],
         "summary": "Disposition Ncr",
-        "description": "Disposition an NCR (open \u2192 dispositioned).\n\nSOD-002 (spec \u00a74.2): the initiator cannot disposition the same NCR.\nEnforcement happens in the service layer.",
+        "description": "Disposition an NCR (open \u2192 dispositioned).\n\nSOD-002 (spec \u00a74.2): the initiator cannot disposition the same NCR.\nGC-3 fresh-auth gate (spec \u00a79.2): every disposition is a protected\naction; stale auth raises 401 REAUTH_REQUIRED before any side\neffect.  Both checks run in the service layer.",
         "operationId": "disposition_ncr_api_ncrs__ncr_id__disposition_patch",
         "parameters": [
           {

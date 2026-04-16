@@ -102,11 +102,14 @@ async def disposition_ncr(
     """Disposition an NCR (open → dispositioned).
 
     SOD-002 (spec §4.2): the initiator cannot disposition the same NCR.
-    Enforcement happens in the service layer.
+    GC-3 fresh-auth gate (spec §9.2): every disposition is a protected
+    action; stale auth raises 401 REAUTH_REQUIRED before any side
+    effect.  Both checks run in the service layer.
     """
     ncr = await ncr_svc.disposition_ncr(
         session, ncr_id, data, uuid.UUID(auth.sub),
         program_codes=auth.programs,
+        auth_context=auth,
     )
     await session.commit()
     await session.refresh(ncr)

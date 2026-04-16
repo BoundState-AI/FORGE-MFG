@@ -32,8 +32,16 @@ from __future__ import annotations
 
 import uuid as _uuid
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from fastapi import HTTPException
+
+if TYPE_CHECKING:
+    # Imported under TYPE_CHECKING to avoid the runtime import cycle
+    # against forge.api.auth_freshness → forge.api.auth → routes →
+    # this module.  The actual freshness call is a lazy import inside
+    # ``disposition_ncr`` for the same reason.
+    from forge.api.auth import AuthContext
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -661,17 +669,26 @@ async def disposition_ncr(
     data: NCRDisposition,
     user_id: _uuid.UUID,
     program_codes: list[str] | None = None,
+    *,
+    auth_context: AuthContext | None = None,
 ) -> NonconformanceReport:
     """Disposition an NCR: open → dispositioned + optional reopen.
 
     State leaving: open.  State entering: dispositioned.
     Invariants (in order):
       1. Caller has program scope (via parent WO).
-      2. Optimistic version matches.
-      3. Transition is legal per VALID_NCR_TRANSITIONS.
-      4. SOD-002: initiator must not equal the dispositioner.
-      5. Disposition must be a concrete decision (not `pending`).
-      6. If disposition is rework/repair AND parent WO is closed,
+      2. GC-3 freshness gate (when auth_context is provided): caller's
+         auth_time must be within ``MAX_AUTH_AGE_SECONDS``.  Stale auth
+         raises ``StaleAuthError`` (401 REAUTH_REQUIRED) BEFORE the
+         version check, SoD check, or any side effect — so the same
+         Idempotency-Key retry after fresh login lands on a clean
+         slate (UX spec §11.3).  Unconditional: NCR disposition is
+         always a protected action per §9.2 (not just safety-critical).
+      3. Optimistic version matches.
+      4. Transition is legal per VALID_NCR_TRANSITIONS.
+      5. SOD-002: initiator must not equal the dispositioner.
+      6. Disposition must be a concrete decision (not `pending`).
+      7. If disposition is rework/repair AND parent WO is closed,
          remediation_work_order_id must be supplied and valid.
 
     Side effects (build spec v1.4.2 GC-2):
@@ -686,6 +703,21 @@ async def disposition_ncr(
       - use_as_is / scrap: no reopen side effect.
     """
     ncr = await _get_ncr_in_scope(session, ncr_id, program_codes)
+
+    # GC-3: freshness gate fires AFTER scope check (so 404-not-403
+    # cross-program semantics from §6.7.4 still take precedence) but
+    # BEFORE the version check, SoD check, or any side effect.  Spec
+    # §11.3: this ordering is what makes the same-Idempotency-Key
+    # retry after fresh auth safe.
+    if auth_context is not None:
+        from forge.api.auth_freshness import (
+            AuthFreshnessAction,
+            require_fresh_auth,
+        )
+
+        await require_fresh_auth(
+            auth_context, session, AuthFreshnessAction.ncr_disposition
+        )
 
     try:
         check_version(ncr, data.version, entity_type="NonconformanceReport")

@@ -41,6 +41,7 @@ const AdminDashboard = lazy(() => import('@/pages/AdminDashboard'));
 const AdminPrograms = lazy(() => import('@/pages/AdminPrograms'));
 const AdminUsers = lazy(() => import('@/pages/AdminUsers'));
 const NotFound = lazy(() => import('@/pages/NotFound'));
+const AuthCallback = lazy(() => import('@/auth/AuthCallback'));
 
 function SuspenseFallback() {
   return (
@@ -85,6 +86,11 @@ export function App() {
               </Route>
 
               <Route path="/login" element={<LoginPlaceholder />} />
+              {/* GC-3: Cognito hosted-login callback.  Reads the
+                  buffered protected-action snapshot and routes the
+                  user back to the originating page so they can
+                  explicitly confirm-and-submit (no auto-replay). */}
+              <Route path="/auth/callback" element={<AuthCallback />} />
               <Route path="*" element={<NotFound />} />
             </Routes>
           </Suspense>

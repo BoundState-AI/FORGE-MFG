@@ -598,7 +598,12 @@ export interface paths {
         put?: never;
         /**
          * Record Sign Off
-         * @description Record a sign-off event (SOD-005 enforced in service).
+         * @description Record a sign-off event.
+         *
+         *     SOD-005 distinct-user check, and (for safety_critical operations)
+         *     the GC-3 fresh-auth gate, are both enforced in the service layer
+         *     before any inserts.  Stale auth raises 401 REAUTH_REQUIRED with
+         *     enough context for the frontend retry path (UX spec §9.2).
          */
         post: operations["record_sign_off_api_operations__op_id__sign_off_post"];
         delete?: never;
@@ -776,7 +781,9 @@ export interface paths {
          * @description Disposition an NCR (open → dispositioned).
          *
          *     SOD-002 (spec §4.2): the initiator cannot disposition the same NCR.
-         *     Enforcement happens in the service layer.
+         *     GC-3 fresh-auth gate (spec §9.2): every disposition is a protected
+         *     action; stale auth raises 401 REAUTH_REQUIRED before any side
+         *     effect.  Both checks run in the service layer.
          */
         patch: operations["disposition_ncr_api_ncrs__ncr_id__disposition_patch"];
         trace?: never;

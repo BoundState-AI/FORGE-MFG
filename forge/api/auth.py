@@ -88,6 +88,17 @@ class AuthContext:
     # (no expiry on the dev-override context), which the SSE loop
     # treats as "never expires" — safe for local use.
     expires_at: int | None = None
+    # GC-3: Unix epoch seconds when the underlying authentication event
+    # occurred (NOT when the access token was issued — those differ
+    # after a refresh).  Populated from the JWT `auth_time` claim by
+    # build_auth_context, with a documented fallback to `custom:auth_time`
+    # for Cognito configurations that surface only the custom claim
+    # (UX spec v1.5.1 §9.1).  Read by ``forge.api.auth_freshness`` to
+    # decide whether a protected action requires re-auth (§9.2).  None
+    # means "no freshness signal in the token" — the freshness helper
+    # then either falls back to the DB column or raises REAUTH_REQUIRED,
+    # depending on Settings.auth_freshness_source.
+    auth_time: int | None = None
 
     def has_permission(self, permission: str) -> bool:
         """Check if this user has the given permission string."""
@@ -382,6 +393,19 @@ def build_auth_context(claims: dict[str, Any]) -> AuthContext:
     except (TypeError, ValueError):
         expires_at = None
 
+    # GC-3: read freshness signal from the token.  Primary key is the
+    # standard ``auth_time`` claim (UX spec v1.5.1 §9.1).  The fallback
+    # ``custom:auth_time`` is read in the same try block because some
+    # Cognito Pre-Token-Generation triggers project the value under a
+    # custom claim namespace; one consistent extraction path means the
+    # downstream freshness helper never has to know which one was used.
+    auth_time_raw = claims.get("auth_time", claims.get("custom:auth_time"))
+    auth_time: int | None
+    try:
+        auth_time = int(auth_time_raw) if auth_time_raw is not None else None
+    except (TypeError, ValueError):
+        auth_time = None
+
     return AuthContext(
         sub=str(claims.get("sub", "")),
         username=str(
@@ -391,6 +415,7 @@ def build_auth_context(claims: dict[str, Any]) -> AuthContext:
         programs=programs,
         permissions=permissions,
         expires_at=expires_at,
+        auth_time=auth_time,
     )
 
 

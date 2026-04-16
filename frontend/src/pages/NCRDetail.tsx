@@ -19,15 +19,25 @@
  *   closed      -> read-only
  */
 
-import { useState, useCallback } from 'react';
-import { useParams } from 'react-router-dom';
+import { useEffect, useState, useCallback } from 'react';
+import { useParams, useSearchParams } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { fetchNCR, dispositionNCR, patchNCR, requestUploadUrl, confirmEvidence } from '@/api/endpoints';
 import { useAuthStore } from '@/auth/store';
+import {
+  beginReauth,
+  extractReauthError,
+  isReauthRequired,
+  peekReauthBuffer,
+  setReauthBuffer,
+  takeReauthBuffer,
+  type ReauthBuffer,
+} from '@/auth/reauth';
 import { StatusBadge } from '@/components/StatusBadge';
 import { ErrorBanner } from '@/components/ErrorBanner';
 import { LoadingSkeleton } from '@/components/LoadingSkeleton';
 import { ConfirmationDialog } from '@/components/ConfirmationDialog';
+import { ReauthModal } from '@/components/ReauthModal';
 import { PageHeader } from '@/components/PageHeader';
 import type { Disposition, NCRDisposition, NCRPatch, EvidenceRef } from '@/types/api';
 
@@ -118,6 +128,17 @@ export default function NCRDetail() {
   const [showConfirm, setShowConfirm] = useState(false);
   const [formError, setFormError] = useState<{ code?: string; message: string } | null>(null);
 
+  /* GC-3 reauth recovery state.  reauthBufferState mirrors the
+     sessionStorage buffer so the modal copy can render the action
+     summary directly from React state instead of re-parsing JSON. */
+  const [reauthOpen, setReauthOpen] = useState(false);
+  const [reauthBufferState, setReauthBufferState] =
+    useState<ReauthBuffer | null>(null);
+  const [reauthAuthAge, setReauthAuthAge] = useState<number | null>(null);
+  const [resumeOpen, setResumeOpen] = useState(false);
+  const [resumeBuffer, setResumeBuffer] = useState<ReauthBuffer | null>(null);
+  const [searchParams, setSearchParams] = useSearchParams();
+
   /* Evidence upload state */
   const [uploads, setUploads] = useState<UploadState[]>([]);
 
@@ -141,6 +162,33 @@ export default function NCRDetail() {
     },
     onError: (err: unknown) => {
       setShowConfirm(false);
+      /* GC-3: REAUTH_REQUIRED gets first crack at the error so a stale
+         disposition lands the user in the re-auth flow rather than a
+         generic 401 toast.  Spec §11.3: same-key retry not required
+         for PATCH disposition (the backend idempotency middleware only
+         caches POSTs), but the redirect + post-callback re-confirmation
+         contract still applies. */
+      if (isReauthRequired(err)) {
+        const reauth = extractReauthError(err);
+        const buffer: ReauthBuffer = {
+          createdAt: new Date().toISOString(),
+          idempotencyKey: crypto.randomUUID(),
+          action: 'ncr_disposition',
+          actionSummary: `Disposition NCR ${ncr?.ncr_number ?? id} as ${disposition}`,
+          returnTo: window.location.pathname,
+          forceFreshPrincipal: false,
+        };
+        /* Persist for the post-callback resume path.  The disposition
+           PATCH is naturally idempotent (it sets specific fields to
+           specific values), so we don't need an Idempotency-Key for
+           replay safety — but the buffer carries the action summary
+           so the post-callback re-confirmation modal can render it. */
+        setReauthBuffer(buffer);
+        setReauthBufferState(buffer);
+        setReauthAuthAge(reauth?.auth_age_seconds ?? null);
+        setReauthOpen(true);
+        return;
+      }
       const axiosErr = err as { response?: { status?: number; data?: { detail?: string; code?: string; error?: { code?: string; message?: string } } } };
       if (axiosErr.response?.status === 409) {
         setFormError({
@@ -170,6 +218,50 @@ export default function NCRDetail() {
     };
     dispositionMutation.mutate(body);
   }
+
+  /* GC-3 reauth flow handlers — open the modal on stale-auth, redirect
+     on confirm, surface a post-callback re-confirmation, replay on
+     explicit user submit. */
+  function handleConfirmReauth(): void {
+    setReauthOpen(false);
+    beginReauth();
+  }
+
+  function handleCancelReauth(): void {
+    setReauthOpen(false);
+    setReauthBufferState(null);
+    takeReauthBuffer();
+  }
+
+  function handleResumeConfirm(): void {
+    setResumeOpen(false);
+    /* Replay the disposition.  The PATCH route is naturally idempotent
+       (specific fields → specific values) so we don't need key
+       continuity; the explicit user click is the §11.3 contract. */
+    handleDispositionSubmit();
+    takeReauthBuffer();
+  }
+
+  function handleResumeCancel(): void {
+    setResumeOpen(false);
+    setResumeBuffer(null);
+    takeReauthBuffer();
+  }
+
+  /* On mount: if AuthCallback routed back here with ?reauth=resume
+     and a buffered disposition exists, surface the re-confirmation
+     modal.  Spec §11.3: never auto-replay. */
+  useEffect(() => {
+    if (searchParams.get('reauth') !== 'resume') return;
+    const buffer = peekReauthBuffer();
+    if (buffer && buffer.action === 'ncr_disposition') {
+      setResumeBuffer(buffer);
+      setResumeOpen(true);
+    }
+    const next = new URLSearchParams(searchParams);
+    next.delete('reauth');
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams]);
 
   /* Evidence upload handler */
   const handleEvidenceAdd = useCallback(async (file: File) => {
@@ -578,6 +670,35 @@ export default function NCRDetail() {
         confirmLabel="Submit Disposition"
         onConfirm={handleDispositionSubmit}
         onCancel={() => setShowConfirm(false)}
+        loading={dispositionMutation.isPending}
+      />
+
+      {/* GC-3: Stale-auth recovery modal. */}
+      <ReauthModal
+        open={reauthOpen}
+        action="ncr_disposition"
+        actionSummary={
+          reauthBufferState?.actionSummary ??
+          `Disposition NCR ${ncr?.ncr_number ?? id}`
+        }
+        authAgeSeconds={reauthAuthAge}
+        forceFreshPrincipal={false}
+        onConfirmReauth={handleConfirmReauth}
+        onCancel={handleCancelReauth}
+      />
+
+      {/* GC-3: Post-callback explicit re-confirmation (no auto-replay). */}
+      <ConfirmationDialog
+        open={resumeOpen}
+        title="Confirm and Submit"
+        message={
+          resumeBuffer
+            ? `Authentication refreshed. Submit ${resumeBuffer.actionSummary}?`
+            : ''
+        }
+        confirmLabel="Confirm and Submit"
+        onConfirm={handleResumeConfirm}
+        onCancel={handleResumeCancel}
         loading={dispositionMutation.isPending}
       />
     </div>

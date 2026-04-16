@@ -37,6 +37,7 @@ import { StatusBadge } from '@/components/StatusBadge';
 import { SafetyCriticalBanner } from '@/components/SafetyCriticalBanner';
 import { LoadingSkeleton } from '@/components/LoadingSkeleton';
 import { ErrorBanner } from '@/components/ErrorBanner';
+import { SignOffPanel } from '@/components/SignOffPanel';
 import { ConfirmationDialog } from '@/components/ConfirmationDialog';
 import { ConflictModal } from '@/components/ConflictModal';
 import { ConnectionBanner } from '@/components/ConnectionBanner';
@@ -581,6 +582,19 @@ export default function OperationExecution() {
           <HoldPointDisplay status={op.hold_point_status} />
         </div>
       )}
+
+      {/* GC-3: Sign-off panel.  Owns the full reauth recovery dance
+         (REAUTH_REQUIRED detection, redirect, post-callback re-confirm,
+         same-key retry) plus the second-signer banner from §9.2.
+         Renders nothing for users without a sign-off-eligible role. */}
+      <SignOffPanel
+        operationId={op.id}
+        operationSequence={op.sequence_number}
+        operationDescription={op.description}
+        isSafetyCritical={op.safety_critical}
+        signOffRolesRequired={[]}
+        onSignOffSuccess={invalidateAll}
+      />
 
       {/* Labor timer section */}
       <div style={cardStyle}>

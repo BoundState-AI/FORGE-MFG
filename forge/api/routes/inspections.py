@@ -131,10 +131,17 @@ async def record_sign_off(
     auth: AuthContext = Depends(require_permission("inspect:sign_off")),
     session: AsyncSession = Depends(get_db),
 ) -> SignOffOut:
-    """Record a sign-off event (SOD-005 enforced in service)."""
+    """Record a sign-off event.
+
+    SOD-005 distinct-user check, and (for safety_critical operations)
+    the GC-3 fresh-auth gate, are both enforced in the service layer
+    before any inserts.  Stale auth raises 401 REAUTH_REQUIRED with
+    enough context for the frontend retry path (UX spec §9.2).
+    """
     event = await insp_svc.record_sign_off(
         session, op_id, data, uuid.UUID(auth.sub),
         program_codes=auth.programs,
+        auth_context=auth,
     )
     await session.commit()
     await session.refresh(event)

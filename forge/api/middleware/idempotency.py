@@ -188,19 +188,29 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
                 response = await call_next(request)
                 resp_body = await _read_response_body(response)
 
+                # GC-3: NEVER cache a 401 response.  401 means "try
+                # again with different credentials" by definition —
+                # caching it would permanently shadow the same key
+                # against any retry, even after fresh authentication.
+                # UX spec §11.3 line 1538 is explicit: REAUTH_REQUIRED
+                # fires before side effects so the same Idempotency-Key
+                # CAN be retried.  Caching the 401 would break that
+                # contract for every protected action.
+                #
                 # Best-effort store.  If this fails, the response is
                 # still returned — the record won't be cached for
                 # future replays, but the handler is NOT re-executed.
-                try:
-                    await self._store(
-                        session, idem_key, user_id,
-                        request_hash, response, resp_body,
-                    )
-                except Exception:
-                    logger.exception(
-                        "Failed to store idempotency record for key=%s",
-                        idem_key,
-                    )
+                if response.status_code != 401:
+                    try:
+                        await self._store(
+                            session, idem_key, user_id,
+                            request_hash, response, resp_body,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Failed to store idempotency record for key=%s",
+                            idem_key,
+                        )
 
                 return Response(
                     content=resp_body,

@@ -350,11 +350,21 @@ export async function createInspection(
 export async function createSignOff(
   opId: string,
   body: SignOffCreate,
+  /**
+   * Caller-supplied Idempotency-Key.  When omitted, the typed-client
+   * middleware auto-generates one (the normal first-attempt path).
+   * GC-3 retry path: the sign-off mutation captures the key BEFORE the
+   * first request fires, then re-passes the same key on retry after
+   * fresh auth so the backend's idempotency cache deduplicates a
+   * double-submit (UX spec §11.3).
+   */
+  idempotencyKey?: string,
 ): Promise<SignOffOut> {
   return unwrap(
     await typedClient.POST('/api/operations/{op_id}/sign-off', {
       params: { path: { op_id: opId } },
       body,
+      headers: idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined,
     }),
   );
 }

@@ -56,8 +56,17 @@ from __future__ import annotations
 import uuid as _uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 
 from fastapi import HTTPException
+
+if TYPE_CHECKING:
+    # Imported under TYPE_CHECKING to avoid the runtime import cycle:
+    # forge.api.auth_freshness imports AuthContext from forge.api.auth,
+    # which transitively pulls in route modules that import this file.
+    # The runtime call site below imports auth_freshness lazily inside
+    # the function body for the same reason.
+    from forge.api.auth import AuthContext
 from sqlalchemy import Select, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -490,20 +499,50 @@ async def record_sign_off(
     data: SignOffCreate,
     user_id: _uuid.UUID,
     program_codes: list[str] | None = None,
+    *,
+    auth_context: AuthContext | None = None,
 ) -> SignOffEvent:
     """Record a role-based sign-off against an in-progress operation.
 
     State leaving: in_progress.  State entering: in_progress.
-    Invariants:
+    Invariants (in order):
       1. Op must be in_progress.
-      2. SOD-005 (only if safety_critical): the new (user_id, role) pair
+      2. GC-3 freshness gate (only if safety_critical AND auth_context
+         is provided): caller's auth_time must be within
+         ``MAX_AUTH_AGE_SECONDS``.  Stale auth raises
+         ``StaleAuthError`` (401 REAUTH_REQUIRED) BEFORE any rows or
+         audit records are written, so the same Idempotency-Key retry
+         after fresh login lands on a clean slate (UX spec §11.3).
+      3. SOD-005 (only if safety_critical): the new (user_id, role) pair
          cannot reuse a user_id already present on a *different* role
          in the current execution_cycle.  Re-signing the same role is
          rejected by the unique DB constraint, not by SoD.
-      3. execution_cycle is taken server-side from op.execution_cycle.
+      4. execution_cycle is taken server-side from op.execution_cycle.
+
+    auth_context is keyword-only and optional so callers that already
+    pre-validated freshness (or operate outside the HTTP layer, like
+    background workers) do not need to construct one.  In Phase 1 only
+    the HTTP route layer calls this, and it always passes the live
+    AuthContext.
     """
     op = await _get_op(session, op_id, program_codes=program_codes)
     _require_op_in_progress(op)
+
+    # GC-3: freshness gate fires AFTER scope/state checks (so program-
+    # mismatch and op-state errors continue to take precedence) but
+    # BEFORE any insert / audit-write side effect.  The same-key
+    # Idempotency retry path depends on this ordering — a partial
+    # commit before REAUTH_REQUIRED would let the cached idempotent
+    # response permanently shadow the user's intent.
+    if op.safety_critical and auth_context is not None:
+        from forge.api.auth_freshness import (
+            AuthFreshnessAction,
+            require_fresh_auth,
+        )
+
+        await require_fresh_auth(
+            auth_context, session, AuthFreshnessAction.sign_off
+        )
 
     existing = await _signoffs_for_op(session, op_id)
     snapshots = [
