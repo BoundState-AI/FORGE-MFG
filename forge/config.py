@@ -143,13 +143,32 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _enforce_production_safety(self) -> Settings:
-        """Block unsafe configuration in production.
+        """Block unsafe configuration in production and staging.
 
-        Why: debug mode exposes stack traces and interactive docs that must
-        not be visible in a production or GovCloud environment.
+        Why (debug): debug mode exposes stack traces and interactive docs that
+        must not be visible in a production or GovCloud environment.
+
+        Why (auth_mode): when auth_mode != "cognito", AuthMiddleware.dispatch
+        (forge/api/middleware/auth.py lines 80-96) short-circuits auth and
+        injects a fully-permissioned local dev AuthContext — wildcard program
+        scope and the union of every role's permissions — on every request.
+        Shipping that to staging or production would grant every caller every
+        permission on every program, defeating the entire authorization model.
+        Build Spec §9.3.6 mandates Cognito-backed session security (30-minute
+        access tokens, auth_time freshness, AdminUserGlobalSignOut) for
+        staging and production; staging "mirrors production" per §9.3.7, so
+        both environments are gated identically here.
         """
         if self.env == "production" and self.debug:
             raise ValueError("debug must be False in production")
+        if self.env in ("production", "staging") and self.auth_mode != "cognito":
+            raise ValueError(
+                f"auth_mode must be 'cognito' when env='{self.env}' "
+                f"(got auth_mode='{self.auth_mode}'); local auth mode injects "
+                "a fully-permissioned dev AuthContext via "
+                "AuthMiddleware.dispatch and would grant every request every "
+                "permission in a GovCloud environment (Build Spec §9.3.6)"
+            )
         return self
 
 
