@@ -350,6 +350,12 @@ async def get_operation_detail(
         "execution_cycle": op.execution_cycle,
         "inspection_hold": op.inspection_hold,
         "safety_critical": op.safety_critical,
+        # GC-3 review fix: required sign-off roles surface on the
+        # detail response so the frontend SignOffPanel can render the
+        # second-signer banner (UX spec §9.2 line 1480).  The ORM
+        # column defaults to an empty list; normalize to list so the
+        # Pydantic validator doesn't choke on None from legacy rows.
+        "sign_off_roles_required": list(op.sign_off_roles_required or []),
         "estimated_hours": op.estimated_hours,
         "started_at": op.started_at,
         "completed_at": op.completed_at,

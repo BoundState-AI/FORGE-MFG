@@ -7922,6 +7922,13 @@
             "type": "boolean",
             "title": "Safety Critical"
           },
+          "sign_off_roles_required": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Sign Off Roles Required"
+          },
           "estimated_hours": {
             "type": "number",
             "title": "Estimated Hours"
@@ -8002,6 +8009,7 @@
           "execution_cycle",
           "inspection_hold",
           "safety_critical",
+          "sign_off_roles_required",
           "estimated_hours",
           "started_at",
           "completed_at",

@@ -204,6 +204,14 @@ class OperationDetailOut(BaseModel):
     execution_cycle: int
     inspection_hold: bool
     safety_critical: bool
+    # GC-3 review fix: the list of sign-off roles required to complete
+    # this operation.  Exposed here on the detail response (not just
+    # on OperationCreate / OperationUpdate) so the frontend sign-off
+    # panel can render the UX spec §9.2 second-signer banner
+    # ("First sign-off recorded. Second sign-off required from a
+    # different user.") when more than one role is required.  Default
+    # empty list to match the ORM model default.
+    sign_off_roles_required: list[str]
     estimated_hours: float
     started_at: datetime | None
     completed_at: datetime | None

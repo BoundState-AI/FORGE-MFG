@@ -592,7 +592,11 @@ export default function OperationExecution() {
         operationSequence={op.sequence_number}
         operationDescription={op.description}
         isSafetyCritical={op.safety_critical}
-        signOffRolesRequired={[]}
+        /* GC-3 review fix: the detail response now carries this field
+           (was '[]' placeholder in the previous pass).  When it names
+           more than one role, SignOffPanel renders the §9.2 second-
+           signer banner after the first sign-off succeeds. */
+        signOffRolesRequired={op.sign_off_roles_required ?? []}
         onSignOffSuccess={invalidateAll}
       />
 

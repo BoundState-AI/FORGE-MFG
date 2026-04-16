@@ -398,11 +398,25 @@ export async function createNCR(body: NCRCreate): Promise<NCROut> {
 export async function dispositionNCR(
   id: string,
   body: NCRDisposition,
+  /**
+   * Caller-supplied Idempotency-Key for the GC-3 same-key retry path
+   * (UX spec §9.3 line 1490: "Re-auth retries reuse the same
+   * Idempotency-Key; the client does not generate a new key after
+   * REAUTH_REQUIRED").  The spec contract is uniform across all
+   * protected actions — it is NOT carved out for PATCH even though
+   * the current backend idempotency middleware only caches POSTs.
+   * Carrying the header on disposition retries keeps the contract
+   * honest and is free when the backend does not need it; if the
+   * backend later extends caching to PATCH, the frontend is already
+   * correct.
+   */
+  idempotencyKey?: string,
 ): Promise<NCROut> {
   return unwrap(
     await typedClient.PATCH('/api/ncrs/{ncr_id}/disposition', {
       params: { path: { ncr_id: id } },
       body,
+      headers: idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined,
     }),
   );
 }

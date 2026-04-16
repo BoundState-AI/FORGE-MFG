@@ -293,3 +293,82 @@ describe('SignOffPanel reauth recovery', () => {
     ).toBeInTheDocument();
   });
 });
+
+/* ── PKCE token exchange ── */
+
+describe('exchangeCodeForToken', () => {
+  const originalFetch = globalThis.fetch;
+
+  beforeEach(() => {
+    sessionStorage.clear();
+    /* Stub the Cognito domain + client id so the helper's guard passes. */
+    (import.meta.env as Record<string, string>).VITE_COGNITO_DOMAIN =
+      'https://auth.example.test';
+    (import.meta.env as Record<string, string>).VITE_COGNITO_APP_CLIENT_ID =
+      'test-client-id';
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    delete (import.meta.env as Record<string, string | undefined>)
+      .VITE_COGNITO_DOMAIN;
+    delete (import.meta.env as Record<string, string | undefined>)
+      .VITE_COGNITO_APP_CLIENT_ID;
+  });
+
+  it('posts the code + verifier to /oauth2/token and returns the access_token', async () => {
+    const { exchangeCodeForToken } = await import('@/auth/reauth');
+    /* Seed the verifier as if beginReauth() had run. */
+    sessionStorage.setItem('forge_pkce_verifier', 'test-verifier-43-chars-min');
+
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ access_token: 'fresh-access-token' }),
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const token = await exchangeCodeForToken('oauth-code-abc');
+    expect(token).toBe('fresh-access-token');
+
+    /* Verify the exchange used the verifier and the Cognito endpoint. */
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('https://auth.example.test/oauth2/token');
+    const body = (init as RequestInit).body as string;
+    expect(body).toContain('grant_type=authorization_code');
+    expect(body).toContain('code=oauth-code-abc');
+    expect(body).toContain('code_verifier=test-verifier-43-chars-min');
+    expect(body).toContain('client_id=test-client-id');
+
+    /* Verifier is single-use: must have been cleared after redemption. */
+    expect(sessionStorage.getItem('forge_pkce_verifier')).toBeNull();
+  });
+
+  it('returns null when the Cognito token endpoint rejects the code', async () => {
+    const { exchangeCodeForToken } = await import('@/auth/reauth');
+    sessionStorage.setItem('forge_pkce_verifier', 'test-verifier-43-chars-min');
+
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      json: async () => ({ error: 'invalid_grant' }),
+    }) as unknown as typeof fetch;
+
+    const token = await exchangeCodeForToken('stale-code');
+    expect(token).toBeNull();
+  });
+
+  it('returns null when the PKCE verifier is missing (replay guard)', async () => {
+    const { exchangeCodeForToken } = await import('@/auth/reauth');
+    /* No verifier set → the helper must refuse to exchange, since
+       replaying an authorization code without the verifier would
+       surrender PKCE's whole point. */
+    const fetchMock = vi.fn();
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const token = await exchangeCodeForToken('whatever');
+    expect(token).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+

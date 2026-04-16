@@ -3456,6 +3456,8 @@ export interface components {
             inspection_hold: boolean;
             /** Safety Critical */
             safety_critical: boolean;
+            /** Sign Off Roles Required */
+            sign_off_roles_required: string[];
             /** Estimated Hours */
             estimated_hours: number;
             /** Started At */

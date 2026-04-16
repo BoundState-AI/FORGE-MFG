@@ -1,29 +1,42 @@
 /**
  * Module:   AuthGate
- * Purpose:  Top-level auth wrapper that loads the user profile on mount.
- * Rev:      0.1.0
+ * Purpose:  Auth-gated layout route.  Blocks rendering of its Outlet
+ *           until a Cognito access token is present and the user
+ *           profile has been fetched.
+ * Rev:      0.2.0
  *
  * BoundState Proprietary
  * Co-Authored-By: Dr. Joseph Wilde, BoundState AI
  * Co-Authored-By: Claude "Beth" (Opus 4.6)
  *
- * Why this gate: The app needs the user profile (roles, programs) before
- * rendering any route.  This component fetches /api/users/me on mount
- * and hydrates the auth store.  If no token is present, it redirects to
- * the login page.
+ * Why this is a layout route (not a children wrapper): public routes
+ * — ``/login`` and ``/auth/callback`` — must be reachable without an
+ * access token.  The GC-3 reauth flow clears the token, redirects to
+ * ``/auth/callback``, exchanges the Cognito OAuth code for a fresh
+ * token, and only THEN has an identity.  If the callback were wrapped
+ * in an always-on auth gate the fresh-token handoff would be
+ * structurally unreachable — the gate would block the user on the
+ * empty token before the exchange step could run.  The React Router
+ * v6 layout-route pattern (parent route with ``element={<AuthGate />}``
+ * + child routes that render through ``<Outlet />``) lets us mount
+ * AuthGate only where it's actually required.
+ *
+ * The component otherwise behaves identically to the original wrapper:
+ *   - No access token → render the inline sign-in prompt (local-dev).
+ *     Production deployments wire this to ``beginReauth()``.
+ *   - Token present, /api/users/me in flight → skeleton.
+ *   - /api/users/me failed → inline error banner.
+ *   - Token + profile loaded → render child routes via ``<Outlet />``.
  */
 
-import { useEffect, type ReactNode } from 'react';
+import { useEffect } from 'react';
+import { Outlet } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { useAuthStore } from './store';
 import { fetchCurrentUser } from '@/api/endpoints';
 import { LoadingSkeleton } from '@/components/LoadingSkeleton';
 
-interface AuthGateProps {
-  children: ReactNode;
-}
-
-export function AuthGate({ children }: AuthGateProps) {
+export function AuthGate() {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
   const setUser = useAuthStore((s) => s.setUser);
   const user = useAuthStore((s) => s.user);
@@ -42,10 +55,11 @@ export function AuthGate({ children }: AuthGateProps) {
     }
   }, [data, user, setUser]);
 
-  /* No token — show login */
+  /* No token — show inline sign-in prompt.  Production deployments
+     replace this onClick handler with ``beginReauth()`` so Cognito
+     handles the redirect; local dev sets a placeholder token so the
+     rest of the app can run without Cognito configured. */
   if (!isAuthenticated) {
-    /* In a real app this would redirect to Cognito hosted login.
-       For local dev, we show the inline login placeholder. */
     return (
       <div className="page-content" style={{ maxWidth: 400, margin: '80px auto' }}>
         <h1 className="page-title">FORGE-MFG</h1>
@@ -95,5 +109,6 @@ export function AuthGate({ children }: AuthGateProps) {
     );
   }
 
-  return <>{children}</>;
+  /* Authenticated + profile loaded → render child routes. */
+  return <Outlet />;
 }

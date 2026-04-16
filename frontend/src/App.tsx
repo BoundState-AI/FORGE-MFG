@@ -52,12 +52,35 @@ function SuspenseFallback() {
 }
 
 export function App() {
+  /* Route layout:
+   *   PUBLIC (no AuthGate, no access token required):
+   *     /login         — placeholder/Cognito hosted-login entry
+   *     /auth/callback — Cognito redirect lands here; exchanges the
+   *                      OAuth code for a fresh access token and then
+   *                      routes the user back to their buffered mutation.
+   *                      MUST be public so the GC-3 re-auth flow can
+   *                      land after sessionStorage was cleared.
+   *   GATED (AuthGate wraps everything under this layout route):
+   *     all app routes — Dashboard, work orders, operations, NCRs, admin,
+   *                      etc.  AuthGate still enforces the "must have
+   *                      access token + loaded user profile" contract.
+   *
+   * Fixing the earlier structure where the callback was inside AuthGate
+   * meant the clear-token-then-redirect-to-callback step was structurally
+   * unreachable — AuthGate blocked on the empty token before /auth/callback
+   * could render.
+   */
   return (
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
-        <AuthGate>
-          <Suspense fallback={<SuspenseFallback />}>
-            <Routes>
+        <Suspense fallback={<SuspenseFallback />}>
+          <Routes>
+            {/* Public routes — no AuthGate. */}
+            <Route path="/login" element={<LoginPlaceholder />} />
+            <Route path="/auth/callback" element={<AuthCallback />} />
+
+            {/* Gated routes — AuthGate wraps via its Outlet. */}
+            <Route element={<AuthGate />}>
               <Route element={<Layout />}>
                 <Route index element={<Dashboard />} />
                 <Route path="work-orders" element={<WorkOrderList />} />
@@ -84,17 +107,11 @@ export function App() {
                   <Route path="programs" element={<AdminPrograms />} />
                 </Route>
               </Route>
+            </Route>
 
-              <Route path="/login" element={<LoginPlaceholder />} />
-              {/* GC-3: Cognito hosted-login callback.  Reads the
-                  buffered protected-action snapshot and routes the
-                  user back to the originating page so they can
-                  explicitly confirm-and-submit (no auto-replay). */}
-              <Route path="/auth/callback" element={<AuthCallback />} />
-              <Route path="*" element={<NotFound />} />
-            </Routes>
-          </Suspense>
-        </AuthGate>
+            <Route path="*" element={<NotFound />} />
+          </Routes>
+        </Suspense>
       </BrowserRouter>
     </QueryClientProvider>
   );

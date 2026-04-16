@@ -316,7 +316,55 @@ class TestOperationDetail:
         assert body["predecessors"] == []
         assert body["predecessor_summaries"] == []
         assert body["stop_requests"] == []
+        # GC-3: sign_off_roles_required is exposed on the detail
+        # response so the frontend SignOffPanel can render the §9.2
+        # second-signer banner.  Default ORM value is an empty list.
+        assert body["sign_off_roles_required"] == []
         assert body["version"] >= 1
+
+    @pytest.mark.asyncio
+    async def test_sign_off_roles_required_round_trips(self) -> None:
+        """GC-3 review fix: an op created with non-empty
+        sign_off_roles_required must surface those roles on the
+        detail GET so the frontend second-signer banner works.
+
+        Previously OperationDetailOut did not include the field at
+        all — frontend defaulted to an empty list and the banner
+        never fired, making the same-device dual sign-off UX inert.
+        """
+        self._clear_override()
+        async with await self._client() as client:
+            r = await client.post(
+                "/api/work-orders",
+                json={
+                    "program_id": self.prog_id,
+                    "engine_serial": f"E-SOR-{uuid.uuid4().hex[:6]}",
+                    "module": "Powerhead",
+                    "build_phase": "fabrication",
+                },
+                headers={"Idempotency-Key": str(uuid.uuid4())},
+            )
+            assert r.status_code == 201, r.text
+            wo = r.json()
+
+            r = await client.post(
+                f"/api/work-orders/{wo['id']}/operations",
+                json={
+                    "description": "Dual-signoff weld",
+                    "sequence": 1,
+                    "safety_critical": True,
+                    "sign_off_roles_required": ["operator", "inspector"],
+                },
+                headers={"Idempotency-Key": str(uuid.uuid4())},
+            )
+            assert r.status_code == 201, r.text
+            op = r.json()
+
+            r = await client.get(f"/api/operations/{op['id']}")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["sign_off_roles_required"] == ["operator", "inspector"]
+        assert body["safety_critical"] is True
 
     # ------------------------------------------------------------------
     # Hold-point status derivation — all five states

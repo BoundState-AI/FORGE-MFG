@@ -130,13 +130,18 @@ export default function NCRDetail() {
 
   /* GC-3 reauth recovery state.  reauthBufferState mirrors the
      sessionStorage buffer so the modal copy can render the action
-     summary directly from React state instead of re-parsing JSON. */
+     summary directly from React state instead of re-parsing JSON.
+     activeIdempotencyKey is captured BEFORE the first mutation fires
+     so the REAUTH retry can reuse the exact same key (spec §9.3
+     line 1490). */
   const [reauthOpen, setReauthOpen] = useState(false);
   const [reauthBufferState, setReauthBufferState] =
     useState<ReauthBuffer | null>(null);
   const [reauthAuthAge, setReauthAuthAge] = useState<number | null>(null);
   const [resumeOpen, setResumeOpen] = useState(false);
   const [resumeBuffer, setResumeBuffer] = useState<ReauthBuffer | null>(null);
+  const [activeIdempotencyKey, setActiveIdempotencyKey] =
+    useState<string | null>(null);
   const [searchParams, setSearchParams] = useSearchParams();
 
   /* Evidence upload state */
@@ -153,36 +158,35 @@ export default function NCRDetail() {
      operation (complete → in_progress) and reactivates the parent WO
      if needed.  Permission: engineer (not initiator). */
   const dispositionMutation = useMutation({
-    mutationFn: (body: NCRDisposition) => dispositionNCR(id!, body),
+    mutationFn: (vars: { body: NCRDisposition; idempotencyKey: string }) =>
+      dispositionNCR(id!, vars.body, vars.idempotencyKey),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['ncr', id] });
       queryClient.invalidateQueries({ queryKey: ['ncrs'] });
       setShowConfirm(false);
       setFormError(null);
+      setActiveIdempotencyKey(null);
     },
     onError: (err: unknown) => {
       setShowConfirm(false);
       /* GC-3: REAUTH_REQUIRED gets first crack at the error so a stale
          disposition lands the user in the re-auth flow rather than a
-         generic 401 toast.  Spec §11.3: same-key retry not required
-         for PATCH disposition (the backend idempotency middleware only
-         caches POSTs), but the redirect + post-callback re-confirmation
-         contract still applies. */
+         generic 401 toast.  Spec §9.3 line 1490: the retry MUST reuse
+         the same Idempotency-Key — carry it through on the buffer so
+         the post-callback replay is honest about the contract even
+         when the current idempotency middleware only caches POSTs. */
       if (isReauthRequired(err)) {
         const reauth = extractReauthError(err);
+        const keyForRetry =
+          activeIdempotencyKey ?? crypto.randomUUID();
         const buffer: ReauthBuffer = {
           createdAt: new Date().toISOString(),
-          idempotencyKey: crypto.randomUUID(),
+          idempotencyKey: keyForRetry,
           action: 'ncr_disposition',
           actionSummary: `Disposition NCR ${ncr?.ncr_number ?? id} as ${disposition}`,
           returnTo: window.location.pathname,
           forceFreshPrincipal: false,
         };
-        /* Persist for the post-callback resume path.  The disposition
-           PATCH is naturally idempotent (it sets specific fields to
-           specific values), so we don't need an Idempotency-Key for
-           replay safety — but the buffer carries the action summary
-           so the post-callback re-confirmation modal can render it. */
         setReauthBuffer(buffer);
         setReauthBufferState(buffer);
         setReauthAuthAge(reauth?.auth_age_seconds ?? null);
@@ -208,6 +212,10 @@ export default function NCRDetail() {
 
   function handleDispositionSubmit() {
     if (!ncr) return;
+    /* Generate + capture the Idempotency-Key before firing so the
+       REAUTH_REQUIRED retry path can reuse it (spec §9.3 line 1490). */
+    const key = activeIdempotencyKey ?? crypto.randomUUID();
+    setActiveIdempotencyKey(key);
     const body: NCRDisposition = {
       version: ncr.version,
       disposition,
@@ -216,7 +224,7 @@ export default function NCRDetail() {
       mrb_authority_id: ncr.mrb_required && mrbAuthorityId ? mrbAuthorityId : undefined,
       remediation_work_order_id: needsRemediationWo && remediationWoId ? remediationWoId : undefined,
     };
-    dispositionMutation.mutate(body);
+    dispositionMutation.mutate({ body, idempotencyKey: key });
   }
 
   /* GC-3 reauth flow handlers — open the modal on stale-auth, redirect
@@ -224,7 +232,10 @@ export default function NCRDetail() {
      explicit user submit. */
   function handleConfirmReauth(): void {
     setReauthOpen(false);
-    beginReauth();
+    /* beginReauth is async (PKCE challenge needs WebCrypto SHA-256)
+       but we fire-and-forget — the final line is
+       ``window.location.assign(...)``, which tears the page down. */
+    void beginReauth();
   }
 
   function handleCancelReauth(): void {
@@ -235,10 +246,33 @@ export default function NCRDetail() {
 
   function handleResumeConfirm(): void {
     setResumeOpen(false);
-    /* Replay the disposition.  The PATCH route is naturally idempotent
-       (specific fields → specific values) so we don't need key
-       continuity; the explicit user click is the §11.3 contract. */
-    handleDispositionSubmit();
+    /* Replay the disposition, reusing the buffered Idempotency-Key
+       so the server-side dedupe is honored (spec §9.3 line 1490).
+       Setting activeIdempotencyKey BEFORE handleDispositionSubmit
+       lets the ?? fallback in that function pick up the buffered
+       value instead of generating a new one. */
+    if (resumeBuffer) {
+      setActiveIdempotencyKey(resumeBuffer.idempotencyKey);
+      /* handleDispositionSubmit reads activeIdempotencyKey via closure.
+         React's state-update batching means the above setter has not
+         actually applied yet when the function runs — so we pass the
+         key explicitly on the mutation, which handleDispositionSubmit
+         prefers via the ?? pattern.  To avoid that subtle ordering
+         bug we inline the mutate call here with the known key. */
+      if (!ncr) return;
+      const body: NCRDisposition = {
+        version: ncr.version,
+        disposition,
+        disposition_rationale: rationale,
+        mrb_disposition: ncr.mrb_required && mrbDisposition ? mrbDisposition : undefined,
+        mrb_authority_id: ncr.mrb_required && mrbAuthorityId ? mrbAuthorityId : undefined,
+        remediation_work_order_id: needsRemediationWo && remediationWoId ? remediationWoId : undefined,
+      };
+      dispositionMutation.mutate({
+        body,
+        idempotencyKey: resumeBuffer.idempotencyKey,
+      });
+    }
     takeReauthBuffer();
   }
 

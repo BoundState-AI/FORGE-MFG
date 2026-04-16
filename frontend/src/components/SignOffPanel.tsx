@@ -183,10 +183,14 @@ export function SignOffPanel({
     });
   }
 
-  /** User confirmed in the ReauthModal → buffer is set; redirect now. */
+  /** User confirmed in the ReauthModal → buffer is set; redirect now.
+      beginReauth is async (PKCE challenge needs WebCrypto SHA-256),
+      but we intentionally do not await the promise in event handlers —
+      the final line is ``window.location.assign(...)``, which tears
+      the page down either way. */
   function handleConfirmReauth(): void {
     setReauthOpen(false);
-    beginReauth();
+    void beginReauth();
   }
 
   /** User cancelled the reauth modal → discard the intent cleanly. */
