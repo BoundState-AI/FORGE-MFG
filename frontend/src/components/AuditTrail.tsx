@@ -68,6 +68,14 @@ interface AuditTrailProps {
  * the UI readable without renaming the underlying audit events —
  * per the prompt's "preserve the actual event naming" constraint.
  */
+/* The `.in_progress` suffix is emitted by (a) `work_order.in_progress`
+   when the first op starts, (b) `operation.in_progress` whenever an op
+   enters in_progress (first start, rework start, or hold resume).  We
+   intentionally DO NOT override it to "Resumed" because that would
+   mislabel the first-start and rework-start paths.  The default
+   humanizer produces "In Progress", which is truthful for every
+   origin — the expanded row still shows the raw action code so a
+   reviewer can disambiguate. */
 const VERB_LABEL_OVERRIDES: Record<string, string> = {
   close: 'Closed',
   closed: 'Closed',
@@ -79,7 +87,6 @@ const VERB_LABEL_OVERRIDES: Record<string, string> = {
   dispositioned: 'Dispositioned',
   hold: 'Held',
   held: 'Held',
-  in_progress: 'Resumed',
   record: 'Recorded',
   recorded: 'Recorded',
   reactivated: 'Reactivated',

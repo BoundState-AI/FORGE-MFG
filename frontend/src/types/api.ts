@@ -128,8 +128,23 @@ export type NCRDisposition = Schemas['NCRDisposition'];
 export type NCRPatch = Schemas['NCRPatch'];
 export type NCRClose = Schemas['NCRClose'];
 
-/* Audit (UX spec §6.6). */
-export type AuditEventOut = Schemas['AuditEventOut'];
+/* Audit (UX spec §6.6).
+   The generated schema narrows `before_state` / `after_state` to
+   `Record<string, never> | null` because the backend schema declares
+   the fields as `dict[str, Any] | None`, which Pydantic emits as a
+   bare `{"type": "object"}` with no `additionalProperties`.  The real
+   wire shape is a free-form diff object keyed by whichever fields
+   changed on the audited entity (per UX spec §6.6.1).  We override
+   those two fields here so callers can index into them; every other
+   key on AuditEventOut still comes from the generated schema, so spec
+   drift outside the state payloads still fails to compile. */
+export type AuditEventOut = Omit<
+  Schemas['AuditEventOut'],
+  'before_state' | 'after_state'
+> & {
+  before_state: Record<string, unknown> | null;
+  after_state: Record<string, unknown> | null;
+};
 export type AuditActor = Schemas['AuditActor'];
 
 /* Material */
