@@ -23,8 +23,8 @@ import { createPortal } from 'react-dom';
 
 interface ReauthModalProps {
   open: boolean;
-  /** Action label from the REAUTH envelope (sign_off | ncr_disposition). */
-  action: 'sign_off' | 'ncr_disposition';
+  /** Action label from the REAUTH envelope.  GC-4 extends the set. */
+  action: 'sign_off' | 'ncr_disposition' | 'wo_close' | 'ncr_close';
   /** Human-readable summary of what the user was doing. */
   actionSummary: string;
   /** Optional age line: "Your sign-in is N seconds old." */
@@ -62,7 +62,13 @@ export function ReauthModal({
   if (!open) return null;
 
   const actionLabel =
-    action === 'sign_off' ? 'sign-off' : 'NCR disposition';
+    action === 'sign_off'
+      ? 'sign-off'
+      : action === 'ncr_disposition'
+        ? 'NCR disposition'
+        : action === 'wo_close'
+          ? 'work order closure'
+          : 'NCR closure';
   const heading = forceFreshPrincipal
     ? 'Second sign-off requires a different user'
     : 'Re-authentication required';

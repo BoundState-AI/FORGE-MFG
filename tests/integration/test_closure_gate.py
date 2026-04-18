@@ -435,6 +435,63 @@ class TestClosureGate:
         assert detail["blockers"][0]["entity_id"] == ncr["id"]
 
     @pytest.mark.asyncio
+    async def test_wo_close_blocked_by_voided_ncr(self) -> None:
+        """GC-4 round-2 (Codex High): voided NCRs also block WO close.
+
+        Build spec §5.1 line 930 is explicit: WO close requires all
+        linked NCRs `closed`.  A `voided` NCR is terminal per §3.1 but
+        is NOT closed — allowing it would create a loophole where an
+        administratively voided NCR masks an unresolved quality
+        concern the QA gate is supposed to attest against.
+        """
+        from datetime import UTC
+        from datetime import datetime as _dt
+
+        from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+
+        self.app = _build_app(closure_enabled=True)
+        wo = await self._make_complete_wo()
+        ncr = await self._open_ncr_on(wo["id"])
+
+        # Void the NCR directly via the model — no route exists for
+        # voiding in Phase-1, but the state is part of the §3.1
+        # lifecycle and should still block close.
+        engine = create_async_engine(_ASYNC_URL)
+        try:
+            async with AsyncSession(engine) as session, session.begin():
+                from forge.models.ncr import NonconformanceReport
+                n = await session.get(
+                    NonconformanceReport, uuid.UUID(ncr["id"]),
+                )
+                assert n is not None
+                n.status = "voided"  # type: ignore[assignment]
+                n.updated_by = uuid.UUID(INSPECTOR_USER_ID)
+                n.updated_at = _dt.now(UTC)
+        finally:
+            await engine.dispose()
+
+        self._override_as(QA_USER_ID, roles=["qa_manager"])
+        async with await self._client() as client:
+            r_detail = await client.get(f"/api/work-orders/{wo['id']}")
+            assert r_detail.status_code == 200, r_detail.text
+            body = r_detail.json()
+            assert body["closure_ready"] is False
+            assert any(
+                b["code"] == "WO_CLOSE_NCRS_NOT_CLOSED"
+                and b["entity_id"] == ncr["id"]
+                for b in body["closure_blockers"]
+            )
+
+            r_close = await client.post(
+                f"/api/work-orders/{wo['id']}/close",
+                json={"version": wo["version"]},
+                headers={"Idempotency-Key": str(uuid.uuid4())},
+            )
+        self._clear_override()
+        assert r_close.status_code == 422, r_close.text
+        assert r_close.json()["detail"]["code"] == "WO_CLOSE_NCRS_NOT_CLOSED"
+
+    @pytest.mark.asyncio
     async def test_wo_close_blocked_by_unresolved_conditional(self) -> None:
         """422 WO_CLOSE_UNRESOLVED_CONDITIONALS naming the offending op."""
         from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine

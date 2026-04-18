@@ -741,9 +741,13 @@ async def compute_closure_blockers(
     blockers: list[dict[str, Any]] = []
 
     # 1) NCRs-not-closed: every NCR linked to this WO must be `closed`
-    #    (NCRStatus.closed).  `voided` is also an acceptable terminal
-    #    — voided NCRs were rolled back administratively and do not
-    #    block close per §3.1 lifecycle.
+    #    (NCRStatus.closed).  Build spec §5.1 is explicit: "Close is
+    #    allowed only when all linked NCRs are `closed`."  A `voided`
+    #    NCR — even though it's terminal per the §3.1 lifecycle — is
+    #    NOT `closed`, so it blocks WO close.  Treating voided as
+    #    acceptable would create a loophole: an administratively
+    #    voided NCR could mask an unresolved quality concern the QA
+    #    gate is supposed to attest against.
     open_ncr_stmt = (
         select(
             NonconformanceReport.id,
@@ -752,7 +756,7 @@ async def compute_closure_blockers(
         )
         .where(
             NonconformanceReport.work_order_id == wo.id,
-            NonconformanceReport.status.notin_(["closed", "voided"]),
+            NonconformanceReport.status != "closed",
         )
         .order_by(NonconformanceReport.created_at.asc())
     )

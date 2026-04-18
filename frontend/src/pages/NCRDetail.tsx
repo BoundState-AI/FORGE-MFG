@@ -33,6 +33,7 @@ import {
   peekReauthBuffer,
   setReauthBuffer,
   takeReauthBuffer,
+  type NCRCloseReauthBuffer,
   type ReauthBuffer,
 } from '@/auth/reauth';
 import { StatusBadge } from '@/components/StatusBadge';
@@ -41,7 +42,7 @@ import { LoadingSkeleton } from '@/components/LoadingSkeleton';
 import { ConfirmationDialog } from '@/components/ConfirmationDialog';
 import { ReauthModal } from '@/components/ReauthModal';
 import { PageHeader } from '@/components/PageHeader';
-import type { Disposition, NCRDisposition, NCRPatch, EvidenceRef } from '@/types/api';
+import type { Disposition, NCRClose, NCRDisposition, NCRPatch, EvidenceRef } from '@/types/api';
 
 /* ── Styles ── */
 
@@ -774,24 +775,63 @@ export function NCRCloseSection({
   onCloseSuccess: () => void;
 }) {
   const { hasRole, closureEnabled } = useAuthStore();
+  const [searchParams, setSearchParams] = useSearchParams();
+
   const [showCloseConfirm, setShowCloseConfirm] = useState(false);
   const [closeRationale, setCloseRationale] = useState('');
   const [closeError, setCloseError] = useState<string | null>(null);
+  /**
+   * GC-4 round-2 (Codex Medium): idempotency key + reauth
+   * machinery, mirroring NCR disposition's §9.3 / §11.3 contract.
+   * Key is generated on first-submit click and reused across
+   * every retry including post-reauth replay so the server-side
+   * dedupe sees a single key through fresh-auth recovery.
+   */
+  const [activeCloseKey, setActiveCloseKey] = useState<string | null>(null);
+  const [closeReauthOpen, setCloseReauthOpen] = useState(false);
+  const [closeReauthBuffer, setCloseReauthBufferState] =
+    useState<NCRCloseReauthBuffer | null>(null);
+  const [closeResumeOpen, setCloseResumeOpen] = useState(false);
+  const [closeResumeBuffer, setCloseResumeBuffer] =
+    useState<NCRCloseReauthBuffer | null>(null);
 
   const closeMutation = useMutation({
-    mutationFn: () =>
-      closeNCR(ncr.id, {
-        version: ncr.version,
-        closure_rationale: closeRationale.trim() ? closeRationale.trim() : undefined,
-      }),
+    mutationFn: async (vars: {
+      body: NCRClose;
+      idempotencyKey: string;
+    }) => closeNCR(ncr.id, vars.body, vars.idempotencyKey),
     onSuccess: () => {
       setShowCloseConfirm(false);
       setCloseRationale('');
       setCloseError(null);
+      setActiveCloseKey(null);
       onCloseSuccess();
     },
-    onError: (err: unknown) => {
+    onError: (
+      err: unknown,
+      vars: { body: NCRClose; idempotencyKey: string },
+    ) => {
       setShowCloseConfirm(false);
+      /* GC-4 round-2: 401 REAUTH_REQUIRED → re-auth recovery.  Buffer
+         the full NCRClose body so the post-redirect resume replays
+         exactly what the user typed (§11.3 payload preservation). */
+      const reauth = extractReauthError(err);
+      if (reauth) {
+        const buffer: NCRCloseReauthBuffer = {
+          createdAt: new Date().toISOString(),
+          idempotencyKey: vars.idempotencyKey,
+          action: 'ncr_close',
+          payload: vars.body,
+          ncrNumber: ncr.ncr_number,
+          actionSummary: `Close NCR ${ncr.ncr_number}`,
+          returnTo: window.location.pathname,
+          forceFreshPrincipal: false,
+        };
+        setReauthBuffer(buffer);
+        setCloseReauthBufferState(buffer);
+        setCloseReauthOpen(true);
+        return;
+      }
       const detail = (err as {
         response?: { data?: { detail?: { code?: string; message?: string } | string } };
       })?.response?.data?.detail;
@@ -806,6 +846,69 @@ export function NCRCloseSection({
       }
     },
   });
+
+  /* On mount with ?reauth=resume: if the buffer is an ncr_close
+     intent, surface the Confirm-and-Submit dialog. */
+  useEffect(() => {
+    if (searchParams.get('reauth') !== 'resume') return;
+    const buffer = peekReauthBuffer();
+    if (buffer && buffer.action === 'ncr_close') {
+      setCloseResumeBuffer(buffer);
+      setCloseResumeOpen(true);
+    }
+    const next = new URLSearchParams(searchParams);
+    next.delete('reauth');
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams]);
+
+  function handleCloseStart(): void {
+    setActiveCloseKey(crypto.randomUUID());
+    setShowCloseConfirm(true);
+  }
+
+  function handleConfirmClose(): void {
+    if (!activeCloseKey) return;
+    setShowCloseConfirm(false);
+    closeMutation.mutate({
+      body: {
+        version: ncr.version,
+        closure_rationale: closeRationale.trim()
+          ? closeRationale.trim()
+          : null,
+      },
+      idempotencyKey: activeCloseKey,
+    });
+  }
+
+  function handleCloseReauthConfirm(): void {
+    setCloseReauthOpen(false);
+    void beginReauth();
+  }
+
+  function handleCloseReauthCancel(): void {
+    setCloseReauthOpen(false);
+    setCloseReauthBufferState(null);
+    setActiveCloseKey(null);
+    takeReauthBuffer();
+  }
+
+  function handleCloseResumeConfirm(): void {
+    if (!closeResumeBuffer) return;
+    setCloseResumeOpen(false);
+    takeReauthBuffer();
+    setActiveCloseKey(closeResumeBuffer.idempotencyKey);
+    closeMutation.mutate({
+      body: closeResumeBuffer.payload,
+      idempotencyKey: closeResumeBuffer.idempotencyKey,
+    });
+  }
+
+  function handleCloseResumeCancel(): void {
+    setCloseResumeOpen(false);
+    setCloseResumeBuffer(null);
+    setActiveCloseKey(null);
+    takeReauthBuffer();
+  }
 
   /* Path A: governance-disabled banner (visible to all readers). */
   if (!closureEnabled) {
@@ -871,7 +974,7 @@ export function NCRCloseSection({
 
       <button
         type="button"
-        onClick={() => setShowCloseConfirm(true)}
+        onClick={handleCloseStart}
         disabled={closeMutation.isPending}
         data-testid="close-ncr-button"
         style={{
@@ -900,10 +1003,11 @@ export function NCRCloseSection({
         }
         confirmLabel={closeMutation.isPending ? 'Closing…' : 'Confirm Close'}
         loading={closeMutation.isPending}
-        onConfirm={() => closeMutation.mutate()}
+        onConfirm={handleConfirmClose}
         onCancel={() => {
           setShowCloseConfirm(false);
           setCloseRationale('');
+          setActiveCloseKey(null);
         }}
       >
         <div style={{ marginTop: 'var(--space-md)' }}>
@@ -939,6 +1043,35 @@ export function NCRCloseSection({
           />
         </div>
       </ConfirmationDialog>
+
+      {/* GC-4 round-2: §11.3 stale-auth recovery on close. */}
+      <ReauthModal
+        open={closeReauthOpen}
+        action="ncr_close"
+        actionSummary={
+          closeReauthBuffer?.actionSummary ??
+          `Close NCR ${ncr.ncr_number}`
+        }
+        authAgeSeconds={null}
+        forceFreshPrincipal={false}
+        onConfirmReauth={handleCloseReauthConfirm}
+        onCancel={handleCloseReauthCancel}
+      />
+
+      {/* Post-callback explicit re-confirmation (no auto-replay). */}
+      <ConfirmationDialog
+        open={closeResumeOpen}
+        title="Confirm and Submit"
+        message={
+          closeResumeBuffer
+            ? `Authentication refreshed.  Close ${closeResumeBuffer.ncrNumber}?`
+            : ''
+        }
+        confirmLabel={closeMutation.isPending ? 'Closing…' : 'Confirm and Close'}
+        loading={closeMutation.isPending}
+        onConfirm={handleCloseResumeConfirm}
+        onCancel={handleCloseResumeCancel}
+      />
     </div>
   );
 }

@@ -452,6 +452,39 @@ export default function WorkOrderDetail() {
         <HeaderField label="Created" value={formatDate(wo.created_at)} />
       </div>
 
+      {/* GC-4: surface the QA closer's rationale on the closed WO so
+          reviewers don't have to dig into the audit trail (spec §5.3
+          attestation: "optional closure_rationale persisted on the
+          closed entity").  Renders whenever the field is populated —
+          typically after status === 'closed', but we gate on the
+          value itself so the rationale survives follow-on reads. */}
+      {wo.closure_rationale && (
+        <div
+          data-testid="wo-closure-rationale"
+          style={{
+            padding: 'var(--space-md)',
+            backgroundColor: 'var(--bg-surface)',
+            borderLeft: '3px solid var(--status-complete)',
+            borderRadius: '0 var(--radius-md) var(--radius-md) 0',
+            marginBottom: 'var(--space-lg)',
+          }}
+        >
+          <div
+            style={{
+              fontSize: 'var(--font-size-label)',
+              fontWeight: 600,
+              color: 'var(--text-secondary)',
+              marginBottom: 'var(--space-xs)',
+            }}
+          >
+            Closure Rationale
+          </div>
+          <div style={{ color: 'var(--text-primary)' }}>
+            {wo.closure_rationale}
+          </div>
+        </div>
+      )}
+
       {/* Tabs */}
       <div
         style={{

@@ -19,7 +19,16 @@ export interface ReauthRequiredError {
       detail: {
         error: {
           code: 'REAUTH_REQUIRED';
-          action: 'sign_off' | 'ncr_disposition';
+          /**
+           * GC-4: wo_close + ncr_close added to the backend
+           * AuthFreshnessAction enum.  Spec §11.3 lists all four
+           * as safety-critical protected actions.
+           */
+          action:
+            | 'sign_off'
+            | 'ncr_disposition'
+            | 'wo_close'
+            | 'ncr_close';
           auth_age_seconds: number | null;
           max_auth_age_seconds: number;
           message: string;

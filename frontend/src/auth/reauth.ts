@@ -38,7 +38,12 @@
  *   - no auto-replay (§11.3 explicit re-confirmation step)
  */
 
-import type { NCRDisposition, SignOffCreate } from '@/types/api';
+import type {
+  NCRClose,
+  NCRDisposition,
+  SignOffCreate,
+  WorkOrderClose,
+} from '@/types/api';
 import type { ReauthRequiredError } from './reauth-types';
 
 const STORAGE_KEY_BUFFER = 'forge_reauth_buffer';
@@ -124,10 +129,41 @@ export interface NCRDispositionReauthBuffer extends BaseReauthBuffer {
   payload: NCRDisposition;
 }
 
+/**
+ * GC-4 WO close replay.  Spec §11.3 names WO close as a safety-
+ * critical protected action — the 401 REAUTH_REQUIRED path must be
+ * honored with payload preservation + same-key retry just like
+ * sign-off and NCR disposition.  Payload is the full `WorkOrderClose`
+ * body so the post-redirect resume submits the EXACT rationale the
+ * QA closer typed, not the current dialog state.
+ */
+export interface WorkOrderCloseReauthBuffer extends BaseReauthBuffer {
+  action: 'wo_close';
+  payload: WorkOrderClose;
+  /**
+   * WO number in the modal copy so the user knows which WO they are
+   * about to close.  Distinct from `actionSummary` (which can carry
+   * additional context) and kept here because the resume dialog
+   * builds its title from the buffer alone.
+   */
+  woNumber: string;
+}
+
+/**
+ * GC-4 NCR close replay.  Same protected-action contract as WO close.
+ */
+export interface NCRCloseReauthBuffer extends BaseReauthBuffer {
+  action: 'ncr_close';
+  payload: NCRClose;
+  ncrNumber: string;
+}
+
 export type ReauthBuffer =
   | SignOffFirstSignerReauthBuffer
   | SignOffSecondSignerReauthBuffer
-  | NCRDispositionReauthBuffer;
+  | NCRDispositionReauthBuffer
+  | WorkOrderCloseReauthBuffer
+  | NCRCloseReauthBuffer;
 
 /**
  * Type guard — does this thrown error look like the backend's

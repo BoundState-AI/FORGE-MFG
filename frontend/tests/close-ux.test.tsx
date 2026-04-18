@@ -277,6 +277,50 @@ describe('CloseWorkOrderPanel — enabled close (path B1)', () => {
   });
 });
 
+describe('CloseWorkOrderPanel — closure_rationale display (path B1)', () => {
+  beforeEach(() => {
+    mockAuthState.closureEnabled = true;
+    mockAuthState.roles = ['qa_manager'];
+    closeWOMock.mockReset();
+  });
+  afterEach(() => cleanup());
+
+  it('the closed WO response carries closure_rationale through onSuccess callback', async () => {
+    /* Spec §5.3: closure_rationale is persisted on the closed entity.
+       The panel itself doesn't render the rationale (that's the
+       parent WorkOrderDetail's job) — but we pin that the success
+       path fires onCloseSuccess so the parent can refetch and
+       render the persisted value.  Rationale rendering in
+       WorkOrderDetail header is covered by visual / manual test
+       (no isolated component to mount). */
+    closeWOMock.mockResolvedValueOnce({
+      id: 'wo-1',
+      status: 'closed',
+      closure_rationale: 'Per QA attestation 2026-04-18.',
+      version: 4,
+    });
+
+    const onSuccess = vi.fn();
+    renderPanel(buildWO(), onSuccess);
+    fireEvent.click(screen.getByTestId('close-wo-button'));
+    const textarea = await screen.findByTestId('close-wo-rationale');
+    fireEvent.change(textarea, {
+      target: { value: 'Per QA attestation 2026-04-18.' },
+    });
+    fireEvent.click(
+      screen.getByRole('button', { name: /^Confirm Close$/i }),
+    );
+
+    await waitFor(() => expect(onSuccess).toHaveBeenCalled());
+    /* Confirm the rationale reached the server exactly as typed
+       (pre-refetch the parent would then render it). */
+    const [, body] = closeWOMock.mock.calls[0];
+    expect(body.closure_rationale).toBe(
+      'Per QA attestation 2026-04-18.',
+    );
+  });
+});
+
 describe('CloseWorkOrderPanel — non-qa_manager (path C)', () => {
   beforeEach(() => {
     mockAuthState.closureEnabled = true;
@@ -388,5 +432,166 @@ describe('NCRCloseSection — non-qa_manager (path C)', () => {
   it('renders nothing for a non-QA reader when closure_enabled=true', () => {
     const { container } = renderNCRSection();
     expect(container).toBeEmptyDOMElement();
+  });
+});
+
+/* ── GC-4 round-2: reauth-on-close + idempotency-key contract ──
+   Spec §11.3 names WO close + NCR close as safety-critical protected
+   actions.  These tests pin that:
+     - a caller-supplied idempotency key is forwarded on every close
+       attempt (GC-3 round-3 payload-preservation + same-key retry
+       contract),
+     - a 401 REAUTH_REQUIRED surfaces the ReauthModal (not a generic
+       error banner), and
+     - the buffer carries the FULL close payload, not just a summary. */
+
+import { peekReauthBuffer } from '@/auth/reauth';
+
+function buildReauthError(
+  action: 'wo_close' | 'ncr_close' = 'wo_close',
+): unknown {
+  return {
+    response: {
+      status: 401,
+      data: {
+        detail: {
+          error: {
+            code: 'REAUTH_REQUIRED',
+            action,
+            auth_age_seconds: 400,
+            max_auth_age_seconds: 330,
+            message: 'This action requires re-authentication.',
+          },
+        },
+      },
+    },
+  };
+}
+
+describe('CloseWorkOrderPanel — reauth + idempotency (GC-4 round 2)', () => {
+  beforeEach(() => {
+    mockAuthState.closureEnabled = true;
+    mockAuthState.roles = ['qa_manager'];
+    closeWOMock.mockReset();
+    sessionStorage.clear();
+  });
+  afterEach(() => cleanup());
+
+  it('forwards an Idempotency-Key on the close request', async () => {
+    closeWOMock.mockResolvedValueOnce({
+      id: 'wo-1', status: 'closed', version: 4,
+    });
+
+    renderPanel(buildWO());
+    fireEvent.click(screen.getByTestId('close-wo-button'));
+    await screen.findByTestId('close-wo-rationale');
+    fireEvent.click(
+      screen.getByRole('button', { name: /^Confirm Close$/i }),
+    );
+
+    await waitFor(() => expect(closeWOMock).toHaveBeenCalled());
+    /* closeWorkOrder(id, body, idempotencyKey) — third arg is the
+       key.  The panel generates it at first-submit click and reuses
+       it on retry, so it must be a non-empty string every call. */
+    const [, , key] = closeWOMock.mock.calls[0];
+    expect(typeof key).toBe('string');
+    expect(key).toBeTruthy();
+  });
+
+  it('opens ReauthModal + buffers the full payload on 401 REAUTH_REQUIRED', async () => {
+    closeWOMock.mockRejectedValueOnce(buildReauthError('wo_close'));
+
+    renderPanel(buildWO());
+    fireEvent.click(screen.getByTestId('close-wo-button'));
+    const textarea = await screen.findByTestId('close-wo-rationale');
+    fireEvent.change(textarea, {
+      target: { value: 'Full QA attestation note.' },
+    });
+    fireEvent.click(
+      screen.getByRole('button', { name: /^Confirm Close$/i }),
+    );
+
+    /* After the mutation rejects, the reauth modal heading surfaces. */
+    await waitFor(() => {
+      expect(
+        screen.getByText(/re-authentication required/i),
+      ).toBeInTheDocument();
+    });
+
+    const buffer = peekReauthBuffer();
+    expect(buffer).not.toBeNull();
+    expect(buffer?.action).toBe('wo_close');
+    if (buffer && buffer.action === 'wo_close') {
+      /* Spec §11.3 payload preservation: the buffer MUST carry the
+         exact rationale the user typed, not a summary string. */
+      expect(buffer.payload.closure_rationale).toBe(
+        'Full QA attestation note.',
+      );
+      expect(buffer.payload.version).toBe(3);
+      /* Same-key retry contract: the buffer key equals the key the
+         original request used. */
+      const [, , originalKey] = closeWOMock.mock.calls[0];
+      expect(buffer.idempotencyKey).toBe(originalKey);
+    }
+  });
+});
+
+describe('NCRCloseSection — reauth + idempotency (GC-4 round 2)', () => {
+  beforeEach(() => {
+    mockAuthState.closureEnabled = true;
+    mockAuthState.roles = ['qa_manager'];
+    closeNCRMock.mockReset();
+    sessionStorage.clear();
+  });
+  afterEach(() => cleanup());
+
+  it('forwards an Idempotency-Key on the close request', async () => {
+    closeNCRMock.mockResolvedValueOnce({
+      id: 'ncr-1', status: 'closed', version: 3,
+    });
+
+    renderNCRSection();
+    fireEvent.click(screen.getByTestId('close-ncr-button'));
+    await screen.findByTestId('close-ncr-rationale');
+    fireEvent.click(
+      screen.getByRole('button', { name: /^Confirm Close$/i }),
+    );
+
+    await waitFor(() => expect(closeNCRMock).toHaveBeenCalled());
+    const [, , key] = closeNCRMock.mock.calls[0];
+    expect(typeof key).toBe('string');
+    expect(key).toBeTruthy();
+  });
+
+  it('opens ReauthModal + buffers the full payload on 401 REAUTH_REQUIRED', async () => {
+    closeNCRMock.mockRejectedValueOnce(buildReauthError('ncr_close'));
+
+    renderNCRSection();
+    fireEvent.click(screen.getByTestId('close-ncr-button'));
+    const textarea = await screen.findByTestId('close-ncr-rationale');
+    fireEvent.change(textarea, {
+      target: { value: 'MRB concurred; closing.' },
+    });
+    fireEvent.click(
+      screen.getByRole('button', { name: /^Confirm Close$/i }),
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(/re-authentication required/i),
+      ).toBeInTheDocument();
+    });
+
+    const buffer = peekReauthBuffer();
+    expect(buffer).not.toBeNull();
+    expect(buffer?.action).toBe('ncr_close');
+    if (buffer && buffer.action === 'ncr_close') {
+      expect(buffer.payload.closure_rationale).toBe(
+        'MRB concurred; closing.',
+      );
+      expect(buffer.payload.version).toBe(2);
+      const [, , originalKey] = closeNCRMock.mock.calls[0];
+      expect(buffer.idempotencyKey).toBe(originalKey);
+    }
   });
 });

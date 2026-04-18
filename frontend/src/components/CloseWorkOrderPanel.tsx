@@ -2,8 +2,10 @@
  * Module:   CloseWorkOrderPanel
  * Purpose:  GC-4 closure-as-attestation UI for the WO detail page.
  *           Renders the QA-manager close action, server-derived
- *           blocker tooltip, and the governance-disabled banner.
- * Rev:      0.1.0
+ *           blocker tooltip, the governance-disabled banner, AND
+ *           the full §11.3 re-auth recovery dance on 401
+ *           REAUTH_REQUIRED with same-key idempotency retry.
+ * Rev:      0.2.0
  *
  * BoundState Proprietary
  * Co-Authored-By: Dr. Joseph Wilde, BoundState AI
@@ -17,39 +19,54 @@
  *   confirmation dialog, and the governance-disabled banner needs
  *   to render even for non-qa_manager readers so the operational
  *   "complete is the effective terminal state" reality is explicit.
- *   Wrapping all of that in WorkOrderDetail's existing transition
- *   array would muddy that file.
  *
- * Three render paths (only when `wo.status === 'complete'`):
+ * Render paths (only when `wo.status === 'complete'`):
  *
  *   A. closure_enabled === false (any reader)
- *      Renders the governance-disabled banner explaining that
- *      `complete` is the effective terminal state pending QA
- *      approval.  No close button, no rationale textarea, no
- *      action affordance.
+ *      Governance-disabled banner.  No close button.
  *
- *   B. closure_enabled === true AND user is qa_manager
- *      Renders the close action.  Two sub-states:
- *      B1. closure_ready === true: enabled "Close Work Order"
- *          button → confirmation dialog with optional rationale
- *          textarea → closeWorkOrder mutate.
- *      B2. closure_ready === false: disabled button with tooltip
- *          listing every closure_blocker[*].message so the
- *          operator knows precisely what's missing.
+ *   B1. closure_enabled === true AND qa_manager AND closure_ready
+ *       "Close Work Order" button → confirmation dialog with
+ *       optional rationale textarea → closeWorkOrder mutate.
  *
- *   C. closure_enabled === true AND user NOT qa_manager
- *      Renders nothing — the close action belongs to QA.  Other
- *      readers can still see the WO state via the StatusBadge
- *      above the panel.
+ *   B2. closure_enabled === true AND qa_manager AND !closure_ready
+ *       Disabled button with tooltip + visible blocker list.
+ *
+ *   C. closure_enabled === true AND !qa_manager
+ *       Nothing — the close action belongs to QA.
+ *
+ * GC-4 round-2 additions (Codex review):
+ *   - §11.3 REAUTH_REQUIRED path: same machinery as NCRDetail
+ *     disposition and SignOffPanel — buffer the full WorkOrderClose
+ *     payload (including rationale), redirect via PKCE, post-
+ *     callback Confirm-and-Submit replays verbatim with the same
+ *     Idempotency-Key.
+ *   - Idempotency key generated at first-submit time and reused on
+ *     every retry for this attempt, so the server-side dedupe sees
+ *     the same key through fresh-auth recovery.
  */
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useMutation } from '@tanstack/react-query';
+import { useSearchParams } from 'react-router-dom';
 import { closeWorkOrder } from '@/api/endpoints';
 import { useAuthStore } from '@/auth/store';
+import {
+  beginReauth,
+  extractReauthError,
+  peekReauthBuffer,
+  setReauthBuffer,
+  takeReauthBuffer,
+  type WorkOrderCloseReauthBuffer,
+} from '@/auth/reauth';
 import { ConfirmationDialog } from './ConfirmationDialog';
 import { ErrorBanner } from './ErrorBanner';
-import type { ClosureBlocker, WorkOrderDetailOut } from '@/types/api';
+import { ReauthModal } from './ReauthModal';
+import type {
+  ClosureBlocker,
+  WorkOrderClose,
+  WorkOrderDetailOut,
+} from '@/types/api';
 
 interface CloseWorkOrderPanelProps {
   wo: WorkOrderDetailOut;
@@ -61,28 +78,71 @@ export function CloseWorkOrderPanel({
   onCloseSuccess,
 }: CloseWorkOrderPanelProps) {
   const { hasRole, closureEnabled } = useAuthStore();
+  const [searchParams, setSearchParams] = useSearchParams();
+
   const [pendingConfirm, setPendingConfirm] = useState(false);
   const [rationale, setRationale] = useState('');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  /**
+   * Idempotency-Key for the in-flight close attempt.  Generated on
+   * first-submit click; reused on every retry including the post-
+   * reauth replay so the server-side dedupe sees a single key
+   * across fresh-auth recovery (spec §9.3 / §11.3 line 1538).
+   */
+  const [activeIdempotencyKey, setActiveIdempotencyKey] = useState<
+    string | null
+  >(null);
+  const [reauthOpen, setReauthOpen] = useState(false);
+  const [reauthBufferState, setReauthBufferState] =
+    useState<WorkOrderCloseReauthBuffer | null>(null);
+  const [resumeOpen, setResumeOpen] = useState(false);
+  const [resumeBuffer, setResumeBuffer] =
+    useState<WorkOrderCloseReauthBuffer | null>(null);
 
   const isQaManager = hasRole('qa_manager');
   const blockers: ClosureBlocker[] = wo.closure_blockers ?? [];
   const ready = wo.closure_ready ?? false;
 
   const closeMutation = useMutation({
-    mutationFn: () =>
-      closeWorkOrder(wo.id, {
-        version: wo.version,
-        closure_rationale: rationale.trim() ? rationale.trim() : null,
-      }),
+    mutationFn: async (vars: {
+      body: WorkOrderClose;
+      idempotencyKey: string;
+    }) =>
+      closeWorkOrder(wo.id, vars.body, vars.idempotencyKey),
     onSuccess: () => {
       setPendingConfirm(false);
       setRationale('');
       setErrorMsg(null);
+      setActiveIdempotencyKey(null);
       onCloseSuccess();
     },
-    onError: (err: unknown) => {
+    onError: (
+      err: unknown,
+      vars: { body: WorkOrderClose; idempotencyKey: string },
+    ) => {
       setPendingConfirm(false);
+      /* GC-4 round-2: 401 REAUTH_REQUIRED lands in the re-auth
+         recovery flow, not a generic banner.  Buffer the FULL
+         WorkOrderClose body so the post-redirect resume replays
+         the exact rationale the user typed, not the current
+         dialog state (GC-3 round-3 payload-preservation rule). */
+      const reauth = extractReauthError(err);
+      if (reauth) {
+        const buffer: WorkOrderCloseReauthBuffer = {
+          createdAt: new Date().toISOString(),
+          idempotencyKey: vars.idempotencyKey,
+          action: 'wo_close',
+          payload: vars.body,
+          woNumber: wo.wo_number,
+          actionSummary: `Close work order ${wo.wo_number}`,
+          returnTo: window.location.pathname,
+          forceFreshPrincipal: false,
+        };
+        setReauthBuffer(buffer);
+        setReauthBufferState(buffer);
+        setReauthOpen(true);
+        return;
+      }
       const detail = (err as {
         response?: { data?: { detail?: { code?: string; message?: string } } };
       })?.response?.data?.detail;
@@ -96,16 +156,83 @@ export function CloseWorkOrderPanel({
     },
   });
 
+  /* On mount / remount with ?reauth=resume: surface the confirm-and-
+     submit dialog for the buffered WO close.  Spec §11.3: no
+     auto-replay; user must explicitly re-confirm. */
+  useEffect(() => {
+    if (searchParams.get('reauth') !== 'resume') return;
+    const buffer = peekReauthBuffer();
+    if (buffer && buffer.action === 'wo_close') {
+      setResumeBuffer(buffer);
+      setResumeOpen(true);
+    }
+    const next = new URLSearchParams(searchParams);
+    next.delete('reauth');
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams]);
+
   /* The close path is gated on `complete`.  In any other WO state
      the panel is silent — other transition affordances live on the
      header action-button row in WorkOrderDetail. */
   if (wo.status !== 'complete') return null;
 
-  /* Path A: governance-disabled banner.  Visible to ALL readers (not
-     just QA) so the operational reality — `complete` is terminal —
-     is explicit even for engineers / operators looking at the page.
-     Spec §5.3: "downstream workflows must not depend on `closed`
-     state until the flag is enabled." */
+  /* Whether to render the panel at all. */
+  const renderPanel = !closureEnabled || isQaManager;
+  if (!renderPanel) return null;
+
+  /* First-click submit: generate the key, open the confirm dialog. */
+  function handleCloseClick(): void {
+    setActiveIdempotencyKey(crypto.randomUUID());
+    setPendingConfirm(true);
+  }
+
+  function handleConfirmSubmit(): void {
+    if (!activeIdempotencyKey) return;
+    setPendingConfirm(false);
+    closeMutation.mutate({
+      body: {
+        version: wo.version,
+        closure_rationale: rationale.trim() ? rationale.trim() : null,
+      },
+      idempotencyKey: activeIdempotencyKey,
+    });
+  }
+
+  function handleConfirmReauth(): void {
+    setReauthOpen(false);
+    /* beginReauth is async (PKCE challenge needs WebCrypto SHA-256)
+       but we intentionally do not await in event handlers — the
+       final line tears the page down with window.location.assign. */
+    void beginReauth();
+  }
+
+  function handleCancelReauth(): void {
+    setReauthOpen(false);
+    setReauthBufferState(null);
+    setActiveIdempotencyKey(null);
+    takeReauthBuffer();
+  }
+
+  function handleResumeConfirm(): void {
+    if (!resumeBuffer) return;
+    setResumeOpen(false);
+    takeReauthBuffer();
+    setActiveIdempotencyKey(resumeBuffer.idempotencyKey);
+    /* Replay the EXACT buffered payload — not current dialog state. */
+    closeMutation.mutate({
+      body: resumeBuffer.payload,
+      idempotencyKey: resumeBuffer.idempotencyKey,
+    });
+  }
+
+  function handleResumeCancel(): void {
+    setResumeOpen(false);
+    setResumeBuffer(null);
+    setActiveIdempotencyKey(null);
+    takeReauthBuffer();
+  }
+
+  /* Path A: governance-disabled banner. */
   if (!closureEnabled) {
     return (
       <div
@@ -133,10 +260,6 @@ export function CloseWorkOrderPanel({
       </div>
     );
   }
-
-  /* Path C: closure enabled but reader isn't QA.  No affordance to
-     render; the WorkOrderDetail header already shows the state. */
-  if (!isQaManager) return null;
 
   /* Path B: QA close affordance. */
   const buttonDisabled = !ready || closeMutation.isPending;
@@ -210,7 +333,7 @@ export function CloseWorkOrderPanel({
 
       <button
         type="button"
-        onClick={() => setPendingConfirm(true)}
+        onClick={handleCloseClick}
         disabled={buttonDisabled}
         title={tooltip}
         data-testid="close-wo-button"
@@ -229,6 +352,7 @@ export function CloseWorkOrderPanel({
         Close Work Order
       </button>
 
+      {/* First-attempt confirmation with rationale textarea. */}
       <ConfirmationDialog
         open={pendingConfirm}
         title="Close Work Order"
@@ -239,10 +363,11 @@ export function CloseWorkOrderPanel({
         }
         confirmLabel={closeMutation.isPending ? 'Closing…' : 'Confirm Close'}
         loading={closeMutation.isPending}
-        onConfirm={() => closeMutation.mutate()}
+        onConfirm={handleConfirmSubmit}
         onCancel={() => {
           setPendingConfirm(false);
           setRationale('');
+          setActiveIdempotencyKey(null);
         }}
       >
         <div style={{ marginTop: 'var(--space-md)' }}>
@@ -278,6 +403,35 @@ export function CloseWorkOrderPanel({
           />
         </div>
       </ConfirmationDialog>
+
+      {/* Stale-auth recovery modal (§11.3). */}
+      <ReauthModal
+        open={reauthOpen}
+        action="wo_close"
+        actionSummary={
+          reauthBufferState?.actionSummary ??
+          `Close work order ${wo.wo_number}`
+        }
+        authAgeSeconds={null}
+        forceFreshPrincipal={false}
+        onConfirmReauth={handleConfirmReauth}
+        onCancel={handleCancelReauth}
+      />
+
+      {/* Post-callback explicit re-confirmation (no auto-replay). */}
+      <ConfirmationDialog
+        open={resumeOpen}
+        title="Confirm and Submit"
+        message={
+          resumeBuffer
+            ? `Authentication refreshed.  Close ${resumeBuffer.woNumber}?`
+            : ''
+        }
+        confirmLabel={closeMutation.isPending ? 'Closing…' : 'Confirm and Close'}
+        loading={closeMutation.isPending}
+        onConfirm={handleResumeConfirm}
+        onCancel={handleResumeCancel}
+      />
     </div>
   );
 }
