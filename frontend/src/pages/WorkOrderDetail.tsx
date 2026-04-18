@@ -32,6 +32,7 @@ import { ErrorBanner } from '@/components/ErrorBanner';
 import { ConfirmationDialog } from '@/components/ConfirmationDialog';
 import { ConflictModal } from '@/components/ConflictModal';
 import { CloseWorkOrderPanel } from '@/components/CloseWorkOrderPanel';
+import { AuditTrail } from '@/components/AuditTrail';
 import type {
   WorkOrderDetailOut,
   WOStatus,
@@ -584,15 +585,7 @@ export default function WorkOrderDetail() {
         </div>
       )}
       {activeTab === 'audit' && (
-        <div
-          style={{
-            padding: 'var(--space-lg)',
-            color: 'var(--text-secondary)',
-            textAlign: 'center',
-          }}
-        >
-          Audit trail integration will be available in a future release.
-        </div>
+        <AuditTrail entityType="work_order" entityId={wo.id} />
       )}
 
       {/* Confirmation dialog for transitions */}

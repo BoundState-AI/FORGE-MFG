@@ -45,6 +45,7 @@ from __future__ import annotations
 import uuid as _uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from fastapi import HTTPException
 from sqlalchemy import Select, func, select
@@ -59,6 +60,24 @@ from forge.audit.integrity import (
 from forge.models.audit import AuditRecord
 from forge.models.user import User
 from forge.services.admin_service import _require_admin_manage
+
+if TYPE_CHECKING:
+    # TYPE_CHECKING import avoids the runtime cycle
+    # forge.api.auth → routes → audit service → forge.api.auth.
+    from forge.api.auth import AuthContext
+
+# Per-entity-type read permission consulted by the entity-scoped
+# path in `list_events`.  UX spec §6.6.3 binds WO and NCR detail tab
+# audit reads to the entity's own read-permission rather than a
+# blanket admin:manage.  `operation` is included so the operation
+# detail page can add an audit surface without a separate slice —
+# the list_events permission fork already accepts op:read when the
+# caller supplies both entity_type=operation and entity_id.
+_ENTITY_TYPE_READ_PERMISSION: dict[str, str] = {
+    "work_order": "wo:read",
+    "ncr": "ncr:read",
+    "operation": "op:read",
+}
 
 
 @dataclass
@@ -120,13 +139,59 @@ async def _resolve_display_names(
     return {row[0]: row[1] for row in result.all()}
 
 
+async def resolve_entity_scope(
+    session: AsyncSession,
+    entity_type: str,
+    entity_id: _uuid.UUID,
+    *,
+    program_codes: list[str] | None,
+) -> None:
+    """Verify the caller has program-scope access to the entity.
+
+    Returns None on success.  Raises 404 on cross-program (§3.2
+    existence-leak rule — 403 would confirm the entity's existence
+    to a cross-program caller).
+
+    This helper is SCOPE-ONLY.  It does NOT check the caller's
+    permissions bundle (e.g. `wo:read`).  Permission enforcement
+    stays in `list_events`'s authorization fork so the permission
+    branch and the scope branch surface distinct HTTP statuses
+    (403 vs 404) matching the posture the rest of the API already
+    uses for entity reads.
+
+    Delegates the actual scope query to the entity's own
+    program-scoped getter (`get_work_order` / `_get_ncr_in_scope` /
+    `_get_op`) so the scope logic lives in one place per entity
+    type — audit scope cannot drift from entity-detail scope.
+    """
+    if entity_type == "work_order":
+        from forge.services.work_order_service import get_work_order
+
+        await get_work_order(session, entity_id, program_codes=program_codes)
+        return
+    if entity_type == "ncr":
+        from forge.services.ncr_service import _get_ncr_in_scope
+
+        await _get_ncr_in_scope(session, entity_id, program_codes)
+        return
+    if entity_type == "operation":
+        from forge.services.operation_service import _get_op
+
+        await _get_op(session, entity_id, program_codes=program_codes)
+        return
+    # Unknown entity type for the entity-scoped path — treat as not
+    # found rather than inventing a scope rule.  The caller should
+    # have been routed through the admin cross-entity path instead.
+    raise HTTPException(status_code=404, detail="Entity not found")
+
+
 async def list_events(
     session: AsyncSession,
     *,
     filters: AuditEventFilters,
     page: int = 1,
     page_size: int = 50,
-    actor_id: _uuid.UUID,
+    auth: AuthContext,
 ) -> tuple[list[AuditRecord], dict[_uuid.UUID, str], int]:
     """Paginated audit event list with optional filters.
 
@@ -140,12 +205,53 @@ async def list_events(
     (clock backtrack, batch insert), sequence_number breaks the tie
     in chain-write order.
 
-    Authorization: live-DB admin:manage check (build spec §5.0.4
-    zero-drift) — JWT can carry stale claims after a role removal,
-    and audit reads expose cross-program data the revoked admin must
-    no longer see.
+    Authorization (UX spec §6.6.3):
+
+      A. Entity-scoped read (both `entity_type` AND `entity_id` set):
+         caller must hold the entity-type's read permission
+         (`wo:read`, `ncr:read`, `op:read`) → 403 if not.  Then the
+         entity's program scope is resolved via
+         `resolve_entity_scope` → 404 on cross-program.  This is the
+         path WO/NCR detail page Audit Trail tabs take.
+
+      B. Cross-entity read (no `entity_id`): caller must hold
+         `admin:manage` (QA full audit viewer / admin panel).  Live-
+         DB check — build spec §5.0.4 zero-drift.
+
+    Splitting the two fires 403 vs 404 for distinct failures:
+    missing permission is 403 (you are known but not authorized);
+    cross-program is 404 (same posture as entity-detail routes, to
+    preserve the §3.2 existence-leak rule).
     """
-    await _require_admin_manage(session, actor_id)
+    user_id = _uuid.UUID(auth.sub)
+
+    if filters.entity_type is not None and filters.entity_id is not None:
+        required_perm = _ENTITY_TYPE_READ_PERMISSION.get(filters.entity_type)
+        if required_perm is None:
+            # Unknown entity type on the entity-scoped path — fall
+            # back to admin:manage so cross-entity reads of novel
+            # entity types remain possible but controlled.
+            await _require_admin_manage(session, user_id)
+        elif required_perm not in auth.permissions:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"Audit read of {filters.entity_type} requires "
+                    f"`{required_perm}`."
+                ),
+            )
+        else:
+            # Permission check passed; now verify the entity is in
+            # scope.  Cross-program → 404 (existence-leak rule).
+            await resolve_entity_scope(
+                session,
+                filters.entity_type,
+                filters.entity_id,
+                program_codes=auth.programs,
+            )
+    else:
+        # Cross-entity (no entity_id) — QA full viewer / admin panel.
+        await _require_admin_manage(session, user_id)
 
     base_stmt = select(AuditRecord)
     base_stmt = _apply_filters(base_stmt, filters)

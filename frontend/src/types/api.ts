@@ -128,6 +128,10 @@ export type NCRDisposition = Schemas['NCRDisposition'];
 export type NCRPatch = Schemas['NCRPatch'];
 export type NCRClose = Schemas['NCRClose'];
 
+/* Audit (UX spec §6.6). */
+export type AuditEventOut = Schemas['AuditEventOut'];
+export type AuditActor = Schemas['AuditActor'];
+
 /* Material */
 export type MaterialCertOut = Schemas['MaterialCertOut'];
 

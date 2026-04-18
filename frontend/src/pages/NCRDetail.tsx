@@ -42,6 +42,7 @@ import { LoadingSkeleton } from '@/components/LoadingSkeleton';
 import { ConfirmationDialog } from '@/components/ConfirmationDialog';
 import { ReauthModal } from '@/components/ReauthModal';
 import { PageHeader } from '@/components/PageHeader';
+import { AuditTrail } from '@/components/AuditTrail';
 import type { Disposition, NCRClose, NCRDisposition, NCRPatch, EvidenceRef } from '@/types/api';
 
 /* ── Styles ── */
@@ -690,6 +691,24 @@ export default function NCRDetail() {
           }}
         />
       )}
+
+      {/* Audit history (UX spec §6.6.3 NCR detail tab).  Shows the
+          NCR's full lifecycle — create → disposition → close, plus
+          evidence / scrap-linkage updates — scoped to this NCR's
+          entity_id.  Visible regardless of current status so the
+          trail is accessible at every stage, not only post-close. */}
+      <div style={sectionStyle}>
+        <h3
+          style={{
+            margin: 0,
+            marginBottom: 'var(--space-sm)',
+            color: 'var(--text-primary)',
+          }}
+        >
+          Audit History
+        </h3>
+        <AuditTrail entityType="ncr" entityId={ncr.id} />
+      </div>
 
       {/* Closed state: read-only */}
       {ncr.status === 'closed' && (

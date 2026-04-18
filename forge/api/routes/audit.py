@@ -14,20 +14,36 @@ Compliance: NASA-CSET, SWE-013, SWE-032
 Safety Critical: True
 
 Why this design:
-  Audit endpoints are gated by admin:manage even though spec §6.6.3
-  anticipates engineer/qa_manager surfaces (Work Order / NCR audit
-  tabs).  Those tabs need per-entity scope filtering ("does the
-  caller have access to the entity at entity_id?") which requires
-  a per-entity-type authorization helper that does not yet exist.
-  The admin-only surface is the honest split — the alternative
-  would be to expose the global event list to every authenticated
-  user without a scope check, which would leak entity_ids across
-  programs.
+  Audit endpoints are split into two authorization postures per
+  UX spec §6.6.3:
 
-  /api/audit/* is in PUBLIC_PREFIXES (middleware bypass) because
-  audit reads cross program boundaries by definition — a single
-  integrity check covers all programs and entity_id filters are
-  not naturally program-scoped.
+    1. Cross-entity listing (no entity_type+entity_id) — the QA
+       full-audit viewer and admin integrity panel — stays
+       admin:manage gated.
+
+    2. Entity-scoped listing (both entity_type AND entity_id set)
+       — the WO detail "Audit Trail" tab and the NCR detail
+       history section — is gated by the entity-type's read
+       permission (wo:read / ncr:read / op:read) plus the entity's
+       program scope.  Authorization is enforced in
+       `audit_service.list_events` so both gates live with the
+       query; the route's `get_auth_context` dep is just the
+       "authenticated" floor.
+
+  Single-event detail (/events/{id}) and the integrity/replay
+  surfaces stay admin-gated — those are investigation paths, not
+  per-entity reads.
+
+  /api/audit/* remains in PUBLIC_PREFIXES (X-Program-Id middleware
+  bypass) because:
+    - cross-entity admin reads span programs by definition, and
+    - entity-scoped reads resolve the entity's program directly
+      via the entity's own program-scoped getter (no X-Program-Id
+      header needed because the URL carries the entity id).
+  The per-entity program check is enforced in the service via
+  `resolve_entity_scope`, which delegates to the same getters the
+  entity-detail routes use — so audit scope cannot drift from
+  entity-detail scope.
 """
 
 from __future__ import annotations
@@ -38,7 +54,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from forge.api.auth import AuthContext, require_permission
+from forge.api.auth import AuthContext, get_auth_context, require_permission
 from forge.api.deps import get_db
 from forge.audit.integrity import REPLAY_LIMIT_MAX, ReplayParamError
 from forge.schemas.audit import AuditEventOut, AuditIntegrityOut, AuditReplayOut
@@ -59,18 +75,20 @@ async def list_events(
     timestamp_to: datetime | None = Query(default=None),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
-    auth: AuthContext = Depends(require_permission("admin:manage")),
+    auth: AuthContext = Depends(get_auth_context),
     session: AsyncSession = Depends(get_db),
 ) -> PaginatedResponse[AuditEventOut]:
-    """Paginated audit event list with filters (UX spec §6.6.2).
+    """Paginated audit event list with filters (UX spec §6.6.2, §6.6.3).
 
-    Current filters: entity_type, entity_id, actor_user_id, action,
-    timestamp_from/to.  The spec also names `program_id`; deferred
-    — see audit_service docstring for why.
+    Two authorization postures, both enforced in
+    `audit_service.list_events`:
+      - entity-scoped (entity_type+entity_id set) → entity-type's
+        read permission + entity program scope
+      - cross-entity → admin:manage
 
-    Typed PaginatedResponse[AuditEventOut] gives the OpenAPI
-    generator the precise item shape so the generated client can
-    bind to the envelope + item type directly.
+    Route-level dep is `get_auth_context` so the service's
+    authorization fork can branch on the filter shape without the
+    route statically requiring admin:manage.
     """
     filters = AuditEventFilters(
         entity_type=entity_type,
@@ -82,7 +100,7 @@ async def list_events(
     )
     records, display_names, total = await audit_service.list_events(
         session, filters=filters, page=page, page_size=page_size,
-        actor_id=uuid.UUID(auth.sub),
+        auth=auth,
     )
     items = [
         AuditEventOut.from_record(

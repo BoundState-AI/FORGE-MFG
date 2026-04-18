@@ -4637,7 +4637,7 @@
           "audit"
         ],
         "summary": "List Events",
-        "description": "Paginated audit event list with filters (UX spec \u00a76.6.2).\n\nCurrent filters: entity_type, entity_id, actor_user_id, action,\ntimestamp_from/to.  The spec also names `program_id`; deferred\n\u2014 see audit_service docstring for why.\n\nTyped PaginatedResponse[AuditEventOut] gives the OpenAPI\ngenerator the precise item shape so the generated client can\nbind to the envelope + item type directly.",
+        "description": "Paginated audit event list with filters (UX spec \u00a76.6.2, \u00a76.6.3).\n\nTwo authorization postures, both enforced in\n`audit_service.list_events`:\n  - entity-scoped (entity_type+entity_id set) \u2192 entity-type's\n    read permission + entity program scope\n  - cross-entity \u2192 admin:manage\n\nRoute-level dep is `get_auth_context` so the service's\nauthorization fork can branch on the filter shape without the\nroute statically requiring admin:manage.",
         "operationId": "list_events_api_audit_events_get",
         "parameters": [
           {

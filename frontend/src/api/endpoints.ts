@@ -63,6 +63,7 @@ import type {
   NCRDisposition,
   NCRPatch,
   NCRClose,
+  AuditEventOut,
   MaterialCertOut,
   PartOut,
   TraceabilityOut,
@@ -564,6 +565,33 @@ export async function fetchCurrentUser(): Promise<UserMeOut> {
     program_memberships: me.program_memberships ?? [],
     closure_enabled: me.closure_enabled ?? false,
   } as UserMeOut;
+}
+
+/* ── Audit (UX spec §6.6) ── */
+
+/**
+ * Entity-scoped audit read for the WO/NCR detail page tabs (spec
+ * §6.6.3).  Passing both `entity_type` and `entity_id` uses the
+ * entity-scoped authorization path — the caller's entity-type read
+ * permission (wo:read / ncr:read / op:read) plus the entity's
+ * program scope is sufficient.  Omitting `entity_id` exercises the
+ * cross-entity path which requires admin:manage (used by the QA
+ * full viewer, not by the WO/NCR tabs).
+ */
+export async function fetchAuditEvents(params: {
+  entity_type?: string;
+  entity_id?: string;
+  actor_user_id?: string;
+  action?: string;
+  timestamp_from?: string;
+  timestamp_to?: string;
+  page?: number;
+  page_size?: number;
+}): Promise<PaginatedResponse<AuditEventOut>> {
+  const result = await typedClient.GET('/api/audit/events', {
+    params: { query: params as Record<string, unknown> },
+  });
+  return unwrap(result) as unknown as PaginatedResponse<AuditEventOut>;
 }
 
 /* ── Admin ── */

@@ -535,3 +535,351 @@ class TestAuditRead:
         assert resp.status_code == 400, resp.text
         body = resp.json()
         assert body["detail"]["code"] == "REPLAY_RANGE_REQUIRED"
+
+
+# ---------------------------------------------------------------------------
+# Entity-scoped audit read (UX spec §6.6.3 WO/NCR tabs)
+# ---------------------------------------------------------------------------
+#
+# The admin-only posture above (test_non_admin_caller_forbidden) applies when
+# the caller asks for a CROSS-ENTITY listing (no entity_type/entity_id).
+# When both filters are set, the caller's authorization is derived from the
+# target entity — `wo:read` for a work-order scope, `ncr:read` for an NCR
+# scope — plus the entity's program scope (cross-program → 404 per §3.2
+# existence-leak rule).  This lets engineers and qa_managers see the
+# Audit Trail tab on WO/NCR detail pages without granting blanket admin:manage.
+
+
+ENGINEER_USER_ID = "00000000-0000-0000-0000-0000000000a5"
+
+
+def _ensure_program_for_audit_entity_scope(prog_code: str = "TST-AUDENT") -> str:
+    engine = create_engine(_SYNC_URL)
+    prog_id = str(uuid.uuid4())
+    with engine.connect() as conn:
+        row = conn.execute(text(
+            "SELECT id FROM programs WHERE code = :c"
+        ).bindparams(c=prog_code)).fetchone()
+        if row:
+            prog_id = str(row[0])
+        else:
+            conn.execute(text("""
+                INSERT INTO programs (id, code, name, active,
+                    created_by, updated_by)
+                VALUES (CAST(:id AS uuid), :c, 'Audit Entity Scope',
+                    true, CAST(:sys AS uuid), CAST(:sys AS uuid))
+            """).bindparams(id=prog_id, c=prog_code, sys=SYSTEM_USER_ID))
+            conn.commit()
+    engine.dispose()
+    return prog_id
+
+
+@pytest.mark.skipif(not _db_available(), reason="Postgres not available")
+class TestAuditReadEntityScoped:
+    """Entity-scoped audit reads for WO / NCR detail page tabs."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self) -> Generator[None]:
+        from forge.api.app import create_app
+        from forge.config import Settings
+        from forge.db import init_engine
+
+        self._clean()
+        self.prog_id = _ensure_program_for_audit_entity_scope()
+        _ensure_user(ENGINEER_USER_ID, "eng-audent@t.com", "Eng AudEnt")
+
+        settings = Settings(
+            env="test", debug=False, auth_mode="local",
+            database_url=_ASYNC_URL,
+            # GC-4 close endpoints are exercised by the history tests.
+            closure_enabled=True,
+        )
+        init_engine(settings.database_url)
+        self.app = create_app(settings=settings)
+        yield
+        self._clean()
+
+    def _clean(self) -> None:
+        engine = create_engine(_SYNC_URL)
+        with engine.connect() as conn:
+            try:
+                conn.execute(text(
+                    "ALTER TABLE audit_records "
+                    "DISABLE TRIGGER trg_protect_audit_records"
+                ))
+                conn.execute(text("DELETE FROM audit_records"))
+                conn.execute(text(
+                    "UPDATE part_instances SET reason_ncr_id = NULL"
+                ))
+                conn.execute(text("DELETE FROM nonconformance_reports"))
+                conn.execute(text("DELETE FROM sign_off_events"))
+                conn.execute(text("DELETE FROM inspection_events"))
+                conn.execute(text("DELETE FROM labor_entries"))
+                conn.execute(text("DELETE FROM operations"))
+                conn.execute(text("DELETE FROM work_orders"))
+                conn.execute(text("DELETE FROM idempotency_records"))
+                conn.execute(text(
+                    "DELETE FROM programs WHERE code LIKE 'TST-AUDENT%'"
+                ))
+                # Strip any admin assignment to the non-admin user so a
+                # previous suite doesn't leak elevated perms.
+                conn.execute(text(
+                    "DELETE FROM user_roles WHERE user_id = ANY (CAST(:ids AS uuid[]))"
+                ).bindparams(ids=[ENGINEER_USER_ID]))
+                conn.commit()
+            finally:
+                conn.execute(text(
+                    "ALTER TABLE audit_records "
+                    "ENABLE TRIGGER trg_protect_audit_records"
+                ))
+                conn.commit()
+        engine.dispose()
+
+    def _override_as(
+        self, user_id: str, role: str, programs: list[str] | None = None,
+    ) -> None:
+        """Override with the specified role's exact permission set.
+
+        Critical for the entity-scoped tests: we want to prove that
+        `wo:read` (engineer) lets a caller see WO audit rows WITHOUT
+        granting `admin:manage`.  Granting union-of-all-permissions
+        would mask the authorization gap.
+        """
+        from forge.api.auth import ROLE_PERMISSIONS, AuthContext
+
+        self.app.state.auth_override = AuthContext(
+            sub=user_id, username=f"override-{user_id[-4:]}",
+            roles=[role], programs=programs or ["*"],
+            permissions=frozenset(ROLE_PERMISSIONS[role]),
+        )
+
+    def _clear_override(self) -> None:
+        self.app.state.auth_override = None
+
+    async def _client(self) -> Any:
+        from httpx import ASGITransport, AsyncClient
+
+        transport = ASGITransport(app=self.app)
+        return AsyncClient(transport=transport, base_url="http://test")
+
+    async def _make_wo_with_events(self) -> dict[str, Any]:
+        """Create + release a WO so the audit chain has work_order.* rows
+        on the resulting entity_id."""
+        self._clear_override()
+        async with await self._client() as client:
+            r = await client.post(
+                "/api/work-orders",
+                json={
+                    "program_id": self.prog_id,
+                    "engine_serial": f"E-AE-{uuid.uuid4().hex[:6]}",
+                    "module": "Powerhead",
+                    "build_phase": "fabrication",
+                },
+                headers={"Idempotency-Key": str(uuid.uuid4())},
+            )
+            assert r.status_code == 201, r.text
+            wo = r.json()
+
+            r = await client.post(
+                f"/api/work-orders/{wo['id']}/operations",
+                json={"description": "Op", "sequence": 1},
+                headers={"Idempotency-Key": str(uuid.uuid4())},
+            )
+            assert r.status_code == 201, r.text
+
+        # Release with a different user (SOD-004).
+        self._override_as(ENGINEER_USER_ID, role="engineer")
+        async with await self._client() as client:
+            r = await client.post(
+                f"/api/work-orders/{wo['id']}/release",
+                json={"version": wo["version"]},
+                headers={"Idempotency-Key": str(uuid.uuid4())},
+            )
+            assert r.status_code == 200, r.text
+            wo = r.json()
+        self._clear_override()
+        return wo
+
+    async def _make_ncr(self, wo_id: str) -> dict[str, Any]:
+        self._override_as(ENGINEER_USER_ID, role="engineer")
+        async with await self._client() as client:
+            r = await client.post(
+                "/api/ncrs",
+                json={
+                    "work_order_id": wo_id,
+                    "description": "Out of tolerance",
+                },
+                headers={"Idempotency-Key": str(uuid.uuid4())},
+            )
+        self._clear_override()
+        assert r.status_code == 201, r.text
+        return r.json()  # type: ignore[no-any-return]
+
+    # ------------------------------------------------------------------
+    # Engineer with `wo:read` can read WO-scoped audit
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_engineer_can_read_wo_scoped_audit(self) -> None:
+        """GC observability: engineer with `wo:read` reads WO audit rows
+        WITHOUT needing admin:manage, provided entity_type+entity_id are
+        both set and the WO is in their program."""
+        wo = await self._make_wo_with_events()
+
+        self._override_as(ENGINEER_USER_ID, role="engineer")
+        async with await self._client() as client:
+            resp = await client.get(
+                f"/api/audit/events?entity_type=work_order&entity_id={wo['id']}",
+            )
+        self._clear_override()
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        actions = {item["action"] for item in body["items"]}
+        # At minimum the lifecycle transitions that landed through the
+        # test-setup path should appear; don't assert exact set because
+        # upstream services may add fine-grained events.
+        assert any(a.startswith("work_order.") for a in actions)
+        for item in body["items"]:
+            assert item["entity_type"] == "work_order"
+            assert item["entity_id"] == wo["id"]
+
+    @pytest.mark.asyncio
+    async def test_qa_manager_can_read_ncr_scoped_audit(self) -> None:
+        """qa_manager with `ncr:read` reads NCR audit rows scoped by
+        entity_id — covers the NCR detail page's history section."""
+        wo = await self._make_wo_with_events()
+        ncr = await self._make_ncr(wo["id"])
+
+        self._override_as(ENGINEER_USER_ID, role="qa_manager")
+        async with await self._client() as client:
+            resp = await client.get(
+                f"/api/audit/events?entity_type=ncr&entity_id={ncr['id']}",
+            )
+        self._clear_override()
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        # Creation event must be present.
+        actions = {item["action"] for item in body["items"]}
+        assert any(a.startswith("ncr.") for a in actions)
+
+    # ------------------------------------------------------------------
+    # Cross-program 404 (existence-leak rule)
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_cross_program_wo_audit_returns_404(self) -> None:
+        """Engineer whose programs do NOT include the WO's program →
+        404 (existence-leak rule §3.2).  403 would confirm the entity
+        exists; 404 keeps it indistinguishable from not-found.
+
+        The test sets programs=['other-program'] so the audit scope
+        check resolves the WO under a program the caller lacks."""
+        wo = await self._make_wo_with_events()
+
+        # Look up the WO's program code so we can give the caller a
+        # DIFFERENT program explicitly.
+        engine = create_engine(_SYNC_URL)
+        with engine.connect() as conn:
+            row = conn.execute(text(
+                "SELECT p.code FROM programs p JOIN work_orders w "
+                "ON w.program_id = p.id WHERE w.id = CAST(:w AS uuid)"
+            ).bindparams(w=wo["id"])).fetchone()
+        engine.dispose()
+        assert row is not None
+        wo_program_code = row[0]
+        other_program = "OTHER-PROG"
+        assert other_program != wo_program_code
+
+        self._override_as(
+            ENGINEER_USER_ID, role="engineer", programs=[other_program],
+        )
+        async with await self._client() as client:
+            resp = await client.get(
+                f"/api/audit/events?entity_type=work_order&entity_id={wo['id']}",
+            )
+        self._clear_override()
+        assert resp.status_code == 404, resp.text
+
+    # ------------------------------------------------------------------
+    # Cross-entity (no entity_id) still requires admin
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_engineer_without_entity_filter_forbidden(self) -> None:
+        """Without `entity_type`+`entity_id` the caller is asking for
+        the cross-entity QA viewer — that still requires admin:manage."""
+        self._override_as(ENGINEER_USER_ID, role="engineer")
+        async with await self._client() as client:
+            resp = await client.get("/api/audit/events")
+        self._clear_override()
+        assert resp.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_engineer_with_only_entity_type_forbidden(self) -> None:
+        """Partial filter (entity_type without entity_id) is NOT an
+        entity-scoped read — it's a cross-entity filter of that type.
+        Still requires admin:manage."""
+        self._override_as(ENGINEER_USER_ID, role="engineer")
+        async with await self._client() as client:
+            resp = await client.get(
+                "/api/audit/events?entity_type=work_order",
+            )
+        self._clear_override()
+        assert resp.status_code == 403
+
+    # ------------------------------------------------------------------
+    # Missing entity-type read permission → 403
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_entity_scoped_without_read_permission_forbidden(self) -> None:
+        """A caller who CAN see the entity's program but lacks the
+        entity-type read permission → 403.  Distinct from the
+        cross-program 404 case: here the entity is reachable but the
+        caller lacks the permission bundle that underpins the audit
+        read.
+
+        Every shipped Phase-1 role carries `wo:read` (even operators
+        need it to view WOs they're working on), so we construct a
+        minimal AuthContext with no audit-relevant reads rather than
+        picking a role.  The shape proves the 403/404 split is real:
+        permission missing fires 403 before the scope check runs.
+        """
+        wo = await self._make_wo_with_events()
+
+        from forge.api.auth import AuthContext
+
+        # Custom context: no wo:read / ncr:read / op:read.  Caller is
+        # authenticated but lacks every audit-relevant entity-read
+        # permission that would gate the scoped path.
+        self.app.state.auth_override = AuthContext(
+            sub=ENGINEER_USER_ID,
+            username="no-read-perms",
+            roles=["custom"],
+            programs=["*"],
+            permissions=frozenset({"chat:query"}),
+        )
+        async with await self._client() as client:
+            resp = await client.get(
+                f"/api/audit/events?entity_type=work_order&entity_id={wo['id']}",
+            )
+        self._clear_override()
+        assert resp.status_code == 403, resp.text
+
+    # ------------------------------------------------------------------
+    # Admin cross-entity path preserved
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_admin_cross_entity_path_still_works(self) -> None:
+        """The existing admin:manage cross-entity path is unchanged —
+        an admin without entity_id filters still sees the global list."""
+        await self._make_wo_with_events()
+
+        _ensure_admin_role(ENGINEER_USER_ID)
+        self._override_as(ENGINEER_USER_ID, role="admin")
+        async with await self._client() as client:
+            resp = await client.get("/api/audit/events?page_size=5")
+        self._clear_override()
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["total"] >= 1
