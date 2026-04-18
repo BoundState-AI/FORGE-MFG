@@ -271,7 +271,13 @@ export interface paths {
         put?: never;
         /**
          * Close Work Order
-         * @description Close work order (final QA closure).
+         * @description Close work order — Phase-1 closure-as-attestation (GC-4).
+         *
+         *     Body shape: `WorkOrderClose` carries `version` (or use If-Match
+         *     per §6.3.1) plus optional `closure_rationale` per UX spec §5.3.
+         *     The service enforces the closure feature flag, the WO close-
+         *     readiness blockers (open NCRs / unresolved conditionals), and
+         *     the safety-critical re-auth gate before any state mutation.
          */
         post: operations["close_work_order_api_work_orders__wo_id__close_post"];
         delete?: never;
@@ -799,7 +805,13 @@ export interface paths {
         put?: never;
         /**
          * Close Ncr
-         * @description Close an NCR (dispositioned → closed).
+         * @description Close an NCR — Phase-1 closure-as-attestation (GC-4).
+         *
+         *     Service enforces the closure feature flag, the §11.3 re-auth
+         *     freshness gate, and the existing per-disposition completion-
+         *     evidence + remediation-WO preconditions before any state
+         *     mutation.  Body now carries optional `closure_rationale`
+         *     (UX spec §5.6.7).
          */
         post: operations["close_ncr_api_ncrs__ncr_id__close_post"];
         delete?: never;
@@ -2124,6 +2136,24 @@ export interface components {
             refusal_reason?: string | null;
         };
         /**
+         * ClosureBlocker
+         * @description Single reason a WO close cannot proceed (GC-4).
+         *
+         *     Codes match the 422 detail codes the close service raises so the
+         *     pre-click tooltip and the post-click error speak the same
+         *     vocabulary.  `entity_id` points at the offending NCR or
+         *     operation when the blocker names a specific row; NULL for
+         *     blockers that describe the WO as a whole.
+         */
+        ClosureBlocker: {
+            /** Code */
+            code: string;
+            /** Message */
+            message: string;
+            /** Entity Id */
+            entity_id?: string | null;
+        };
+        /**
          * ComponentOut
          * @description One infrastructure component's health report.
          *
@@ -3234,12 +3264,19 @@ export interface components {
          *
          *     Spec §5.15: version is required on state-transition endpoints.
          *     Optional root_cause may be recorded at closure for the audit trail.
+         *
+         *     GC-4 (UX spec §5.6.7): `closure_rationale` is the QA closer's
+         *     free-form note on WHY this NCR is being closed now.  Distinct
+         *     from `root_cause` which records WHY the NCR happened.  Optional
+         *     per the Phase-1 click-to-close attestation model.
          */
         NCRClose: {
             /** Version */
             version: number;
             /** Root Cause */
             root_cause?: string | null;
+            /** Closure Rationale */
+            closure_rationale?: string | null;
         };
         /**
          * NCRCreate
@@ -3387,6 +3424,8 @@ export interface components {
             evidence_refs: (Record<string, never> | string)[];
             /** Remediation Work Order Id */
             remediation_work_order_id: string | null;
+            /** Closure Rationale */
+            closure_rationale?: string | null;
             /** Version */
             version: number;
             /**
@@ -4557,6 +4596,11 @@ export interface components {
             program_memberships?: components["schemas"]["ProgramOut"][];
             /** Permissions */
             permissions?: string[];
+            /**
+             * Closure Enabled
+             * @default false
+             */
+            closure_enabled: boolean;
         };
         /**
          * UserOut
@@ -4732,6 +4776,22 @@ export interface components {
             added_links?: components["schemas"]["WhatIfAddedLink"][];
         };
         /**
+         * WorkOrderClose
+         * @description Request body for POST /api/work-orders/{id}/close (GC-4).
+         *
+         *     Build spec §5.1: "body includes `version` and optional
+         *     `closure_rationale`."  `version` follows the §6.3.1 If-Match
+         *     flexibility (body-or-header) consistent with other state-
+         *     transition endpoints; `closure_rationale` is the Phase-1
+         *     attestation note persisted on the closed entity (UX spec §5.3).
+         */
+        WorkOrderClose: {
+            /** Version */
+            version?: number | null;
+            /** Closure Rationale */
+            closure_rationale?: string | null;
+        };
+        /**
          * WorkOrderCreate
          * @description Request body for POST /api/work-orders (creates in draft).
          */
@@ -4801,6 +4861,8 @@ export interface components {
             released_by: string | null;
             /** Has Graph Issue */
             has_graph_issue: boolean;
+            /** Closure Rationale */
+            closure_rationale: string | null;
             /** Version */
             version: number;
             /**
@@ -4815,6 +4877,13 @@ export interface components {
             updated_at: string;
             /** Operations */
             operations?: components["schemas"]["OperationOut"][];
+            /**
+             * Closure Ready
+             * @default false
+             */
+            closure_ready: boolean;
+            /** Closure Blockers */
+            closure_blockers?: components["schemas"]["ClosureBlocker"][];
         };
         /**
          * WorkOrderHoldIn
@@ -4904,6 +4973,8 @@ export interface components {
             released_by: string | null;
             /** Has Graph Issue */
             has_graph_issue: boolean;
+            /** Closure Rationale */
+            closure_rationale: string | null;
             /** Version */
             version: number;
             /**
@@ -5424,7 +5495,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["WorkOrderTransition"];
+                "application/json": components["schemas"]["WorkOrderClose"];
             };
         };
         responses: {

@@ -842,17 +842,52 @@ async def close_ncr(
     data: NCRClose,
     user_id: _uuid.UUID,
     program_codes: list[str] | None = None,
+    *,
+    auth_context: AuthContext,
+    settings: object | None = None,
 ) -> NonconformanceReport:
-    """Close an NCR: dispositioned → closed.
+    """Close an NCR: dispositioned → closed.  GC-4 attestation contract.
 
     State leaving: dispositioned.  State entering: closed.
-    Invariants (in order):
-      1. Caller has program scope (via parent WO).
-      2. Optimistic version matches.
-      3. Transition is legal per VALID_NCR_TRANSITIONS — closing an
+    Invariants (in order — every gate fires BEFORE state mutation
+    or audit-write so a rejected attempt leaves a clean slate):
+      1. GC-4 closure-enable feature flag → 403 CLOSURE_DISABLED
+         when the gate is off (UX spec §5.6.7 — same flag as WO
+         close).
+      2. GC-4 re-auth freshness → 401 REAUTH_REQUIRED for stale
+         auth (spec §11.3 names NCR close as a protected action).
+      3. Caller has program scope (via parent WO).
+      4. Optimistic version matches.
+      5. Transition is legal per VALID_NCR_TRANSITIONS — closing an
          `open` NCR is rejected here, so an undecided NCR cannot be
          silently buried.
+      6. Per-disposition completion-evidence + remediation-WO checks
+         (existing — `EVIDENCE_REQUIRED_FOR_CLOSE`,
+         `REMEDIATION_WO_NOT_CLOSED`).
+      7. Persist `closure_rationale` if provided; audit `after_state`
+         carries it.
+
+    `auth_context` is keyword-only and REQUIRED.  No honest call
+    site bypasses the freshness gate; mirrors GC-3 round-5
+    `record_sign_off`.
     """
+    from forge.api.auth_freshness import (
+        AuthFreshnessAction,
+        require_fresh_auth,
+    )
+    from forge.config import Settings, get_settings
+    from forge.services.closure_gate import check_closure_enabled
+
+    cfg = settings if isinstance(settings, Settings) else get_settings()
+
+    # Gate 1: closure-enable feature flag.
+    check_closure_enabled(cfg)
+
+    # Gate 2: re-auth freshness (NCR close is protected per §11.3).
+    await require_fresh_auth(
+        auth_context, session, AuthFreshnessAction.ncr_close,
+    )
+
     ncr = await _get_ncr_in_scope(session, ncr_id, program_codes)
 
     try:
@@ -925,6 +960,11 @@ async def close_ncr(
     ncr.status = NCRStatus.closed
     if data.root_cause is not None:
         ncr.root_cause = data.root_cause
+    if data.closure_rationale is not None:
+        # GC-4: persist the QA closer's free-form rationale on the
+        # closed entity so it survives independently of the audit
+        # chain (the audit row also carries it for tamper-evidence).
+        ncr.closure_rationale = data.closure_rationale
     ncr.updated_by = user_id
     increment_version(ncr)
     await session.flush()
@@ -939,7 +979,10 @@ async def close_ncr(
         entity_type="ncr",
         entity_id=ncr.id,
         before_state={"status": before_status_close},
-        after_state={"status": ncr.status.value},
+        after_state={
+            "status": ncr.status.value,
+            "closure_rationale": data.closure_rationale,
+        },
     )
 
     # Spec §8.2: NCR status change triggers CPM recalc via outbox.

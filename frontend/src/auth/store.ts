@@ -17,7 +17,7 @@
  */
 
 import { create } from 'zustand';
-import type { ProgramOut, Role, UserOut } from '@/types/api';
+import type { ProgramOut, Role, UserMeOut } from '@/types/api';
 
 interface AuthState {
   /* Token state */
@@ -25,7 +25,7 @@ interface AuthState {
   isAuthenticated: boolean;
 
   /* User profile (from GET /api/users/me) */
-  user: UserOut | null;
+  user: UserMeOut | null;
 
   /* Active program selector (spec §5.1) */
   activeProgram: ProgramOut | null;
@@ -36,10 +36,16 @@ interface AuthState {
   hasAnyRole: (...roles: Role[]) => boolean;
   programIds: string[];
 
+  /* GC-4: live closure-enable governance flag.  Sourced from
+     /api/users/me (server-side `Settings.closure_enabled`).  Default
+     false so the UI defaults to "closed" state copy until the
+     bootstrap fetch confirms otherwise. */
+  closureEnabled: boolean;
+
   /* Actions */
   setToken: (token: string) => void;
   clearAuth: () => void;
-  setUser: (user: UserOut) => void;
+  setUser: (user: UserMeOut) => void;
   setActiveProgram: (program: ProgramOut) => void;
 }
 
@@ -50,6 +56,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   activeProgram: null,
   roles: [],
   programIds: [],
+  closureEnabled: false,
 
   hasRole: (role: Role) => get().roles.includes(role),
   hasAnyRole: (...roles: Role[]) => roles.some((r) => get().roles.includes(r)),
@@ -69,26 +76,42 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       activeProgram: null,
       roles: [],
       programIds: [],
+      closureEnabled: false,
     });
   },
 
-  setUser: (user: UserOut) => {
+  setUser: (user: UserMeOut) => {
     /* The generated schema types role names as plain strings.  Narrow to
-       Role here so downstream hasRole() checks stay typed. */
-    const roles = user.roles.map((r) => r.name) as Role[];
-    const programIds = user.program_memberships.map((p) => p.id);
-    set({ user, roles, programIds });
+       Role here so downstream hasRole() checks stay typed.
+
+       UserMeOut declares roles/program_memberships as optional in the
+       generated schema (Pydantic default_factory exports as optional);
+       fetchCurrentUser already coerces them to [], but we keep the
+       defensive narrowing here so this setter is honest if a future
+       caller skips the wrapper. */
+    const userRoles = user.roles ?? [];
+    const userPrograms = user.program_memberships ?? [];
+    const roles = userRoles.map((r) => r.name) as Role[];
+    const programIds = userPrograms.map((p) => p.id);
+    set({
+      user,
+      roles,
+      programIds,
+      // GC-4: mirror the server's closure-enable flag into the store
+      // so subscribers can read it via a single hook call.
+      closureEnabled: user.closure_enabled ?? false,
+    });
 
     /* Auto-select program if none active */
     const stored = sessionStorage.getItem('forge_active_program');
-    if (stored && user.program_memberships.some((p) => p.id === stored)) {
-      const match = user.program_memberships.find((p) => p.id === stored);
+    if (stored && userPrograms.some((p) => p.id === stored)) {
+      const match = userPrograms.find((p) => p.id === stored);
       if (match) set({ activeProgram: match });
-    } else if (user.program_memberships.length > 0) {
+    } else if (userPrograms.length > 0) {
       /* Fall back to localStorage hint, then first program */
       const hint = localStorage.getItem('forge_last_program');
-      const hinted = user.program_memberships.find((p) => p.id === hint);
-      const program = hinted ?? user.program_memberships[0];
+      const hinted = userPrograms.find((p) => p.id === hint);
+      const program = hinted ?? userPrograms[0];
       sessionStorage.setItem('forge_active_program', program.id);
       localStorage.setItem('forge_last_program', program.id);
       set({ activeProgram: program });

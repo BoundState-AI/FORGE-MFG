@@ -94,3 +94,13 @@ class NonconformanceReport(AuditableMixin, Base):
     remediation_work_order_id: Mapped[_uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("work_orders.id"), nullable=True,
     )
+    # GC-4 closure-as-attestation (UX spec §5.6.7): optional rationale
+    # captured at close time and persisted on the closed NCR.  Same
+    # nullability + length contract as `WorkOrder.closure_rationale`.
+    # Persisted alongside the existing `root_cause` field — these are
+    # distinct: `root_cause` documents WHY the NCR happened (recorded
+    # over the NCR's life), `closure_rationale` documents WHY the QA
+    # closer chose to close it now (a single-event QA judgement).
+    closure_rationale: Mapped[str | None] = mapped_column(
+        String(4000), nullable=True,
+    )

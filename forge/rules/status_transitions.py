@@ -46,7 +46,12 @@ VALID_WO_TRANSITIONS: dict[WOStatus, set[WOStatus]] = {
     WOStatus.draft: {WOStatus.released},
     WOStatus.released: {WOStatus.in_progress, WOStatus.hold, WOStatus.draft},
     WOStatus.in_progress: {WOStatus.complete, WOStatus.hold},
-    WOStatus.hold: {WOStatus.in_progress, WOStatus.closed},
+    # GC-4: `hold → closed` is no longer permitted.  The QA-gate close
+    # is an attestation that the WO actually completed; allowing a
+    # direct close from `hold` would skip the completion-completeness
+    # invariants that the gate is supposed to attest.  Resume-then-
+    # complete-then-close is the only honest path.
+    WOStatus.hold: {WOStatus.in_progress},
     # UX spec v1.5.1 §5.3 / build spec v1.4.2 GC-2: a `complete` WO
     # reactivates to `in_progress` when a child-op NCR disposition
     # triggers reopen.  `closed` remains terminal — Phase-1 does

@@ -78,6 +78,10 @@ export interface PaginationParams {
 export type RoleOut = Schemas['RoleOut'];
 export type ProgramOut = Schemas['ProgramOut'];
 export type UserOut = Schemas['UserOut'];
+/* GC-4: /api/users/me carries `closure_enabled` in addition to the
+   shared UserOut shape, so the frontend can pre-render the closure
+   action affordances without a separate config round-trip. */
+export type UserMeOut = Schemas['UserMeOut'];
 
 /* Work Order */
 export type WorkOrderOut = Schemas['WorkOrderOut'];
@@ -85,9 +89,11 @@ export type WorkOrderDetailOut = Schemas['WorkOrderDetailOut'];
 export type WorkOrderCreate = Schemas['WorkOrderCreate'];
 export type WorkOrderUpdate = Schemas['WorkOrderUpdate'];
 export type WorkOrderTransition = Schemas['WorkOrderTransition'];
+export type WorkOrderClose = Schemas['WorkOrderClose'];
 export type WorkOrderHoldIn = Schemas['WorkOrderHoldIn'];
 export type WorkOrderHoldOut = Schemas['WorkOrderHoldOut'];
 export type StoppedLaborEntryOut = Schemas['StoppedLaborEntryOut'];
+export type ClosureBlocker = Schemas['ClosureBlocker'];
 
 /* Operation */
 export type OperationOut = Schemas['OperationOut'];
@@ -120,6 +126,7 @@ export type NCROut = Schemas['NCROut'];
 export type NCRCreate = Schemas['NCRCreate'];
 export type NCRDisposition = Schemas['NCRDisposition'];
 export type NCRPatch = Schemas['NCRPatch'];
+export type NCRClose = Schemas['NCRClose'];
 
 /* Material */
 export type MaterialCertOut = Schemas['MaterialCertOut'];

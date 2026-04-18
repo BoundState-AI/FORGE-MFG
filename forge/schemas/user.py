@@ -43,5 +43,13 @@ class UserMeOut(BaseModel):
     program_memberships: list[ProgramOut] = Field(default_factory=list)
     # Derived: union of all assigned roles' permissions.
     permissions: list[str] = Field(default_factory=list)
+    # GC-4: server-side closure enablement flag.  Frontend uses this
+    # to decide whether to render the Close action affordances on
+    # WorkOrderDetail + NCRDetail.  Sourced from `Settings.closure_enabled`
+    # so it reflects the live governance posture, not user-specific
+    # state.  Carried on `/api/users/me` (instead of a separate
+    # config endpoint) because the frontend already loads this on
+    # auth bootstrap — adds zero round-trips.
+    closure_enabled: bool = False
 
     model_config = {"from_attributes": True}

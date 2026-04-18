@@ -711,7 +711,7 @@
           "work-orders"
         ],
         "summary": "Close Work Order",
-        "description": "Close work order (final QA closure).",
+        "description": "Close work order \u2014 Phase-1 closure-as-attestation (GC-4).\n\nBody shape: `WorkOrderClose` carries `version` (or use If-Match\nper \u00a76.3.1) plus optional `closure_rationale` per UX spec \u00a75.3.\nThe service enforces the closure feature flag, the WO close-\nreadiness blockers (open NCRs / unresolved conditionals), and\nthe safety-critical re-auth gate before any state mutation.",
         "operationId": "close_work_order_api_work_orders__wo_id__close_post",
         "parameters": [
           {
@@ -746,7 +746,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/WorkOrderTransition"
+                "$ref": "#/components/schemas/WorkOrderClose"
               }
             }
           }
@@ -2232,7 +2232,7 @@
           "ncrs"
         ],
         "summary": "Close Ncr",
-        "description": "Close an NCR (dispositioned \u2192 closed).",
+        "description": "Close an NCR \u2014 Phase-1 closure-as-attestation (GC-4).\n\nService enforces the closure feature flag, the \u00a711.3 re-auth\nfreshness gate, and the existing per-disposition completion-\nevidence + remediation-WO preconditions before any state\nmutation.  Body now carries optional `closure_rationale`\n(UX spec \u00a75.6.7).",
         "operationId": "close_ncr_api_ncrs__ncr_id__close_post",
         "parameters": [
           {
@@ -5634,6 +5634,37 @@
         "title": "ChatResponseModel",
         "description": "Non-streaming response shape."
       },
+      "ClosureBlocker": {
+        "properties": {
+          "code": {
+            "type": "string",
+            "title": "Code"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "entity_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Entity Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "ClosureBlocker",
+        "description": "Single reason a WO close cannot proceed (GC-4).\n\nCodes match the 422 detail codes the close service raises so the\npre-click tooltip and the post-click error speak the same\nvocabulary.  `entity_id` points at the offending NCR or\noperation when the blocker names a specific row; NULL for\nblockers that describe the WO as a whole."
+      },
       "ComponentOut": {
         "properties": {
           "status": {
@@ -7540,6 +7571,18 @@
               }
             ],
             "title": "Root Cause"
+          },
+          "closure_rationale": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 4000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Closure Rationale"
           }
         },
         "type": "object",
@@ -7547,7 +7590,7 @@
           "version"
         ],
         "title": "NCRClose",
-        "description": "Request body for POST /api/ncrs/{id}/close (dispositioned \u2192 closed).\n\nSpec \u00a75.15: version is required on state-transition endpoints.\nOptional root_cause may be recorded at closure for the audit trail."
+        "description": "Request body for POST /api/ncrs/{id}/close (dispositioned \u2192 closed).\n\nSpec \u00a75.15: version is required on state-transition endpoints.\nOptional root_cause may be recorded at closure for the audit trail.\n\nGC-4 (UX spec \u00a75.6.7): `closure_rationale` is the QA closer's\nfree-form note on WHY this NCR is being closed now.  Distinct\nfrom `root_cause` which records WHY the NCR happened.  Optional\nper the Phase-1 click-to-close attestation model."
       },
       "NCRCreate": {
         "properties": {
@@ -7884,6 +7927,17 @@
               }
             ],
             "title": "Remediation Work Order Id"
+          },
+          "closure_rationale": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Closure Rationale"
           },
           "version": {
             "type": "integer",
@@ -10034,6 +10088,11 @@
             },
             "type": "array",
             "title": "Permissions"
+          },
+          "closure_enabled": {
+            "type": "boolean",
+            "title": "Closure Enabled",
+            "default": false
           }
         },
         "type": "object",
@@ -10333,6 +10392,36 @@
         "title": "WhatIfRequest",
         "description": "Request body for POST /api/schedules/{id}/what-if.\n\nAll fields are optional; the service layer applies only the\noverrides provided and leaves the rest of the schedule at its\ncurrent values.  The request never mutates persisted state\n(spec \u00a78.3)."
       },
+      "WorkOrderClose": {
+        "properties": {
+          "version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          },
+          "closure_rationale": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 4000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Closure Rationale"
+          }
+        },
+        "type": "object",
+        "title": "WorkOrderClose",
+        "description": "Request body for POST /api/work-orders/{id}/close (GC-4).\n\nBuild spec \u00a75.1: \"body includes `version` and optional\n`closure_rationale`.\"  `version` follows the \u00a76.3.1 If-Match\nflexibility (body-or-header) consistent with other state-\ntransition endpoints; `closure_rationale` is the Phase-1\nattestation note persisted on the closed entity (UX spec \u00a75.3)."
+      },
       "WorkOrderCreate": {
         "properties": {
           "program_id": {
@@ -10460,6 +10549,17 @@
             "type": "boolean",
             "title": "Has Graph Issue"
           },
+          "closure_rationale": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Closure Rationale"
+          },
           "version": {
             "type": "integer",
             "title": "Version"
@@ -10480,6 +10580,18 @@
             },
             "type": "array",
             "title": "Operations"
+          },
+          "closure_ready": {
+            "type": "boolean",
+            "title": "Closure Ready",
+            "default": false
+          },
+          "closure_blockers": {
+            "items": {
+              "$ref": "#/components/schemas/ClosureBlocker"
+            },
+            "type": "array",
+            "title": "Closure Blockers"
           }
         },
         "type": "object",
@@ -10497,6 +10609,7 @@
           "released_at",
           "released_by",
           "has_graph_issue",
+          "closure_rationale",
           "version",
           "created_at",
           "updated_at"
@@ -10642,6 +10755,17 @@
             "type": "boolean",
             "title": "Has Graph Issue"
           },
+          "closure_rationale": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Closure Rationale"
+          },
           "version": {
             "type": "integer",
             "title": "Version"
@@ -10672,6 +10796,7 @@
           "released_at",
           "released_by",
           "has_graph_issue",
+          "closure_rationale",
           "version",
           "created_at",
           "updated_at"

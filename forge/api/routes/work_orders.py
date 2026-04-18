@@ -31,7 +31,9 @@ from forge.api.concurrency import (
     resolve_version_assertion,
     strong_etag,
 )
-from forge.api.deps import get_db
+from forge.api.deps import get_config, get_db
+from forge.config import Settings
+from forge.models.enums import WOStatus
 from forge.schemas.graph import (
     GraphPatchIn,
     GraphPatchOut,
@@ -39,7 +41,9 @@ from forge.schemas.graph import (
 )
 from forge.schemas.operation import OperationDetailOut, OperationOut
 from forge.schemas.work_order import (
+    ClosureBlocker,
     StoppedLaborEntryOut,
+    WorkOrderClose,
     WorkOrderCreate,
     WorkOrderDetailOut,
     WorkOrderHoldIn,
@@ -123,9 +127,20 @@ async def get_work_order(
     await session.refresh(wo, ["operations"])
     response.headers["ETag"] = strong_etag(wo.version)
     ops = sorted(wo.operations, key=lambda op: op.sequence)
+
+    # GC-4: surface server-derived close-readiness so the frontend
+    # can disable the close button + render a precise blocker
+    # tooltip without a click probe.  Same helper feeds the close
+    # service write path (single source of truth — no drift).
+    blocker_dicts = await wo_svc.compute_closure_blockers(session, wo)
+    blockers = [ClosureBlocker(**b) for b in blocker_dicts]
+    closure_ready = (wo.status == WOStatus.complete and not blockers)
+
     return WorkOrderDetailOut(
         **WorkOrderOut.model_validate(wo).model_dump(),
         operations=[OperationOut.model_validate(op) for op in ops],
+        closure_ready=closure_ready,
+        closure_blockers=blockers,
     )
 
 
@@ -364,17 +379,28 @@ async def complete_work_order(
 @router.post("/{wo_id}/close", response_model=WorkOrderOut)
 async def close_work_order(
     wo_id: uuid.UUID,
-    body: WorkOrderTransition,
+    body: WorkOrderClose,
     response: Response,
     if_match: str | None = Header(default=None, alias="If-Match"),
     auth: AuthContext = Depends(require_permission("wo:close")),
     session: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_config),
 ) -> WorkOrderOut:
-    """Close work order (final QA closure)."""
+    """Close work order — Phase-1 closure-as-attestation (GC-4).
+
+    Body shape: `WorkOrderClose` carries `version` (or use If-Match
+    per §6.3.1) plus optional `closure_rationale` per UX spec §5.3.
+    The service enforces the closure feature flag, the WO close-
+    readiness blockers (open NCRs / unresolved conditionals), and
+    the safety-critical re-auth gate before any state mutation.
+    """
     expected = resolve_version_assertion(body.version, if_match)
     wo = await wo_svc.close_work_order(
         session, wo_id, expected, uuid.UUID(auth.sub),
         program_codes=auth.programs,
+        auth_context=auth,
+        closure_rationale=body.closure_rationale,
+        settings=settings,
     )
     await session.commit()
     await session.refresh(wo)

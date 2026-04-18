@@ -126,6 +126,8 @@ class TestEvidenceRegistry:
         settings = Settings(
             env="test", debug=False, auth_mode="local",
             database_url=_ASYNC_URL,
+            # GC-4: NCR close path is exercised by this suite.
+            closure_enabled=True,
         )
         init_engine(settings.database_url)
         self.app = create_app(settings=settings)

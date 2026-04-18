@@ -71,6 +71,13 @@ class AuthFreshnessAction(enum.StrEnum):
 
     sign_off = "sign_off"
     ncr_disposition = "ncr_disposition"
+    # GC-4: WO close + NCR close are protected per spec §11.3 line 1285.
+    # The freshness gate fires on the same thresholds as the existing
+    # actions and surfaces the same REAUTH_REQUIRED envelope; only the
+    # action label changes so the frontend can render closure-specific
+    # re-auth modal copy.
+    wo_close = "wo_close"
+    ncr_close = "ncr_close"
 
 
 class StaleAuthError(HTTPException):

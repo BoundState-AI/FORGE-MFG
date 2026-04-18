@@ -14,15 +14,17 @@
  * remediation_work_order_id.
  *
  * State actions per spec SS5.6.6:
- *   open        -> [Submit Disposition] (engineer, not initiator)
- *   dispositioned -> [Close NCR] placeholder (deferred to GC-4)
- *   closed      -> read-only
+ *   open          -> [Submit Disposition] (engineer, not initiator)
+ *   dispositioned -> NCRCloseSection renders the GC-4 close action
+ *                    (qa_manager only) or the governance-disabled
+ *                    banner when `closure_enabled === false`.
+ *   closed        -> read-only (closure_rationale surfaced if set).
  */
 
 import { useEffect, useState, useCallback } from 'react';
 import { useParams, useSearchParams } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { fetchNCR, dispositionNCR, patchNCR, requestUploadUrl, confirmEvidence } from '@/api/endpoints';
+import { fetchNCR, dispositionNCR, closeNCR, patchNCR, requestUploadUrl, confirmEvidence } from '@/api/endpoints';
 import { useAuthStore } from '@/auth/store';
 import {
   beginReauth,
@@ -670,14 +672,22 @@ export default function NCRDetail() {
         </div>
       )}
 
-      {/* Dispositioned state: close action deferred */}
+      {/* GC-4: dispositioned → close path (same attestation model
+          as WO close).  Three sub-states:
+          A. closure_enabled === false (any reader) → governance banner.
+          B. closure_enabled === true AND qa_manager → close button +
+             confirmation dialog with optional closure_rationale.
+             Existing server-side preconditions (evidence, remediation
+             WO) surface via 422 codes if clicked while unmet.
+          C. closure_enabled === true AND NOT qa_manager → nothing. */}
       {ncr.status === 'dispositioned' && (
-        <div style={sectionStyle}>
-          <h3 style={{ margin: 0, marginBottom: 'var(--space-sm)', color: 'var(--text-primary)' }}>Actions</h3>
-          <p style={{ margin: 0, fontSize: 'var(--font-size-body)', color: 'var(--text-secondary)' }}>
-            Close NCR action is deferred to a future release (GC-4).
-          </p>
-        </div>
+        <NCRCloseSection
+          ncr={ncr}
+          onCloseSuccess={() => {
+            queryClient.invalidateQueries({ queryKey: ['ncr', id] });
+            queryClient.invalidateQueries({ queryKey: ['ncrs'] });
+          }}
+        />
       )}
 
       {/* Closed state: read-only */}
@@ -686,6 +696,12 @@ export default function NCRDetail() {
           <p style={{ margin: 0, fontSize: 'var(--font-size-body)', color: 'var(--text-secondary)' }}>
             This NCR is closed. No further actions are available.
           </p>
+          {ncr.closure_rationale && (
+            <div style={{ marginTop: 'var(--space-sm)' }}>
+              <div style={fieldLabelStyle}>Closure Rationale</div>
+              <div style={fieldValueStyle}>{ncr.closure_rationale}</div>
+            </div>
+          )}
         </div>
       )}
 
@@ -732,6 +748,197 @@ export default function NCRDetail() {
         onCancel={handleResumeCancel}
         loading={dispositionMutation.isPending}
       />
+    </div>
+  );
+}
+
+/**
+ * GC-4: NCR closure-as-attestation section.  Same three-state model
+ * as CloseWorkOrderPanel:
+ *   A. closure_enabled === false → governance banner
+ *   B. closure_enabled === true AND qa_manager → close button
+ *   C. closure_enabled === true AND NOT qa_manager → nothing
+ *
+ * Per-disposition preconditions (evidence, remediation WO) are
+ * enforced server-side — the UI shows the button when the NCR is
+ * `dispositioned` and lets the 422 surface if preconditions aren't
+ * met.  We don't pre-derive blockers client-side because the
+ * precondition set varies per disposition type and the server is
+ * the single source of truth for all of them.
+ */
+export function NCRCloseSection({
+  ncr,
+  onCloseSuccess,
+}: {
+  ncr: { id: string; ncr_number: string; version: number };
+  onCloseSuccess: () => void;
+}) {
+  const { hasRole, closureEnabled } = useAuthStore();
+  const [showCloseConfirm, setShowCloseConfirm] = useState(false);
+  const [closeRationale, setCloseRationale] = useState('');
+  const [closeError, setCloseError] = useState<string | null>(null);
+
+  const closeMutation = useMutation({
+    mutationFn: () =>
+      closeNCR(ncr.id, {
+        version: ncr.version,
+        closure_rationale: closeRationale.trim() ? closeRationale.trim() : undefined,
+      }),
+    onSuccess: () => {
+      setShowCloseConfirm(false);
+      setCloseRationale('');
+      setCloseError(null);
+      onCloseSuccess();
+    },
+    onError: (err: unknown) => {
+      setShowCloseConfirm(false);
+      const detail = (err as {
+        response?: { data?: { detail?: { code?: string; message?: string } | string } };
+      })?.response?.data?.detail;
+      if (detail && typeof detail === 'object' && detail.message) {
+        setCloseError(`${detail.code ?? 'ERROR'}: ${detail.message}`);
+      } else if (typeof detail === 'string') {
+        setCloseError(detail);
+      } else {
+        setCloseError(
+          err instanceof Error ? err.message : 'Close failed.',
+        );
+      }
+    },
+  });
+
+  /* Path A: governance-disabled banner (visible to all readers). */
+  if (!closureEnabled) {
+    return (
+      <div
+        role="status"
+        data-testid="ncr-closure-disabled-banner"
+        style={{
+          padding: 'var(--space-md)',
+          backgroundColor: 'var(--bg-elevated)',
+          borderLeft: '3px solid var(--text-muted)',
+          borderRadius: '0 var(--radius-md) var(--radius-md) 0',
+          marginBottom: 'var(--space-lg)',
+          color: 'var(--text-secondary)',
+          fontSize: 'var(--font-size-body)',
+        }}
+      >
+        <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>
+          Closure not currently enabled
+        </div>
+        <div style={{ marginTop: 'var(--space-xs)' }}>
+          Phase-1 close endpoints require MSFC QA approval before
+          enablement.  Until then, <strong>dispositioned</strong>{' '}
+          is the effective terminal state for this NCR.
+        </div>
+      </div>
+    );
+  }
+
+  /* Path C: not qa_manager → nothing. */
+  if (!hasRole('qa_manager')) return null;
+
+  /* Path B: QA close action. */
+  return (
+    <div
+      data-testid="ncr-close-section"
+      style={{
+        padding: 'var(--space-md)',
+        backgroundColor: 'var(--bg-surface)',
+        border: '1px solid var(--border)',
+        borderRadius: 'var(--radius-md)',
+        marginBottom: 'var(--space-lg)',
+      }}
+    >
+      <h3
+        style={{
+          margin: 0,
+          marginBottom: 'var(--space-sm)',
+          color: 'var(--text-primary)',
+        }}
+      >
+        Close NCR
+      </h3>
+
+      {closeError && (
+        <div style={{ marginBottom: 'var(--space-sm)' }}>
+          <ErrorBanner
+            message={closeError}
+            onDismiss={() => setCloseError(null)}
+          />
+        </div>
+      )}
+
+      <button
+        type="button"
+        onClick={() => setShowCloseConfirm(true)}
+        disabled={closeMutation.isPending}
+        data-testid="close-ncr-button"
+        style={{
+          padding: 'var(--space-sm) var(--space-md)',
+          border: 'none',
+          borderRadius: 'var(--radius-md)',
+          backgroundColor: 'var(--interactive)',
+          color: '#ffffff',
+          fontSize: 'var(--font-size-body)',
+          fontWeight: 600,
+          cursor: closeMutation.isPending ? 'not-allowed' : 'pointer',
+          opacity: closeMutation.isPending ? 0.5 : 1,
+        }}
+      >
+        Close NCR
+      </button>
+
+      <ConfirmationDialog
+        open={showCloseConfirm}
+        title="Close NCR"
+        message={
+          `Close ${ncr.ncr_number}?  This action cannot be undone. ` +
+          `If per-disposition preconditions are not met (evidence, ` +
+          `remediation WO) the server will surface the specific ` +
+          `missing requirement.`
+        }
+        confirmLabel={closeMutation.isPending ? 'Closing…' : 'Confirm Close'}
+        loading={closeMutation.isPending}
+        onConfirm={() => closeMutation.mutate()}
+        onCancel={() => {
+          setShowCloseConfirm(false);
+          setCloseRationale('');
+        }}
+      >
+        <div style={{ marginTop: 'var(--space-md)' }}>
+          <label
+            htmlFor="close-ncr-rationale"
+            style={{
+              display: 'block',
+              fontSize: 'var(--font-size-label)',
+              fontWeight: 600,
+              color: 'var(--text-secondary)',
+              marginBottom: 'var(--space-xs)',
+            }}
+          >
+            Closure rationale (optional)
+          </label>
+          <textarea
+            id="close-ncr-rationale"
+            value={closeRationale}
+            onChange={(e) => setCloseRationale(e.target.value)}
+            rows={3}
+            maxLength={4000}
+            data-testid="close-ncr-rationale"
+            placeholder="QA note explaining why this NCR is being closed now."
+            style={{
+              width: '100%',
+              padding: 'var(--space-sm)',
+              border: '1px solid var(--border)',
+              borderRadius: 'var(--radius-md)',
+              fontSize: 'var(--font-size-body)',
+              resize: 'vertical',
+              boxSizing: 'border-box',
+            }}
+          />
+        </div>
+      </ConfirmationDialog>
     </div>
   );
 }

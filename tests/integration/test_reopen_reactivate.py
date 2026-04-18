@@ -127,6 +127,9 @@ class TestReopenReactivate:
         settings = Settings(
             env="test", debug=False, auth_mode="local",
             database_url=_ASYNC_URL,
+            # GC-4: GC-2 reopen tests exercise WO close + NCR close to
+            # set up the closed-WO branch before the reopen path.
+            closure_enabled=True,
         )
         init_engine(settings.database_url)
         self.app = create_app(settings=settings)

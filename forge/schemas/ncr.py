@@ -110,10 +110,16 @@ class NCRClose(BaseModel):
 
     Spec §5.15: version is required on state-transition endpoints.
     Optional root_cause may be recorded at closure for the audit trail.
+
+    GC-4 (UX spec §5.6.7): `closure_rationale` is the QA closer's
+    free-form note on WHY this NCR is being closed now.  Distinct
+    from `root_cause` which records WHY the NCR happened.  Optional
+    per the Phase-1 click-to-close attestation model.
     """
 
     version: int
     root_cause: str | None = Field(default=None, max_length=4000)
+    closure_rationale: str | None = Field(default=None, max_length=4000)
 
 
 class NCRPatch(BaseModel):
@@ -164,6 +170,10 @@ class NCROut(BaseModel):
     initiated_by_id: uuid.UUID
     evidence_refs: list[dict[str, object] | str]
     remediation_work_order_id: uuid.UUID | None
+    # GC-4 closure-as-attestation (UX spec §5.6.7): the optional QA
+    # rationale persisted at close time.  NULL on every NCR that
+    # has not yet been closed.
+    closure_rationale: str | None = None
     version: int
     created_at: datetime
     updated_at: datetime

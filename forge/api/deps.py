@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 
+from fastapi import Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from forge.config import Settings, get_settings
@@ -32,8 +33,18 @@ from forge.realtime import (
 )
 
 
-def get_config() -> Settings:
-    """Provide application settings to route handlers."""
+def get_config(request: Request) -> Settings:
+    """Provide application settings to route handlers.
+
+    Reads from ``request.app.state.settings`` so test fixtures that
+    pass an explicit ``Settings(...)`` to ``create_app(settings=...)``
+    see their own instance instead of the env-loaded singleton.
+    Falls back to the singleton when the app was built without an
+    override (production path).
+    """
+    settings = getattr(request.app.state, "settings", None)
+    if settings is not None:
+        return settings  # type: ignore[no-any-return]
     return get_settings()
 
 

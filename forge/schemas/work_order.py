@@ -73,6 +73,20 @@ class WorkOrderTransition(BaseModel):
     version: int | None = None
 
 
+class WorkOrderClose(BaseModel):
+    """Request body for POST /api/work-orders/{id}/close (GC-4).
+
+    Build spec §5.1: "body includes `version` and optional
+    `closure_rationale`."  `version` follows the §6.3.1 If-Match
+    flexibility (body-or-header) consistent with other state-
+    transition endpoints; `closure_rationale` is the Phase-1
+    attestation note persisted on the closed entity (UX spec §5.3).
+    """
+
+    version: int | None = None
+    closure_rationale: str | None = Field(default=None, max_length=4000)
+
+
 class WorkOrderHoldIn(BaseModel):
     """Request body for POST /api/work-orders/{id}/hold (UX spec v1.5.1
     §5.3 Hold Cascading).
@@ -149,11 +163,31 @@ class WorkOrderOut(BaseModel):
     released_at: datetime | None
     released_by: uuid.UUID | None
     has_graph_issue: bool
+    # GC-4 closure-as-attestation (UX spec §5.3): the optional QA
+    # rationale persisted at close time.  NULL on every WO that
+    # has not yet been closed (and on legacy closed rows that
+    # pre-date this column — see migration a8c2d4e5f6b7).
+    closure_rationale: str | None
     version: int
     created_at: datetime
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class ClosureBlocker(BaseModel):
+    """Single reason a WO close cannot proceed (GC-4).
+
+    Codes match the 422 detail codes the close service raises so the
+    pre-click tooltip and the post-click error speak the same
+    vocabulary.  `entity_id` points at the offending NCR or
+    operation when the blocker names a specific row; NULL for
+    blockers that describe the WO as a whole.
+    """
+
+    code: str
+    message: str
+    entity_id: uuid.UUID | None = None
 
 
 class WorkOrderDetailOut(WorkOrderOut):
@@ -174,5 +208,15 @@ class WorkOrderDetailOut(WorkOrderOut):
     """
 
     operations: list[OperationOut] = Field(default_factory=list)
+    # GC-4: server-derived close-readiness so the frontend can
+    # disable the close button + render a precise blocker tooltip
+    # WITHOUT a click probe.  `closure_ready` is True iff
+    # `closure_blockers` is empty AND the WO is in `complete`.
+    # Computed in `forge.services.work_order_service.
+    # compute_closure_blockers`, which the close service ALSO
+    # consults so the pre-click read and the post-click write
+    # cannot drift.
+    closure_ready: bool = False
+    closure_blockers: list[ClosureBlocker] = Field(default_factory=list)
 
     model_config = {"from_attributes": True}

@@ -30,8 +30,11 @@ from typing import Any
 from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
+from forge.api.auth import AuthContext
 from forge.audit.logger import create_audit_record
+from forge.config import Settings
 from forge.models.enums import ActorType, OpStatus, WOStatus
 from forge.models.work_order import WorkOrder
 from forge.realtime import (
@@ -710,32 +713,239 @@ async def complete_work_order(
     return wo
 
 
-async def close_work_order(
-    session: AsyncSession, wo_id: _uuid.UUID, version: int, user_id: _uuid.UUID,
-    program_codes: list[str] | None = None,
-) -> WorkOrder:
-    """Close: complete|hold → closed.
+async def compute_closure_blockers(
+    session: AsyncSession, wo: WorkOrder,
+) -> list[dict[str, Any]]:
+    """Server-derived list of reasons a WO close cannot proceed (GC-4).
 
-    State leaving: complete or hold.  State entering: closed.
-    Invariant: valid transition per spec §4.3.
-    Per-NCR disposition preconditions (§5.3 close preconditions)
-    are not enforced here yet — deferred pending the NPR 8735.2C
-    closure-as-attestation product decision (§5.3 callout).
+    Single source of truth for both the WorkOrderDetailOut read
+    surface (so the frontend can disable the close button + render a
+    precise tooltip without a click probe) AND the close service
+    write path (so a click produces the same machine-readable code
+    the tooltip showed).
+
+    Each blocker is `{code, message, entity_id?}` — codes are the
+    same identifiers `close_work_order` raises on click:
+      - WO_CLOSE_NCRS_NOT_CLOSED     (one entry per offending NCR)
+      - WO_CLOSE_UNRESOLVED_CONDITIONALS (one entry per inspection)
+
+    The "WO is in `complete`" precondition is enforced by the
+    transition-rule layer (round-4 fix dropped `hold → closed`), so
+    this helper does NOT duplicate that check — it focuses on
+    closure-readiness invariants the UI needs to surface in advance.
+    """
+    from forge.models.inspection import InspectionEvent
+    from forge.models.ncr import NonconformanceReport
+    from forge.models.operation import Operation
+
+    blockers: list[dict[str, Any]] = []
+
+    # 1) NCRs-not-closed: every NCR linked to this WO must be `closed`
+    #    (NCRStatus.closed).  `voided` is also an acceptable terminal
+    #    — voided NCRs were rolled back administratively and do not
+    #    block close per §3.1 lifecycle.
+    open_ncr_stmt = (
+        select(
+            NonconformanceReport.id,
+            NonconformanceReport.ncr_number,
+            NonconformanceReport.status,
+        )
+        .where(
+            NonconformanceReport.work_order_id == wo.id,
+            NonconformanceReport.status.notin_(["closed", "voided"]),
+        )
+        .order_by(NonconformanceReport.created_at.asc())
+    )
+    open_ncrs = (await session.execute(open_ncr_stmt)).all()
+    for ncr_id, ncr_number, ncr_status in open_ncrs:
+        status_value = (
+            ncr_status.value if hasattr(ncr_status, "value") else ncr_status
+        )
+        blockers.append({
+            "code": "WO_CLOSE_NCRS_NOT_CLOSED",
+            "message": (
+                f"NCR {ncr_number} is in `{status_value}` — "
+                f"must be closed before WO close."
+            ),
+            "entity_id": ncr_id,
+        })
+
+    # 2) Unresolved conditional inspections: every inspection event
+    #    on this WO's ops with result=conditional must have a later
+    #    superseding event (i.e. another inspection_events row whose
+    #    supersedes_inspection_id points at it).  An anti-join query
+    #    surfaces the unresolved set in one round-trip.
+    superseder = aliased(InspectionEvent)
+    conditional_stmt = (
+        select(
+            InspectionEvent.id,
+            InspectionEvent.operation_id,
+            Operation.sequence,
+            Operation.description,
+        )
+        .join(Operation, Operation.id == InspectionEvent.operation_id)
+        .outerjoin(
+            superseder,
+            superseder.supersedes_inspection_id == InspectionEvent.id,
+        )
+        .where(
+            Operation.work_order_id == wo.id,
+            InspectionEvent.result == "conditional",
+            superseder.id.is_(None),
+        )
+        .order_by(Operation.sequence.asc(), InspectionEvent.inspected_at.asc())
+    )
+    unresolved = (await session.execute(conditional_stmt)).all()
+    for _insp_id, op_id, op_seq, op_desc in unresolved:
+        blockers.append({
+            "code": "WO_CLOSE_UNRESOLVED_CONDITIONALS",
+            "message": (
+                f"Op {op_seq} ({op_desc}) has an unresolved conditional "
+                f"inspection — record an accept/reject inspection that "
+                f"supersedes it before WO close."
+            ),
+            "entity_id": op_id,
+        })
+
+    return blockers
+
+
+async def close_work_order(
+    session: AsyncSession,
+    wo_id: _uuid.UUID,
+    version: int,
+    user_id: _uuid.UUID,
+    program_codes: list[str] | None = None,
+    *,
+    auth_context: AuthContext,
+    closure_rationale: str | None = None,
+    settings: Settings | None = None,
+) -> WorkOrder:
+    """Close: complete → closed.  GC-4 closure-as-attestation contract.
+
+    State leaving: complete.  State entering: closed.
+    Invariants (in order — every gate fires BEFORE any state mutation
+    or audit row is written, so a rejected attempt leaves a clean
+    slate for retry):
+      1. `check_closure_enabled` → 403 CLOSURE_DISABLED if the
+         feature flag is off (governance-gated by MSFC QA approval
+         or formal QA waiver per UX spec §5.3).
+      2. `require_fresh_auth(wo_close)` → 401 REAUTH_REQUIRED on
+         stale auth (spec §11.3).
+      3. `compute_closure_blockers` → 422 with the FIRST blocker's
+         `code` as the top-level code and the full blocker list in
+         the detail.  The same helper feeds the
+         WorkOrderDetailOut.closure_blockers read surface so the
+         pre-click tooltip and the post-click error use identical
+         identifiers.
+      4. State transition `complete → closed` (round-4 dropped
+         `hold → closed`).
+      5. Persist `closure_rationale` if provided.
+      6. Audit `after_state` carries `closure_rationale` + status.
 
     SSE side-effect (UX spec §6.5.2 Completion): after the
     wo_state_changed event lands, a `done` event is published on
     every child op channel so any open Operation Execution
     subscriber cleanly closes — the op stream is permanently
     terminal once the WO is closed.
+
+    `auth_context` is keyword-only and REQUIRED — without it the
+    freshness gate cannot run.  Same posture as GC-3 round 5
+    `record_sign_off`: there is no honest call site that needs to
+    bypass the gate.
     """
+    from forge.api.auth_freshness import (
+        AuthFreshnessAction,
+        require_fresh_auth,
+    )
+    from forge.services.closure_gate import check_closure_enabled
+
+    # Gate 1: feature-flag governance gate.
+    check_closure_enabled(settings)
+
+    # Load the WO (program-scoped); the freshness + blocker checks
+    # both need it before we touch state.
     wo_before = await get_work_order(
         session, wo_id, program_codes=program_codes,
     )
-    previous_state = wo_before.status.value
-    wo = await _transition_wo(
-        session, wo_id, WOStatus.closed, version, user_id,
-        program_codes=program_codes,
+
+    # Gate 2: re-auth freshness for the protected close action.
+    await require_fresh_auth(
+        auth_context, session, AuthFreshnessAction.wo_close,
     )
+
+    # Gate 3: closure-readiness blockers (NCRs + conditionals).
+    blockers = await compute_closure_blockers(session, wo_before)
+    if blockers:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": blockers[0]["code"],
+                "message": (
+                    "Work order is not ready to close: "
+                    f"{len(blockers)} precondition(s) failed."
+                ),
+                "blockers": [
+                    {
+                        "code": b["code"],
+                        "message": b["message"],
+                        "entity_id": (
+                            str(b["entity_id"])
+                            if b.get("entity_id") is not None else None
+                        ),
+                    }
+                    for b in blockers
+                ],
+            },
+        )
+
+    previous_state = wo_before.status.value
+
+    # Gate 4 + persistence + audit: do the transition work inline
+    # rather than going through `_transition_wo` so we can persist
+    # `closure_rationale` in the same flush + carry it on the audit
+    # row's `after_state`.  Keeps the rationale and the status flip
+    # atomic — they MUST land together.
+    try:
+        check_version(wo_before, version, entity_type="WorkOrder")
+    except VersionConflictError as e:
+        raise version_conflict_response(
+            e, current_entity=_wo_to_conflict_dict(wo_before),
+        ) from e
+
+    if not validate_wo_transition(wo_before.status, WOStatus.closed):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Invalid transition: {wo_before.status.value} → "
+                f"{WOStatus.closed.value}"
+            ),
+        )
+
+    wo_before.status = WOStatus.closed
+    if closure_rationale is not None:
+        wo_before.closure_rationale = closure_rationale
+    wo_before.updated_by = user_id
+    increment_version(wo_before)
+    await session.flush()
+
+    await create_audit_record(
+        session,
+        event_id=_uuid.uuid4(),
+        actor_type=ActorType.human,
+        user_id=user_id,
+        user_role=None,
+        action_type=f"work_order.{WOStatus.closed.value}",
+        entity_type="work_order",
+        entity_id=wo_before.id,
+        before_state={"status": previous_state},
+        after_state={
+            "status": WOStatus.closed.value,
+            "closure_rationale": closure_rationale,
+        },
+    )
+    wo = wo_before
+
     await _publish_wo_state_changed(
         session, wo, previous_state=previous_state, actor_id=user_id,
     )

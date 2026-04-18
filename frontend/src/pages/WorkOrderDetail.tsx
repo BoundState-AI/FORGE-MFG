@@ -31,6 +31,7 @@ import { LoadingSkeleton } from '@/components/LoadingSkeleton';
 import { ErrorBanner } from '@/components/ErrorBanner';
 import { ConfirmationDialog } from '@/components/ConfirmationDialog';
 import { ConflictModal } from '@/components/ConflictModal';
+import { CloseWorkOrderPanel } from '@/components/CloseWorkOrderPanel';
 import type {
   WorkOrderDetailOut,
   WOStatus,
@@ -424,6 +425,12 @@ export default function WorkOrderDetail() {
           })}
         </div>
       </div>
+
+      {/* GC-4 close-as-attestation panel.  Renders only on `complete`
+          status: governance-disabled banner when the feature flag is
+          off (visible to all readers so the operational reality is
+          explicit), QA-manager close action when on. */}
+      <CloseWorkOrderPanel wo={wo} onCloseSuccess={invalidateAll} />
 
       {/* Detail fields */}
       <div

@@ -117,6 +117,11 @@ class TestNCRWorkflow:
         settings = Settings(
             env="test", debug=False, auth_mode="local",
             database_url=_ASYNC_URL,
+            # GC-4: NCR close is feature-flag gated (UX spec §5.6.7).
+            # The lifecycle tests in this suite exercise the close
+            # path, so we opt-in to the enabled posture explicitly —
+            # the production default is False until MSFC QA approval.
+            closure_enabled=True,
         )
         init_engine(settings.database_url)
         self.app = create_app(settings=settings)

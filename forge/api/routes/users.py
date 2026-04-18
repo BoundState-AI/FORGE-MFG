@@ -30,7 +30,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from forge.api.auth import AuthContext, get_auth_context
-from forge.api.deps import get_db
+from forge.api.deps import get_config, get_db
+from forge.config import Settings
 from forge.schemas.admin import ProgramOut, RoleOut
 from forge.schemas.user import UserMeOut
 from forge.services import admin_service
@@ -42,6 +43,7 @@ router = APIRouter(prefix="/api/users", tags=["users"])
 async def get_me(
     auth: AuthContext = Depends(get_auth_context),
     session: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_config),
 ) -> UserMeOut:
     """Return the authenticated caller's live DB profile.
 
@@ -69,4 +71,10 @@ async def get_me(
             ProgramOut.model_validate(p) for p in user.program_memberships
         ],
         permissions=admin_service.effective_permissions(user),
+        # GC-4: ship the live closure-enable governance flag so the
+        # frontend can decide pre-render whether to surface the
+        # Close action affordances.  Sourced via the get_config dep
+        # so test fixtures that pass an explicit Settings see their
+        # own value (not the env-loaded singleton).
+        closure_enabled=settings.closure_enabled,
     )

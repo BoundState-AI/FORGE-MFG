@@ -113,6 +113,16 @@ class WorkOrder(AuditableMixin, Base):
     has_graph_issue: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default="false", nullable=False,
     )
+    # GC-4 closure-as-attestation (UX spec §5.3): optional rationale
+    # captured at close time and persisted on the closed entity.  Part
+    # of the attestation artifact alongside the actor + timestamp +
+    # version + close audit row.  Nullable because Phase-1 makes the
+    # rationale optional — the operational decision is the click-to-
+    # close action itself; rationale is a free-form QA note when the
+    # closer wants to record context.
+    closure_rationale: Mapped[str | None] = mapped_column(
+        String(4000), nullable=True,
+    )
 
     # Relationships
     program: Mapped[Program] = relationship(lazy="selectin")  # noqa: F821

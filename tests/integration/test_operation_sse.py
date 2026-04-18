@@ -132,6 +132,9 @@ class TestOperationSSE:
         settings = Settings(
             env="test", debug=False, auth_mode="local",
             database_url=_ASYNC_URL,
+            # GC-4: WO close path is exercised by this suite (close
+            # fans out a `done` SSE event to child op channels).
+            closure_enabled=True,
         )
         init_engine(settings.database_url)
         self.app = create_app(settings=settings)

@@ -43,6 +43,7 @@ import type {
   WorkOrderCreate,
   WorkOrderUpdate,
   WorkOrderTransition,
+  WorkOrderClose,
   WorkOrderHoldIn,
   WorkOrderHoldOut,
   OperationOut,
@@ -61,10 +62,12 @@ import type {
   NCRCreate,
   NCRDisposition,
   NCRPatch,
+  NCRClose,
   MaterialCertOut,
   PartOut,
   TraceabilityOut,
   DashboardSummaryOut,
+  UserMeOut,
   UserOut,
   ProgramListItemOut,
   AdminHealthOut,
@@ -202,6 +205,32 @@ export async function completeWorkOrder(
     await typedClient.POST('/api/work-orders/{wo_id}/complete', {
       params: { path: { wo_id: id } },
       body,
+    }),
+  );
+}
+
+/**
+ * GC-4 close-as-attestation (UX spec §5.3).  Body is `WorkOrderClose`
+ * (`version` + optional `closure_rationale`).  The server enforces the
+ * `CLOSURE_ENABLED` feature flag (403 CLOSURE_DISABLED when off), the
+ * §11.3 re-auth freshness gate, and the close-readiness blockers
+ * (open NCRs, unresolved conditional inspections).  Optional
+ * `Idempotency-Key` lets the same retry deduplicate against the
+ * server-side cache.
+ */
+export async function closeWorkOrder(
+  id: string,
+  body: WorkOrderClose,
+  idempotencyKey?: string,
+): Promise<WorkOrderOut> {
+  const headers = idempotencyKey
+    ? { 'Idempotency-Key': idempotencyKey }
+    : undefined;
+  return unwrap(
+    await typedClient.POST('/api/work-orders/{wo_id}/close', {
+      params: { path: { wo_id: id } },
+      body,
+      headers,
     }),
   );
 }
@@ -430,6 +459,32 @@ export async function patchNCR(id: string, body: NCRPatch): Promise<NCROut> {
   );
 }
 
+/**
+ * GC-4 NCR close-as-attestation (UX spec §5.6.7).  Body is `NCRClose`
+ * (`version` + optional `closure_rationale` + optional `root_cause`).
+ * Server enforces the same `CLOSURE_ENABLED` feature flag as WO close
+ * + the §11.3 re-auth freshness gate + the existing per-disposition
+ * preconditions (`EVIDENCE_REQUIRED_FOR_CLOSE`,
+ * `REMEDIATION_WO_NOT_CLOSED`).  Optional `Idempotency-Key` for
+ * retry-safe submission per §9.3.
+ */
+export async function closeNCR(
+  id: string,
+  body: NCRClose,
+  idempotencyKey?: string,
+): Promise<NCROut> {
+  const headers = idempotencyKey
+    ? { 'Idempotency-Key': idempotencyKey }
+    : undefined;
+  return unwrap(
+    await typedClient.POST('/api/ncrs/{ncr_id}/close', {
+      params: { path: { ncr_id: id } },
+      body,
+      headers,
+    }),
+  );
+}
+
 /* ── Materials list (5C parity patch) ── */
 
 export async function fetchMaterials(
@@ -494,16 +549,21 @@ export async function confirmEvidence(
 
 /* ── Users ── */
 
-export async function fetchCurrentUser(): Promise<UserOut> {
+export async function fetchCurrentUser(): Promise<UserMeOut> {
   /* The /me response schema drops the required wrappers on roles[] and
      program_memberships[] (they come out as optional in the generated
-     types).  Narrow to the full UserOut shape after the fact. */
+     types).  Narrow to the full UserMeOut shape after the fact.
+
+     GC-4: UserMeOut adds `closure_enabled` so the frontend can
+     pre-render the close action affordances based on the live
+     governance flag. */
   const me = unwrap(await typedClient.GET('/api/users/me'));
   return {
     ...me,
     roles: me.roles ?? [],
     program_memberships: me.program_memberships ?? [],
-  } as UserOut;
+    closure_enabled: me.closure_enabled ?? false,
+  } as UserMeOut;
 }
 
 /* ── Admin ── */

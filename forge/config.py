@@ -97,6 +97,19 @@ class Settings(BaseSettings):
     feature_cpm_scheduling: bool = False
     feature_worm_replication: bool = False
 
+    # GC-4 Closure-as-Attestation (UX spec §5.3, §5.6.7).  Phase-1 close
+    # endpoints (POST /api/work-orders/{id}/close, POST /api/ncrs/{id}/close)
+    # remain disabled until production enablement is unblocked by either:
+    #   - documented MSFC QA approval that click-to-close + audit-trail is
+    #     sufficient for the FORGE-MFG scope, OR
+    #   - documented QA waiver from the same compliance authority.
+    # No sponsor-only override is permitted: the gate is a governance
+    # control, not a UX toggle.  When False, both close routes return
+    # 403 CLOSURE_DISABLED before any state mutation or audit row is
+    # written; the system's effective terminal state is `complete`
+    # (WO) and `dispositioned` (NCR).
+    closure_enabled: bool = False
+
     # --- Rate limiting (spec §5.15) ---
     rate_limit_default: int = 120
     rate_limit_chat: int = 20

@@ -29,7 +29,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from forge.api.auth import AuthContext, get_auth_context, require_permission
-from forge.api.deps import get_db
+from forge.api.deps import get_config, get_db
+from forge.config import Settings
 from forge.schemas.ncr import (
     NCRClose,
     NCRCreate,
@@ -157,11 +158,21 @@ async def close_ncr(
     data: NCRClose,
     auth: AuthContext = Depends(require_permission("ncr:close")),
     session: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_config),
 ) -> NCROut:
-    """Close an NCR (dispositioned → closed)."""
+    """Close an NCR — Phase-1 closure-as-attestation (GC-4).
+
+    Service enforces the closure feature flag, the §11.3 re-auth
+    freshness gate, and the existing per-disposition completion-
+    evidence + remediation-WO preconditions before any state
+    mutation.  Body now carries optional `closure_rationale`
+    (UX spec §5.6.7).
+    """
     ncr = await ncr_svc.close_ncr(
         session, ncr_id, data, uuid.UUID(auth.sub),
         program_codes=auth.programs,
+        auth_context=auth,
+        settings=settings,
     )
     await session.commit()
     await session.refresh(ncr)
