@@ -256,3 +256,89 @@ describe('AuditTrail — empty + error states', () => {
     });
   });
 });
+
+/*
+ * ACC-01A-AUD-02 — NCR audit history end-to-end visibility.
+ *
+ * The backend acceptance scenario ACC-01A-NCR-01 commits both
+ * `ncr.disposition` and `ncr.close` audit rows carrying the
+ * disposition and closure rationales.  This block pins the
+ * NCR-side rendering contract: both events must appear on the
+ * NCR Detail Audit History with humanized labels, actor + role
+ * attribution, and the raw action + rationale-bearing diff
+ * visible in the expanded row.  Without this, AUD-02 would only
+ * be implicit in the humanization test and not tied to the
+ * disposition+close chain ACC-01A actually produces.
+ */
+describe('AuditTrail — ACC-01A-AUD-02 NCR disposition + close visibility', () => {
+  beforeEach(() => {
+    fetchMock.mockReset();
+  });
+  afterEach(() => cleanup());
+
+  it('renders disposition + close rows with attribution and expandable rationale diff', async () => {
+    fetchMock.mockResolvedValue({
+      items: [
+        buildEvent({
+          audit_id: 'ncr-close-evt',
+          action: 'ncr.close',
+          entity_type: 'ncr',
+          entity_id: 'ncr-1',
+          actor: {
+            user_id: 'u-qa',
+            display_name: 'Q. Manager',
+            role_at_time_of_event: 'qa_manager',
+          },
+          before_state: { status: 'dispositioned', closure_rationale: null },
+          after_state: {
+            status: 'closed',
+            closure_rationale: 'MRB concurrence recorded; ACC-01A-NCR-01 close.',
+          },
+        }),
+        buildEvent({
+          audit_id: 'ncr-disp-evt',
+          action: 'ncr.disposition',
+          entity_type: 'ncr',
+          entity_id: 'ncr-1',
+          actor: {
+            user_id: 'u-eng',
+            display_name: 'E. Ngineer',
+            role_at_time_of_event: 'engineer',
+          },
+          before_state: { status: 'open', disposition: null },
+          after_state: { status: 'dispositioned', disposition: 'use_as_is' },
+        }),
+      ],
+      total: 2,
+      page: 1,
+      page_size: 50,
+      pages: 1,
+    });
+
+    renderTrail('ncr', 'ncr-1');
+
+    await waitFor(() => {
+      expect(screen.getAllByTestId('audit-trail-row')).toHaveLength(2);
+    });
+
+    /* Both humanized labels visible. */
+    expect(screen.getByText('Dispositioned')).toBeInTheDocument();
+    expect(screen.getByText('Closed')).toBeInTheDocument();
+
+    /* Actors attributed with role — both rows must show who did what
+       so a QA reviewer reading the trail can tell at a glance whether
+       SoD held across disposition and close. */
+    expect(screen.getByText(/E\. Ngineer/)).toBeInTheDocument();
+    expect(screen.getByText(/\(engineer\)/)).toBeInTheDocument();
+    expect(screen.getByText(/Q\. Manager/)).toBeInTheDocument();
+    expect(screen.getByText(/\(qa_manager\)/)).toBeInTheDocument();
+
+    /* Expand the Closed row — raw action + rationale diff must be
+       reachable for a power user reconciling UI against the chain. */
+    fireEvent.click(screen.getByRole('button', { name: /Closed/ }));
+    const expanded = await screen.findByTestId('audit-trail-expanded');
+    expect(expanded).toHaveTextContent('ncr.close');
+    expect(expanded).toHaveTextContent(/closure_rationale/);
+    expect(expanded).toHaveTextContent(/MRB concurrence recorded/);
+  });
+});
