@@ -35,6 +35,7 @@ from sqlalchemy.orm import aliased
 from forge.api.auth import AuthContext
 from forge.audit.logger import create_audit_record
 from forge.config import Settings
+from forge.models.document import ControlledDocumentRef
 from forge.models.enums import ActorType, OpStatus, WOStatus
 from forge.models.work_order import WorkOrder
 from forge.realtime import (
@@ -246,9 +247,44 @@ async def update_work_order(
 
     State leaving: draft.  State entering: draft (no transition).
     Invariant: WO must be in draft status.
+
+    Two distinct rejection codes for non-draft edits (acceptance
+    row ACC-10-01 / spec §4.4 COMP-004):
+
+      - `DOCUMENT_REFS_FROZEN` (422) — explicit when the caller
+        attempts to mutate `drawing_ref_ids` or `spec_ref_ids` on
+        a non-draft WO.  Wire-stable code so the frontend can
+        surface a frozen-doc-specific error.
+      - generic "Only draft work orders can be edited" (422) —
+        any other field on a non-draft WO.  Pre-existing behavior.
+
+    The freeze check fires before the generic check so the more
+    specific code wins when both apply.  Draft WOs may freely
+    mutate either set; the service replaces the M2M association
+    rows with the new id list (any id not in the new list is
+    detached, no controlled-document row is deleted).
     """
     wo = await get_work_order(session, wo_id, program_codes=program_codes)
 
+    docs_mutation_attempted = (
+        data.drawing_ref_ids is not None
+        or data.spec_ref_ids is not None
+    )
+    if wo.status != WOStatus.draft and docs_mutation_attempted:
+        # Acceptance row ACC-10-01: explicit DOCUMENT_REFS_FROZEN
+        # so the matrix has a wire-stable proof string.
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "DOCUMENT_REFS_FROZEN",
+                "message": (
+                    "drawing_ref_ids and spec_ref_ids freeze on "
+                    "work order release (COMP-004); they cannot "
+                    "be modified once the WO leaves draft status"
+                ),
+                "wo_status": wo.status.value,
+            },
+        )
     if wo.status != WOStatus.draft:
         raise HTTPException(
             status_code=422,
@@ -275,10 +311,58 @@ async def update_work_order(
     if data.bom_revision_ref is not None:
         wo.bom_revision_ref = data.bom_revision_ref
 
+    if data.drawing_ref_ids is not None:
+        wo.drawing_refs = await _resolve_doc_refs(
+            session, data.drawing_ref_ids, kind="drawing",
+        )
+    if data.spec_ref_ids is not None:
+        wo.spec_refs = await _resolve_doc_refs(
+            session, data.spec_ref_ids, kind="spec",
+        )
+
     wo.updated_by = user_id
     increment_version(wo)
     await session.flush()
     return wo
+
+
+async def _resolve_doc_refs(
+    session: AsyncSession,
+    ref_ids: list[_uuid.UUID],
+    *,
+    kind: str,
+) -> list[ControlledDocumentRef]:
+    """Resolve a list of ControlledDocumentRef ids → ORM rows.
+
+    Reject the call if any id is missing — a silent drop on a
+    non-existent ref id would let a draft WO end up with a
+    truncated set, which would then freeze incorrectly at release
+    (COMP-004).  Caller passes `kind` ("drawing" or "spec") for
+    the error message; rejection is otherwise identical.
+    """
+    if not ref_ids:
+        return []
+    result = await session.execute(
+        select(ControlledDocumentRef).where(
+            ControlledDocumentRef.id.in_(ref_ids),
+        ),
+    )
+    rows = list(result.scalars().all())
+    found_ids = {row.id for row in rows}
+    missing = [rid for rid in ref_ids if rid not in found_ids]
+    if missing:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "DOCUMENT_REF_NOT_FOUND",
+                "message": (
+                    f"{kind}_ref_ids references unknown "
+                    "ControlledDocumentRef rows"
+                ),
+                "missing_ids": [str(m) for m in missing],
+            },
+        )
+    return rows
 
 
 async def _transition_wo(

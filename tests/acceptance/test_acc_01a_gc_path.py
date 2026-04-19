@@ -175,6 +175,15 @@ def _wipe() -> None:
                 "   OR action_type LIKE 'labor.%' "
                 "   OR action_type LIKE 'evidence.%'"
             ))
+            # 6A-3A cross-suite hygiene: when the baseline-staging
+            # acceptance suite seeds material consumption + part
+            # rows, the foreign keys
+            #   material_consumptions.operation_id -> operations.id
+            #   material_consumptions.certification_id -> material_certifications.id
+            #   part_instances.material_certification_id -> material_certifications.id
+            # block the operations DELETE below.  Wipe in reverse-FK
+            # order before touching operations / WOs.
+            conn.execute(text("DELETE FROM material_consumptions"))
             conn.execute(text("DELETE FROM sign_off_events"))
             conn.execute(text("DELETE FROM inspection_events"))
             conn.execute(text("DELETE FROM labor_entries"))
@@ -182,6 +191,10 @@ def _wipe() -> None:
                 "UPDATE part_instances SET reason_ncr_id = NULL"
             ))
             conn.execute(text("DELETE FROM nonconformance_reports"))
+            # part_instances + material_certifications must clear
+            # before operations (FK chain documented above).
+            conn.execute(text("DELETE FROM part_instances"))
+            conn.execute(text("DELETE FROM material_certifications"))
             conn.execute(text("DELETE FROM operations"))
             conn.execute(text(
                 "DELETE FROM work_orders "

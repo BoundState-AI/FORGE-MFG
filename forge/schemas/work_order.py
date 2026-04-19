@@ -53,6 +53,14 @@ class WorkOrderUpdate(BaseModel):
     missing-both with 400 MISSING_VERSION, mismatched-both with
     409 VERSION_CONFLICT.  Callers still using body-only continue
     unchanged.
+
+    `drawing_ref_ids` and `spec_ref_ids` replace the WO's M2M
+    associations to ControlledDocumentRef rows.  Per spec §4.4
+    COMP-004 these refs FREEZE on release — the service rejects
+    mutation attempts on non-draft work orders with the wire-stable
+    error code `DOCUMENT_REFS_FROZEN` (acceptance row ACC-10-01).
+    Other non-draft edits keep the existing generic "draft only"
+    rejection.
     """
 
     version: int | None = None
@@ -61,6 +69,8 @@ class WorkOrderUpdate(BaseModel):
     build_phase: BuildPhase | None = None
     priority: Priority | None = None
     bom_revision_ref: str | None = None
+    drawing_ref_ids: list[uuid.UUID] | None = None
+    spec_ref_ids: list[uuid.UUID] | None = None
 
 
 class WorkOrderTransition(BaseModel):
