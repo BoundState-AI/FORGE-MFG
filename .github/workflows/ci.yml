@@ -49,7 +49,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install ".[dev]"
+      # 6A-2: install [dev,infra] so the infra contract tests
+      # (tests/unit/test_infra_contract.py + test_dr_stacks.py)
+      # synthesize in-memory during CI.  [infra] adds aws-cdk-lib
+      # + constructs only; runtime images still exclude them.
+      - run: pip install ".[dev,infra]"
       - run: pytest tests/unit/ -v --tb=short
         env:
           FORGE_ENV: test

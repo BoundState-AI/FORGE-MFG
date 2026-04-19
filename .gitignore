@@ -30,6 +30,7 @@ env/
 .coverage
 htmlcov/
 .mypy_cache/
+.tmp_jsii/
 
 # OS
 .DS_Store

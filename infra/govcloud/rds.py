@@ -207,6 +207,30 @@ class RdsModule(Construct):
                 "stack in 6A-2; 6A-1 only declares the contract."
             ),
         )
+        # 6A-2: explicit primary RDS ARN output so the deploy
+        # workflow can feed it into the dr-replica stack's
+        # `forge:primary_rds_arn` context without relying on the
+        # naming-convention fallback.  Closes the 6A-2 known-gap
+        # item in the ops artifact.
+        cdk.CfnOutput(
+            self, "PrimaryRdsArn",
+            value=self.instance.instance_arn,
+            description=(
+                "Primary RDS instance ARN — consumed by the "
+                "dr-replica stack as its SourceDBInstanceIdentifier."
+            ),
+        )
+        # Secret ARN output so the migrate job can resolve the
+        # master credentials secret without hardcoded ARNs.
+        cdk.CfnOutput(
+            self, "DbMasterSecretArn",
+            value=self.credentials_secret.secret_arn,
+            description=(
+                "Secrets Manager ARN for the RDS master credentials.  "
+                "Consumed by the Alembic migrate job in the deploy "
+                "workflow."
+            ),
+        )
 
     def export(self) -> RdsResources:
         """Frozen output bundle for `stack.py`."""

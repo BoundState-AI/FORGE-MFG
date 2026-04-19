@@ -26,13 +26,23 @@ Task-role separation (spec §9.3.7):
   same data-plane grants as API plus SendMessage/PublishSNS for
   outbox delivery.
 
-Why the images are referenced via ECR without hardcoded tags:
-  6A-1 scaffold accepts an `image_tag` context key (defaults to
-  `latest` for staging synth).  6A-2 pipeline substitutes the
-  commit SHA.  The contract is: "three repositories in ECR named
-  `<prefix>-api`, `<prefix>-frontend`, `<prefix>-worker`".  The
-  ECR repositories themselves are provisioned here so `cdk deploy`
-  can push before a service deploy rolls.
+Image tag pinning:
+  Task definitions reference ECR images by commit SHA, not `latest`.
+  The tag flows in via `EnvSettings.image_tag`, which is populated
+  from `--context forge:image_tag=<sha>` in the deploy workflow.
+  Defaulting to `latest` at synth time is OK for local smoke
+  (nothing is actually deployed), but the workflow ALWAYS passes
+  a real SHA so `cdk deploy` pins task defs to the image that
+  passed test/scan and the resulting task-def revision change
+  forces a fresh rolling deploy.  This closes the 6A-2 review
+  finding 1 gap where `latest` was hardcoded.
+
+ECR ownership:
+  ECR repositories live in the bootstrap stack
+  (`infra/govcloud/bootstrap.py`) so the build pipeline can push
+  images BEFORE `cdk deploy` runs against the primary stack.  This
+  resolves the fresh-staging bootstrap chicken-and-egg.  Here we
+  import the repos by deterministic name.
 """
 
 from __future__ import annotations
@@ -54,6 +64,52 @@ from infra.govcloud.kms import KmsKeys
 from infra.govcloud.rds import RdsResources
 from infra.govcloud.s3 import S3Buckets
 from infra.govcloud.settings import EnvSettings
+
+
+def _add_value_from_secret(
+    task_def: ecs.FargateTaskDefinition,
+    *,
+    container_name: str,
+    env_name: str,
+    secret_arn: str,
+) -> None:
+    """Inject a Secrets Manager `valueFrom` reference on a container.
+
+    Uses the L1 escape hatch on the ContainerDefinition's `Secrets`
+    property directly.  The L2 helper
+    `ecs.Secret.from_secrets_manager(secret)` would auto-grant the
+    execution role decrypt permission on the secret's KMS key —
+    when that key lives in a different stack (CMK-DATA in primary),
+    CDK adds a statement to the key's RESOURCE POLICY referencing
+    the execution-role ARN.  That creates the cross-stack cycle
+    `primary -> services/.../ExecutionRole.Arn -> primary`.
+
+    The execution role has explicit identity-based policy
+    statements for `secretsmanager:GetSecretValue` and
+    `kms:Decrypt` on the relevant ARNs, which is what ECS actually
+    uses at task-launch time.  The KMS key's default policy
+    delegates to IAM via the AWS-account-root statement so the
+    identity-based decrypt is sufficient.
+    """
+    from aws_cdk import aws_ecs as _ecs_ns
+
+    container = task_def.find_container(container_name)
+    assert container is not None, (
+        f"container {container_name!r} not found on task def"
+    )
+    # Fetch the underlying CfnTaskDefinition ContainerDefinition list
+    # and splice in one more Secrets entry.
+    cfn_task = task_def.node.default_child
+    assert isinstance(cfn_task, _ecs_ns.CfnTaskDefinition), (
+        "expected CfnTaskDefinition under L2 task def construct"
+    )
+    # `container_definitions` is a TOKEN at synth time; we can't
+    # mutate it post-hoc.  Use `add_property_override` on the CFN
+    # container definition instead.
+    cfn_task.add_property_override(
+        "ContainerDefinitions.0.Secrets",
+        [{"Name": env_name, "ValueFrom": secret_arn}],
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,74 +151,49 @@ class EcsModule(Construct):
         buckets: S3Buckets,
         cognito_pool: CognitoResources,
         alb: AlbResources,
+        service_security_group: ec2.ISecurityGroup,
     ) -> None:
         super().__init__(scope, construct_id)
         self._settings = settings
         prefix = settings.resource_prefix()
-        image_tag_default = "latest"
+        # Pinned image tag — comes from `EnvSettings.image_tag` which
+        # is populated from `--context forge:image_tag=<sha>` in the
+        # deploy workflow.  `latest` at synth time is a local-dev
+        # convenience; real deploys always carry a commit SHA.
+        image_tag = settings.image_tag
 
-        # ECR repositories — one per service.  Scanning is enabled
-        # so Inspector findings surface per spec §9.3.10.  Image
-        # immutability enforced so a commit-SHA tag can't be
-        # silently reused during a rollback race.
-        self.ecr_api = ecr.Repository(
-            self, "ApiRepo",
-            repository_name=f"{prefix}-api",
-            image_scan_on_push=True,
-            image_tag_mutability=ecr.TagMutability.IMMUTABLE,
-            encryption=ecr.RepositoryEncryption.KMS,
-            encryption_key=keys.data,
-            removal_policy=cdk.RemovalPolicy.RETAIN,
+        # ECR repositories live in the bootstrap stack and are
+        # imported here by deterministic name.  Import-by-name
+        # avoids a cross-stack deploy-order coupling — the bootstrap
+        # stack's output ARNs are not required at synth time.
+        self.ecr_api = ecr.Repository.from_repository_name(
+            self, "ApiRepo", repository_name=f"{prefix}-api",
         )
-        self.ecr_frontend = ecr.Repository(
+        self.ecr_frontend = ecr.Repository.from_repository_name(
             self, "FrontendRepo",
             repository_name=f"{prefix}-frontend",
-            image_scan_on_push=True,
-            image_tag_mutability=ecr.TagMutability.IMMUTABLE,
-            encryption=ecr.RepositoryEncryption.KMS,
-            encryption_key=keys.data,
-            removal_policy=cdk.RemovalPolicy.RETAIN,
         )
-        self.ecr_worker = ecr.Repository(
+        self.ecr_worker = ecr.Repository.from_repository_name(
             self, "WorkerRepo",
             repository_name=f"{prefix}-worker",
-            image_scan_on_push=True,
-            image_tag_mutability=ecr.TagMutability.IMMUTABLE,
-            encryption=ecr.RepositoryEncryption.KMS,
-            encryption_key=keys.data,
-            removal_policy=cdk.RemovalPolicy.RETAIN,
         )
 
-        # Cluster + common service SG.
+        # Cluster.  The service SG is passed in from the primary
+        # stack — creating it here would force a primary -> services
+        # reference (rds.db_security_group.add_ingress_rule(service_sg)
+        # mutates primary to reference the services-stack SG id) and
+        # create the cross-stack cycle.  Primary now owns all SG
+        # mutations.
         self.cluster = ecs.Cluster(
             self, "Cluster",
             cluster_name=f"{prefix}-cluster",
             vpc=vpc,
             # ContainerInsights v2 is the non-deprecated form;
             # ENABLED matches the spec §9.3.5 ECS task health alarm
-            # surface (alarms in alerts.py read the resulting metrics).
+            # surface.
             container_insights_v2=ecs.ContainerInsights.ENABLED,
         )
-        service_sg = ec2.SecurityGroup(
-            self, "ServiceSecurityGroup",
-            vpc=vpc,
-            description="FORGE-MFG Fargate task ingress from ALB only.",
-            allow_all_outbound=True,
-        )
-        # Ingress: from ALB on 8000 (API) and 80 (frontend).
-        service_sg.add_ingress_rule(
-            alb.security_group, ec2.Port.tcp(8000),
-            "API task port from ALB",
-        )
-        service_sg.add_ingress_rule(
-            alb.security_group, ec2.Port.tcp(80),
-            "Frontend task port from ALB",
-        )
-        # DB access: service SG allowed into the DB proxy SG.
-        rds.db_security_group.add_ingress_rule(
-            service_sg, ec2.Port.tcp(5432),
-            "ECS services -> RDS Proxy",
-        )
+        service_sg = service_security_group
 
         # Log groups — one per service; CMK-LOGS-encrypted per
         # spec §9.3.1.  Retention: 90 days (operational), long-term
@@ -212,27 +243,190 @@ class EcsModule(Construct):
             ),
         )
 
-        # API + worker: read DB secret, read/write evidence + docs,
-        # write audit WORM, decrypt via CMK-DATA.
+        # ── Execution roles (separate per service) ───────────────
+        # Explicitly provisioned — if we let CDK auto-create these,
+        # `ecs.Secret.from_secrets_manager(...)` would grant
+        # decrypt on CMK-DATA to the execution role, and because
+        # CMK-DATA lives in the primary stack CDK would add a
+        # statement to the primary key policy referencing the
+        # services-stack execution role ARN.  That is the cycle.
+        # Owning the execution role here, with identity-based
+        # statements only (account-root delegation on the default
+        # KMS policy makes this sufficient), breaks the cycle.
+        execution_role_secret_actions = [
+            "secretsmanager:GetSecretValue",
+            "secretsmanager:DescribeSecret",
+        ]
+        execution_role_kms_actions = [
+            "kms:Decrypt",
+            "kms:DescribeKey",
+        ]
+        self.api_execution_role = iam.Role(
+            self, "ApiExecutionRole",
+            assumed_by=iam.ServicePrincipal("ecs-tasks.amazonaws.com"),
+            description="FORGE-MFG API task execution role.",
+            managed_policies=[
+                iam.ManagedPolicy.from_aws_managed_policy_name(
+                    "service-role/AmazonECSTaskExecutionRolePolicy",
+                ),
+            ],
+        )
+        self.frontend_execution_role = iam.Role(
+            self, "FrontendExecutionRole",
+            assumed_by=iam.ServicePrincipal("ecs-tasks.amazonaws.com"),
+            description="FORGE-MFG frontend task execution role.",
+            managed_policies=[
+                iam.ManagedPolicy.from_aws_managed_policy_name(
+                    "service-role/AmazonECSTaskExecutionRolePolicy",
+                ),
+            ],
+        )
+        self.worker_execution_role = iam.Role(
+            self, "WorkerExecutionRole",
+            assumed_by=iam.ServicePrincipal("ecs-tasks.amazonaws.com"),
+            description="FORGE-MFG worker task execution role.",
+            managed_policies=[
+                iam.ManagedPolicy.from_aws_managed_policy_name(
+                    "service-role/AmazonECSTaskExecutionRolePolicy",
+                ),
+            ],
+        )
+        # API + worker execution roles need to fetch the DB secret
+        # at container-start time (valueFrom) + decrypt CMK-DATA.
+        for exec_role in (
+            self.api_execution_role, self.worker_execution_role,
+        ):
+            exec_role.add_to_policy(iam.PolicyStatement(
+                sid="DbMasterSecretRead",
+                actions=execution_role_secret_actions,
+                resources=[rds.credentials_secret.secret_arn],
+            ))
+            exec_role.add_to_policy(iam.PolicyStatement(
+                sid="CmkDataDecryptForSecrets",
+                actions=execution_role_kms_actions,
+                resources=[keys.data.key_arn],
+            ))
+
+        # API + worker: identity-based policy statements for the
+        # primary-stack resources (DB secret, buckets, CMK-DATA).
+        #
+        # We write policy statements directly onto the role rather
+        # than calling the L2 `grant_*` helpers because those helpers
+        # bidirectionally mutate the TARGET resource's resource
+        # policy (bucket / secret / KMS key).  Since the targets
+        # live in the primary stack, that would create a cross-stack
+        # cycle (primary -> services task-role ARN, services ->
+        # primary resource ARN).
+        #
+        # KMS is the subtle one: KMS actions require BOTH an
+        # identity-based allow AND a key-policy allow.  `kms.Key`
+        # with CDK defaults ships a key policy that delegates to
+        # IAM via the AWS-account-root statement, so an
+        # identity-based statement on the task role is sufficient.
+        # Explicitly tested in tests/unit/test_services_stack.py.
         for role in (self.api_task_role, self.worker_task_role):
-            rds.credentials_secret.grant_read(role)
-            buckets.evidence.grant_read_write(role)
-            buckets.documents.grant_read_write(role)
-            # Audit WORM writes only (never delete — Object Lock
-            # would reject it anyway; stating the grant narrowly
-            # keeps a rogue SDK call from even trying).
-            buckets.audit_worm.grant_put(role)
-            keys.data.grant_encrypt_decrypt(role)
+            role.add_to_policy(iam.PolicyStatement(
+                sid="DbMasterSecretRead",
+                actions=[
+                    "secretsmanager:GetSecretValue",
+                    "secretsmanager:DescribeSecret",
+                ],
+                resources=[rds.credentials_secret.secret_arn],
+            ))
+            role.add_to_policy(iam.PolicyStatement(
+                sid="EvidenceBucketReadWrite",
+                actions=[
+                    "s3:GetObject", "s3:PutObject",
+                    "s3:DeleteObject", "s3:ListBucket",
+                    "s3:GetBucketLocation",
+                ],
+                resources=[
+                    buckets.evidence.bucket_arn,
+                    buckets.evidence.arn_for_objects("*"),
+                ],
+            ))
+            role.add_to_policy(iam.PolicyStatement(
+                sid="DocumentsBucketReadWrite",
+                actions=[
+                    "s3:GetObject", "s3:PutObject",
+                    "s3:DeleteObject", "s3:ListBucket",
+                    "s3:GetBucketLocation",
+                ],
+                resources=[
+                    buckets.documents.bucket_arn,
+                    buckets.documents.arn_for_objects("*"),
+                ],
+            ))
+            # Audit WORM: PutObject + Retention + LegalHold only.
+            # Object Lock would reject deletes anyway; narrow the
+            # identity policy so a rogue SDK call doesn't even try.
+            role.add_to_policy(iam.PolicyStatement(
+                sid="AuditWormPutOnly",
+                actions=[
+                    "s3:PutObject",
+                    "s3:PutObjectRetention",
+                    "s3:PutObjectLegalHold",
+                    "s3:ListBucket",
+                    "s3:GetBucketLocation",
+                ],
+                resources=[
+                    buckets.audit_worm.bucket_arn,
+                    buckets.audit_worm.arn_for_objects("*"),
+                ],
+            ))
+            role.add_to_policy(iam.PolicyStatement(
+                sid="CmkDataEncryptDecrypt",
+                actions=[
+                    "kms:Encrypt",
+                    "kms:Decrypt",
+                    "kms:ReEncrypt*",
+                    "kms:GenerateDataKey*",
+                    "kms:DescribeKey",
+                ],
+                resources=[keys.data.key_arn],
+            ))
 
-        # Frontend: static serving only.  Grant pull from ECR and
-        # write to its log group; nothing else.
-        self.ecr_frontend.grant_pull(self.frontend_task_role)
-        frontend_log_group.grant_write(self.frontend_task_role)
+        # ECR pull + log group write.  Same approach as above —
+        # identity-based statements only.  The bootstrap stack's
+        # ECR repos are imported by name here; using
+        # `ecr.grant_pull` would try to mutate the bootstrap stack's
+        # repo policy and create a cross-stack cycle.  Log groups
+        # live LOCAL to this stack so we can reference them directly.
+        ecr_pull_actions = [
+            "ecr:GetAuthorizationToken",
+            "ecr:BatchCheckLayerAvailability",
+            "ecr:GetDownloadUrlForLayer",
+            "ecr:BatchGetImage",
+        ]
+        for role, repo in (
+            (self.api_task_role, self.ecr_api),
+            (self.frontend_task_role, self.ecr_frontend),
+            (self.worker_task_role, self.ecr_worker),
+        ):
+            # GetAuthorizationToken is account-wide (no resource
+            # scoping); other actions scope to the specific repo.
+            role.add_to_policy(iam.PolicyStatement(
+                sid="EcrAuthToken",
+                actions=["ecr:GetAuthorizationToken"],
+                resources=["*"],
+            ))
+            role.add_to_policy(iam.PolicyStatement(
+                sid="EcrPullImage",
+                actions=[
+                    a for a in ecr_pull_actions
+                    if a != "ecr:GetAuthorizationToken"
+                ],
+                resources=[repo.repository_arn],
+            ))
 
-        self.ecr_api.grant_pull(self.api_task_role)
-        api_log_group.grant_write(self.api_task_role)
-        self.ecr_worker.grant_pull(self.worker_task_role)
-        worker_log_group.grant_write(self.worker_task_role)
+        for role, log_group in (
+            (self.api_task_role, api_log_group),
+            (self.frontend_task_role, frontend_log_group),
+            (self.worker_task_role, worker_log_group),
+        ):
+            # Log groups are in THIS stack, so grant_write is fine
+            # (no cross-stack mutation needed).
+            log_group.grant_write(role)
 
         # ── API task definition ───────────────────────────────────
         api_task = ecs.FargateTaskDefinition(
@@ -240,11 +434,21 @@ class EcsModule(Construct):
             cpu=2048,
             memory_limit_mib=4096,
             task_role=self.api_task_role,
+            execution_role=self.api_execution_role,
         )
+        # DB secret passed through via the L1 `Secrets` property on
+        # the container definition — the L2 helper
+        # `ecs.Secret.from_secrets_manager` would auto-grant decrypt
+        # on the secret's CMK (CMK-DATA, primary stack), recreating
+        # the cycle we're trying to break.  The execution role
+        # created above already carries explicit
+        # `secretsmanager:GetSecretValue` + `kms:Decrypt` policy
+        # statements (identity-based only), which is sufficient for
+        # ECS to fetch the secret at container-start time.
         api_task.add_container(
             "api",
             image=ecs.ContainerImage.from_ecr_repository(
-                self.ecr_api, image_tag_default,
+                self.ecr_api, image_tag,
             ),
             port_mappings=[ecs.PortMapping(container_port=8000)],
             logging=ecs.LogDrivers.aws_logs(
@@ -271,13 +475,6 @@ class EcsModule(Construct):
                 "RDS_PROXY_ENDPOINT": rds.proxy.endpoint,
                 "ALB_DOMAIN": settings.alb_domain or "",
             },
-            # Secrets: every credential is a Secrets Manager
-            # `valueFrom` reference.  No plaintext.
-            secrets={
-                "DATABASE_URL_SECRET_JSON": ecs.Secret.from_secrets_manager(
-                    rds.credentials_secret,
-                ),
-            },
             health_check=ecs.HealthCheck(
                 command=["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"],
                 interval=Duration.seconds(30),
@@ -285,6 +482,14 @@ class EcsModule(Construct):
                 retries=3,
                 start_period=Duration.seconds(20),
             ),
+        )
+        # Manually inject the Secrets Manager `valueFrom` reference
+        # on the container.  CfnTaskDefinition's ContainerDefinition
+        # `Secrets` property matches the L2 shape one-for-one.
+        _add_value_from_secret(
+            api_task, container_name="api",
+            env_name="DATABASE_URL_SECRET_JSON",
+            secret_arn=rds.credentials_secret.secret_arn,
         )
         self.api_service = ecs.FargateService(
             self, "ApiService",
@@ -317,11 +522,12 @@ class EcsModule(Construct):
             cpu=256,
             memory_limit_mib=512,
             task_role=self.frontend_task_role,
+            execution_role=self.frontend_execution_role,
         )
         frontend_task.add_container(
             "frontend",
             image=ecs.ContainerImage.from_ecr_repository(
-                self.ecr_frontend, image_tag_default,
+                self.ecr_frontend, image_tag,
             ),
             port_mappings=[ecs.PortMapping(container_port=80)],
             logging=ecs.LogDrivers.aws_logs(
@@ -369,12 +575,23 @@ class EcsModule(Construct):
             cpu=1024,
             memory_limit_mib=2048,
             task_role=self.worker_task_role,
+            execution_role=self.worker_execution_role,
         )
         worker_task.add_container(
             "worker",
             image=ecs.ContainerImage.from_ecr_repository(
-                self.ecr_worker, image_tag_default,
+                self.ecr_worker, image_tag,
             ),
+            # CMD override — the repo-root Dockerfile's default CMD
+            # boots `gunicorn forge.api.app:app`, which is the API
+            # HTTP server.  The worker service shares the same image
+            # (spec §2.2 — single Python package, different
+            # entrypoints) so we MUST override the command here or
+            # the "worker" task would actually serve HTTP.  The
+            # entrypoint lives at `forge/events/__main__.py` and
+            # wraps `run_forever` with SIGTERM-aware graceful
+            # shutdown.
+            command=["python", "-m", "forge.events"],
             logging=ecs.LogDrivers.aws_logs(
                 stream_prefix="worker",
                 log_group=worker_log_group,
@@ -387,11 +604,11 @@ class EcsModule(Construct):
                 "DOCUMENTS_BUCKET": buckets.documents.bucket_name,
                 "AUDIT_WORM_BUCKET": buckets.audit_worm.bucket_name,
             },
-            secrets={
-                "DATABASE_URL_SECRET_JSON": ecs.Secret.from_secrets_manager(
-                    rds.credentials_secret,
-                ),
-            },
+        )
+        _add_value_from_secret(
+            worker_task, container_name="worker",
+            env_name="DATABASE_URL_SECRET_JSON",
+            secret_arn=rds.credentials_secret.secret_arn,
         )
         self.worker_service = ecs.FargateService(
             self, "WorkerService",

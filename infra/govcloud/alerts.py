@@ -50,7 +50,6 @@ from aws_cdk import aws_sns_subscriptions as sns_subs
 from constructs import Construct
 
 from infra.govcloud.alb import AlbResources
-from infra.govcloud.ecs import EcsResources
 from infra.govcloud.guardduty import GuardDutyResources
 from infra.govcloud.rds import RdsResources
 from infra.govcloud.settings import EnvSettings
@@ -74,7 +73,6 @@ class AlertsModule(Construct):
         construct_id: str,
         *,
         settings: EnvSettings,
-        ecs_resources: EcsResources,
         rds_resources: RdsResources,
         alb: AlbResources,
         guardduty_resources: GuardDutyResources,
@@ -102,48 +100,12 @@ class AlertsModule(Construct):
         primary_action = cw_actions.SnsAction(self.primary)
 
         # ── ECS task health ──────────────────────────────────────
+        # Per-service ECS CPU + memory alarms live in the services
+        # stack (see `infra/govcloud/services.py`) — they depend on
+        # the ECS services which are now deployed AFTER migrate.
+        # `alerts.py` in the primary stack owns only the infra-level
+        # alarm surface below.
         alarms: list[cw.IAlarm] = []
-        for service, label in (
-            (ecs_resources.api_service, "Api"),
-            (ecs_resources.frontend_service, "Frontend"),
-            (ecs_resources.worker_service, "Worker"),
-        ):
-            # CPU >80%
-            cpu_alarm = cw.Alarm(
-                self, f"{label}CpuHigh",
-                alarm_name=f"{prefix}-{label.lower()}-cpu-80",
-                metric=service.metric_cpu_utilization(
-                    period=Duration.minutes(1),
-                    statistic="avg",
-                ),
-                threshold=80,
-                evaluation_periods=3,
-                datapoints_to_alarm=3,
-                comparison_operator=(
-                    cw.ComparisonOperator.GREATER_THAN_THRESHOLD
-                ),
-                treat_missing_data=cw.TreatMissingData.NOT_BREACHING,
-            )
-            cpu_alarm.add_alarm_action(primary_action)
-            alarms.append(cpu_alarm)
-
-            mem_alarm = cw.Alarm(
-                self, f"{label}MemHigh",
-                alarm_name=f"{prefix}-{label.lower()}-mem-80",
-                metric=service.metric_memory_utilization(
-                    period=Duration.minutes(1),
-                    statistic="avg",
-                ),
-                threshold=80,
-                evaluation_periods=3,
-                datapoints_to_alarm=3,
-                comparison_operator=(
-                    cw.ComparisonOperator.GREATER_THAN_THRESHOLD
-                ),
-                treat_missing_data=cw.TreatMissingData.NOT_BREACHING,
-            )
-            mem_alarm.add_alarm_action(primary_action)
-            alarms.append(mem_alarm)
 
         # ── ALB 5xx absolute count gate ──────────────────────────
         # Spec §9.3.5 names "ALB 5xx (>1%)".  The percentage form
@@ -277,6 +239,18 @@ class AlertsModule(Construct):
             description=(
                 "Total CloudWatch alarms owned by alerts.py; "
                 "used by tests/unit/test_infra_contract.py."
+            ),
+        )
+        # 6A-2 rev 0.3: services stack imports the primary SNS
+        # topic ARN by reading this output via `describe-stacks`,
+        # then wires per-service CPU/memory alarms to it.
+        cdk.CfnOutput(
+            self, "OpsPrimaryTopicArn",
+            value=self.primary.topic_arn,
+            description=(
+                "ARN of the primary ops SNS topic.  Imported by "
+                "the services stack so ECS per-service CPU/memory "
+                "alarms notify the same topic."
             ),
         )
 

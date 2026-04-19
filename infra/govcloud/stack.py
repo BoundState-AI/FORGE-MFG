@@ -41,13 +41,54 @@ from infra.govcloud.backup import BackupModule
 from infra.govcloud.cloudtrail import CloudTrailModule
 from infra.govcloud.cognito import CognitoModule
 from infra.govcloud.config_rules import ConfigModule
-from infra.govcloud.ecs import EcsModule
 from infra.govcloud.guardduty import GuardDutyModule
 from infra.govcloud.kms import KmsModule
 from infra.govcloud.rds import RdsModule
 from infra.govcloud.s3 import S3Module
 from infra.govcloud.settings import EnvSettings
 from infra.govcloud.waf import WafModule
+
+
+def _create_service_security_group(
+    scope: Construct,
+    *,
+    settings: EnvSettings,
+    vpc: ec2.IVpc,
+    alb_security_group: ec2.ISecurityGroup,
+    db_security_group: ec2.ISecurityGroup,
+) -> ec2.SecurityGroup:
+    """Create the ECS service SG in the PRIMARY stack scope.
+
+    6A-2 rev 0.4: service SG creation moved here (from `ecs.py` /
+    services stack) so all SG ingress-rule mutations are local to
+    primary.  Without this move, services stack's
+    `rds.db_security_group.add_ingress_rule(service_sg)` call would
+    add an ingress-rule resource to the PRIMARY stack referencing
+    the SERVICES stack's SG id — creating the cross-stack cycle.
+
+    The SG is exported out of the stack so the services stack can
+    attach its Fargate services to it; that's a services -> primary
+    reference (fine; the opposite direction is the cycle).
+    """
+    sg = ec2.SecurityGroup(
+        scope, "ServiceSecurityGroup",
+        vpc=vpc,
+        description="FORGE-MFG Fargate task ingress from ALB only.",
+        allow_all_outbound=True,
+    )
+    sg.add_ingress_rule(
+        alb_security_group, ec2.Port.tcp(8000),
+        "API task port from ALB",
+    )
+    sg.add_ingress_rule(
+        alb_security_group, ec2.Port.tcp(80),
+        "Frontend task port from ALB",
+    )
+    db_security_group.add_ingress_rule(
+        sg, ec2.Port.tcp(5432),
+        "ECS services -> RDS Proxy",
+    )
+    return sg
 
 
 class ForgeMfgGovCloudStack(cdk.Stack):
@@ -114,11 +155,15 @@ class ForgeMfgGovCloudStack(cdk.Stack):
         )
         rds_resources = self.rds.export()
 
-        # Cognito — independent of VPC; fronts user auth.
+        # Cognito — independent of VPC; fronts user auth.  6A-2:
+        # CMK-LOGS is now required so the PreTokenGen lambda's log
+        # group is encrypted under the log-plane CMK.  Services
+        # stack reads `self.cognito.export()` directly — no local
+        # alias needed in this scope after the ECS-out-of-primary
+        # split (6A-2 rev 0.4).
         self.cognito = CognitoModule(
-            self, "Cognito", settings=settings,
+            self, "Cognito", settings=settings, keys=keys,
         )
-        cognito_resources = self.cognito.export()
 
         # ALB owns target groups + routing.  ECS later registers
         # tasks against the target groups exported here.
@@ -135,19 +180,22 @@ class ForgeMfgGovCloudStack(cdk.Stack):
         )
         self.waf.export()
 
-        # ECS — three Fargate services with task roles + Secrets
-        # Manager `valueFrom` wiring.
-        self.ecs = EcsModule(
-            self, "Ecs",
-            settings=settings,
-            vpc=self.vpc,
-            keys=keys,
-            rds=rds_resources,
-            buckets=buckets,
-            cognito_pool=cognito_resources,
-            alb=alb_resources,
+        # Service SG lives in primary (see `_create_service_security_group`
+        # docstring for the cycle rationale).  Exposed as an attribute
+        # so the services stack can attach it to Fargate tasks.
+        self.service_security_group = _create_service_security_group(
+            self, settings=settings, vpc=self.vpc,
+            alb_security_group=alb_resources.security_group,
+            db_security_group=rds_resources.db_security_group,
         )
-        ecs_resources = self.ecs.export()
+
+        # 6A-2 rev 0.3: ECS services MOVED OUT of the primary stack.
+        # They live in `ForgeMfgGovCloudServicesStack` so `cdk deploy`
+        # can land infra + run Alembic migrations BEFORE the ECS
+        # task-def rollout swaps traffic to new image SHAs.  Without
+        # the split, new code could serve traffic against an
+        # unmigrated schema — `/health` is a liveness probe and
+        # passes regardless of DB readiness.
 
         # GuardDuty + Config + CloudTrail (observability + drift).
         self.guardduty = GuardDutyModule(
@@ -175,12 +223,12 @@ class ForgeMfgGovCloudStack(cdk.Stack):
         )
         self.backup.export()
 
-        # Alerts last — needs the resources from every observed
-        # surface.
+        # Alerts — SNS topics + non-ECS alarms (RDS, ALB, custom
+        # metrics, GuardDuty routing).  ECS-specific alarms live in
+        # the services stack now (6A-2 rev 0.3).
         self.alerts = AlertsModule(
             self, "Alerts",
             settings=settings,
-            ecs_resources=ecs_resources,
             rds_resources=rds_resources,
             alb=alb_resources,
             guardduty_resources=guardduty_resources,

@@ -159,22 +159,145 @@ class S3Module(Construct):
             ],
         )
         # Cross-region replication to dr_region per spec §9.3.12.
-        # CRR is configured via Cfn-level role + replication config
-        # because the L2 bucket construct does not yet model
-        # destinations in another region with their own KMS key.
-        # 6A-1 captures the contract; 6A-2 provisions the IAM role
-        # + the destination bucket in dr_region (a separate stack
-        # in the dr_region account/region binding).
+        # Destination bucket + destination KMS key live in the
+        # `dr_foundation` stack (deployed BEFORE this primary stack
+        # per the 6A-2 sandwich order).  We reference them by
+        # constructed ARN because the primary stack does not import
+        # cross-region stack outputs — the naming convention is the
+        # contract.
+        dr_bucket_name = (
+            f"{prefix}-audit-worm-replica-{settings.dr_region}"
+        )
+        dr_bucket_arn = f"arn:aws-us-gov:s3:::{dr_bucket_name}"
+        dr_data_key_alias_arn = (
+            f"arn:aws-us-gov:kms:{settings.dr_region}:"
+            f"{settings.account or '*'}:alias/{prefix}-data-dr"
+        )
+
+        # S3 replication role — trusted by the S3 service only.
+        # The role needs read on the source bucket (including the
+        # KMS key that encrypts source objects) and write on the
+        # destination bucket (including the destination-region KMS
+        # key for re-encryption on arrival).
+        self.audit_worm_replication_role = iam.Role(
+            self, "AuditWormReplicationRole",
+            assumed_by=iam.ServicePrincipal("s3.amazonaws.com"),
+            description=(
+                "FORGE-MFG audit WORM cross-region replication role. "
+                "Spec §9.3.12 CRR to dr_region."
+            ),
+        )
+        self.audit_worm_replication_role.add_to_policy(iam.PolicyStatement(
+            sid="SourceBucketRead",
+            effect=iam.Effect.ALLOW,
+            actions=[
+                "s3:GetReplicationConfiguration",
+                "s3:ListBucket",
+            ],
+            resources=[self.audit_worm.bucket_arn],
+        ))
+        self.audit_worm_replication_role.add_to_policy(iam.PolicyStatement(
+            sid="SourceObjectsRead",
+            effect=iam.Effect.ALLOW,
+            actions=[
+                "s3:GetObjectVersionForReplication",
+                "s3:GetObjectVersionAcl",
+                "s3:GetObjectVersionTagging",
+                "s3:GetObjectRetention",
+                "s3:GetObjectLegalHold",
+            ],
+            resources=[self.audit_worm.arn_for_objects("*")],
+        ))
+        self.audit_worm_replication_role.add_to_policy(iam.PolicyStatement(
+            sid="DestinationObjectsWrite",
+            effect=iam.Effect.ALLOW,
+            actions=[
+                "s3:ReplicateObject",
+                "s3:ReplicateDelete",
+                "s3:ReplicateTags",
+                "s3:ObjectOwnerOverrideToBucketOwner",
+            ],
+            resources=[f"{dr_bucket_arn}/*"],
+        ))
+        # Source-side KMS decrypt — CMK-DATA owned by kms.py.
+        keys.data.grant_decrypt(self.audit_worm_replication_role)
+        # Destination-side KMS encrypt — the DR CMK is resolved by
+        # alias ARN so the primary stack does not need to know the
+        # destination key id at synth time.
+        self.audit_worm_replication_role.add_to_policy(iam.PolicyStatement(
+            sid="DestinationKmsEncrypt",
+            effect=iam.Effect.ALLOW,
+            actions=[
+                "kms:Encrypt",
+                "kms:GenerateDataKey",
+            ],
+            resources=[dr_data_key_alias_arn],
+        ))
+
+        # Attach the ReplicationConfiguration to the bucket.  The L2
+        # Bucket construct does not expose cross-region destinations
+        # with their own KMS key yet, so we reach through to the
+        # underlying Cfn node and set the property directly.  This
+        # is the documented CDK escape hatch for this exact case.
+        cfn_bucket = self.audit_worm.node.default_child
+        assert isinstance(cfn_bucket, s3.CfnBucket), (
+            "expected CfnBucket under audit WORM L2 construct"
+        )
+        cfn_bucket.replication_configuration = (
+            s3.CfnBucket.ReplicationConfigurationProperty(
+                role=self.audit_worm_replication_role.role_arn,
+                rules=[
+                    s3.CfnBucket.ReplicationRuleProperty(
+                        id="AuditWormToDrRegion",
+                        priority=0,
+                        status="Enabled",
+                        filter=s3.CfnBucket.ReplicationRuleFilterProperty(
+                            prefix="",
+                        ),
+                        delete_marker_replication=(
+                            s3.CfnBucket.DeleteMarkerReplicationProperty(
+                                status="Disabled",
+                            )
+                        ),
+                        source_selection_criteria=(
+                            s3.CfnBucket.SourceSelectionCriteriaProperty(
+                                sse_kms_encrypted_objects=(
+                                    s3.CfnBucket.SseKmsEncryptedObjectsProperty(
+                                        status="Enabled",
+                                    )
+                                ),
+                                replica_modifications=(
+                                    s3.CfnBucket.ReplicaModificationsProperty(
+                                        status="Enabled",
+                                    )
+                                ),
+                            )
+                        ),
+                        destination=(
+                            s3.CfnBucket.ReplicationDestinationProperty(
+                                bucket=dr_bucket_arn,
+                                encryption_configuration=(
+                                    s3.CfnBucket.EncryptionConfigurationProperty(
+                                        replica_kms_key_id=(
+                                            dr_data_key_alias_arn
+                                        ),
+                                    )
+                                ),
+                            )
+                        ),
+                    ),
+                ],
+            )
+        )
+
         cdk.CfnOutput(
             self, "AuditWormCrrTarget",
-            value=(
-                f"arn:aws-us-gov:s3:::{prefix}-audit-worm-replica-"
-                f"{settings.dr_region}"
-            ),
+            value=dr_bucket_arn,
             description=(
-                "Intended CRR destination bucket ARN for the audit "
-                "WORM bucket.  Provisioned alongside the dr_region "
-                "stack in 6A-2; 6A-1 only declares the contract."
+                "CRR destination bucket ARN for the audit WORM "
+                "bucket.  Owned by the dr_foundation stack; "
+                "referenced here by naming convention.  "
+                "Spec §9.3.12."
             ),
         )
 

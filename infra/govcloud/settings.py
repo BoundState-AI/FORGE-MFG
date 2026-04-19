@@ -68,13 +68,19 @@ class EnvSettings:
                       Lambda ARN for the spec §7 Pre Token Generation
                       trigger that injects `custom:roles` and
                       `custom:programs` claims.  `None` in 6A-1 —
-                      the LAMBDA CODE IS NOT DELIVERED BY THIS
-                      SLICE.  When None, the Cognito user pool is
-                      provisioned without the trigger; attaching it
-                      later is a targeted update, not a rebuild.
+                      attachment point only.  6A-2 ships the lambda
+                      as a bundled asset when this is None.
       alert_email:    Operator inbox for CloudWatch alarms / SNS.
                       Optional; when None, alerts.py still provisions
                       topics but subscriptions are deferred.
+      image_tag:      ECR image tag ECS task definitions pull.  6A-2:
+                      the deploy workflow supplies the just-pushed
+                      commit SHA via `--context forge:image_tag=<sha>`
+                      so `cdk deploy` pins the task def to the image
+                      that passed test/scan.  Defaults to `latest`
+                      ONLY for local synth convenience; production
+                      and staging deploys must always supply a real
+                      SHA or the pipeline is not reproducible.
     """
 
     env: EnvName
@@ -85,6 +91,7 @@ class EnvSettings:
     cert_arn: str
     cognito_pre_token_gen_arn: str | None = None
     alert_email: str | None = None
+    image_tag: str = "latest"
 
     def stack_name(self, component: str) -> str:
         """Build a deterministic stack name for a component.
@@ -157,6 +164,7 @@ def from_context(context_getter: object) -> EnvSettings:
     cert_arn = _pick("cert_arn")
     pre_token_arn = get("forge:cognito_pre_token_gen_arn") or None
     alert_email = get("forge:alert_email") or None
+    image_tag = get("forge:image_tag") or "latest"
 
     return EnvSettings(
         env=env,
@@ -169,4 +177,5 @@ def from_context(context_getter: object) -> EnvSettings:
             str(pre_token_arn) if pre_token_arn else None
         ),
         alert_email=str(alert_email) if alert_email else None,
+        image_tag=str(image_tag),
     )
