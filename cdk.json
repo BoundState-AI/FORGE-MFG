@@ -1,0 +1,25 @@
+{
+  "app": "python -m infra.govcloud.app",
+  "watch": {
+    "include": ["infra/govcloud/**/*.py"],
+    "exclude": ["**/__pycache__/**", "**/*.pyc", "tests/**"]
+  },
+  "context": {
+    "@aws-cdk/core:enableStackNameDuplicates": true,
+    "@aws-cdk/aws-iam:minimizePolicies": true,
+    "@aws-cdk/aws-s3:createDefaultLoggingPolicy": true,
+    "aws:cdk:partition": "aws-us-gov",
+    "forge:envs": {
+      "staging": {
+        "description": "GovCloud staging environment; mirrors production posture with relaxed origins only where spec §9.3.9 allows.",
+        "region": "us-gov-west-1",
+        "dr_region": "us-gov-east-1"
+      },
+      "production": {
+        "description": "GovCloud production environment; no relaxed posture anywhere.",
+        "region": "us-gov-west-1",
+        "dr_region": "us-gov-east-1"
+      }
+    }
+  }
+}

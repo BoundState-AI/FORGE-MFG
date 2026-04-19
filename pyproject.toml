@@ -43,6 +43,15 @@ dev = [
     "mypy>=1.9,<2",
     "pre-commit>=3,<4",
 ]
+# 6A-1: CDK (Python) is the frozen IaC per build spec §2.2 row
+# `IaC | AWS CDK (Python)`.  Kept as an optional-dep group so the
+# runtime API / worker / frontend images never bundle CDK — the
+# infra stack is only synthesized by the deploy pipeline host
+# (later slice 6A-2).  Install locally with `pip install -e .[infra]`.
+infra = [
+    "aws-cdk-lib>=2.140,<3",
+    "constructs>=10.3,<11",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["forge"]
