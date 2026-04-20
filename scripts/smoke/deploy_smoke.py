@@ -1,50 +1,62 @@
 #!/usr/bin/env python3
 """
-Module:   Staging Smoke Harness
-Purpose:  Post-deploy smoke probes for staging GovCloud environments.
-          Runs a finite series of HTTP probes against the staging
-          ALB, verifies the deployment contract, and exits non-zero
-          on any failure so the GitHub Actions deploy job can gate
-          the next stage.
-Rev:      0.1.0
+Module:   Deploy Smoke Harness
+Purpose:  Post-deploy smoke probes for FORGE-MFG GovCloud environments.
+          Same probe set runs against staging (6A-2) and production
+          (6A-3B); environment is selected purely by the configured
+          base URL + token + Cognito pool, not by code path.  Runs a
+          finite series of HTTP probes against the target ALB,
+          verifies the deployment contract, and exits non-zero on any
+          failure so the GitHub Actions deploy job can gate the next
+          stage.
+Rev:      0.2.0
 
 BoundState Proprietary
 Co-Authored-By: Dr. Joseph Wilde, BoundState AI
 Co-Authored-By: Claude "Beth" (Opus 4.7)
 
-What this verifies:
+Why this module is environment-agnostic (rev 0.2):
+  6A-3B introduced production promotion.  Forking the harness into
+  `staging_smoke.py` + `production_smoke.py` would have meant two
+  copies of the same probe logic drifting independently, and
+  acceptance test ACC-13 (deploy secrets + workflow contract)
+  would have to walk both.  Instead the module name went from
+  `staging_smoke` to `deploy_smoke` and every environment-specific
+  value flows in through env vars — `FORGE_SMOKE_*` is the
+  canonical prefix; `STAGING_*` is honored as a fallback so the
+  staging deploy workflow keeps working without renaming its
+  GitHub secrets.
+
+What this verifies (same on staging + production):
   - Frontend root returns 200 + HTML (nginx SPA serving works).
   - API /health returns 200 + JSON (API is reachable via ALB).
   - ALB path routing splits correctly (/ -> frontend, /api/* -> API).
   - Security headers match spec §9.3.8 on the frontend response.
-  - CORS allow-list behavior matches spec §9.3.9 (staging origin
+  - CORS allow-list behavior matches spec §9.3.9 (configured origin
     accepted; random origin rejected).  Preflight includes
     Access-Control-Request-Method so FastAPI's CORS middleware
     actually runs.
   - A protected manufacturing read path — `GET /api/work-orders` —
     returns 401 without auth AND returns 200 with a real token.
-    The authenticated probe is MANDATORY for staging; if no token
-    can be obtained (no test creds + no pre-minted token), the
-    run fails rather than silently skip.
+    The authenticated probe is MANDATORY; if no token can be
+    obtained (no test creds + no pre-minted token), the run fails
+    rather than silently skip.
 
 Authentication flow:
-  Preferred: `STAGING_TEST_TOKEN` env supplies an already-minted
-  access token.  The deploy workflow mints this token in a
-  dedicated pre-smoke step via `aws cognito-idp admin-initiate-auth`
-  and exports it — that is how every staging deploy reaches the
-  smoke job.  See `.github/workflows/deploy-staging.yml`.
+  Preferred: `FORGE_SMOKE_TEST_TOKEN` (or `STAGING_TEST_TOKEN` for
+  back-compat) supplies an already-minted access token.  Both deploy
+  workflows mint this token in a dedicated pre-smoke step via
+  `aws cognito-idp admin-initiate-auth` and export it.
 
-  Fallback: `STAGING_TEST_USERNAME` + `STAGING_TEST_PASSWORD` +
-  `STAGING_COGNITO_USER_POOL_ID` + `STAGING_COGNITO_APP_CLIENT_ID`
-  let the script exchange credentials via the Cognito
-  `AdminInitiateAuth` flow (`ADMIN_USER_PASSWORD_AUTH`).  This
-  flow is IAM-gated, so it only works when the caller's AWS
-  credentials have `cognito-idp:AdminInitiateAuth` — the workflow's
-  OIDC deploy role does, a random developer running the script
-  locally typically does not.  The Cognito client is provisioned
-  with `admin_user_password=True` to enable this flow; the
-  end-user-facing `USER_PASSWORD_AUTH` flow stays DISABLED so
-  browsers cannot bypass SRP.
+  Fallback: `FORGE_SMOKE_TEST_USERNAME` + `FORGE_SMOKE_TEST_PASSWORD`
+  + `FORGE_SMOKE_COGNITO_USER_POOL_ID` +
+  `FORGE_SMOKE_COGNITO_APP_CLIENT_ID` (or the equivalent `STAGING_*`
+  variants) let the script exchange credentials via the Cognito
+  `AdminInitiateAuth` flow (`ADMIN_USER_PASSWORD_AUTH`).  This flow
+  is IAM-gated.  The Cognito client is provisioned with
+  `admin_user_password=True` to enable this flow; the end-user
+  `USER_PASSWORD_AUTH` flow stays DISABLED so browsers cannot
+  bypass SRP.
 
   Either path is acceptable; missing both is a smoke failure.
 
@@ -294,6 +306,25 @@ def _probe_protected_authenticated(
     )
 
 
+# --- Env-var resolution (FORGE_SMOKE_* preferred, STAGING_* fallback) -
+
+def _env_lookup(env: dict[str, str], *keys: str) -> str | None:
+    """Return the first non-empty value for any of the given keys.
+
+    The harness reads its configuration from `FORGE_SMOKE_*` env vars
+    by preference; for back-compat with the staging deploy workflow
+    (whose GitHub secrets predate the rename) the equivalent
+    `STAGING_*` keys are honored as a fallback.  This keeps staging
+    working without forcing a secrets-rename migration in the same
+    slice that introduced production promotion.
+    """
+    for key in keys:
+        val = env.get(key)
+        if val:
+            return val
+    return None
+
+
 # --- Auth-token acquisition ------------------------------------------
 
 def _obtain_token(env: dict[str, str]) -> str | None:
@@ -304,15 +335,30 @@ def _obtain_token(env: dict[str, str]) -> str | None:
     rather than raising so the summary table reports it alongside
     the other probes.
     """
-    pre_minted = env.get("STAGING_TEST_TOKEN")
+    pre_minted = _env_lookup(env, "FORGE_SMOKE_TEST_TOKEN", "STAGING_TEST_TOKEN")
     if pre_minted:
         return pre_minted.strip()
 
-    user = env.get("STAGING_TEST_USERNAME")
-    password = env.get("STAGING_TEST_PASSWORD")
-    pool_id = env.get("STAGING_COGNITO_USER_POOL_ID")
-    client_id = env.get("STAGING_COGNITO_APP_CLIENT_ID")
-    region = env.get("AWS_REGION") or env.get("STAGING_REGION") or "us-gov-west-1"
+    user = _env_lookup(
+        env, "FORGE_SMOKE_TEST_USERNAME", "STAGING_TEST_USERNAME",
+    )
+    password = _env_lookup(
+        env, "FORGE_SMOKE_TEST_PASSWORD", "STAGING_TEST_PASSWORD",
+    )
+    pool_id = _env_lookup(
+        env,
+        "FORGE_SMOKE_COGNITO_USER_POOL_ID",
+        "STAGING_COGNITO_USER_POOL_ID",
+    )
+    client_id = _env_lookup(
+        env,
+        "FORGE_SMOKE_COGNITO_APP_CLIENT_ID",
+        "STAGING_COGNITO_APP_CLIENT_ID",
+    )
+    region = (
+        _env_lookup(env, "FORGE_SMOKE_AWS_REGION", "AWS_REGION", "STAGING_REGION")
+        or "us-gov-west-1"
+    )
 
     if not all([user, password, pool_id, client_id]):
         return None
@@ -357,8 +403,9 @@ def run_probes(
     """Execute every probe in order.  Returns the full result list.
 
     `client` is injectable so `tests/unit/test_staging_smoke_contract.py`
-    can pass a mock transport.  When None, a real httpx.Client is
-    constructed.
+    (which imports from `scripts.smoke.deploy_smoke` after the 6A-3B
+    rename) can pass a mock transport.  When None, a real httpx.Client
+    is constructed.
     """
     close_client = False
     if client is None:
@@ -411,24 +458,33 @@ def _render_summary(results: list[ProbeResult]) -> str:
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="FORGE-MFG staging smoke harness",
+        description="FORGE-MFG deploy smoke harness (staging + production)",
     )
+    # Defaults pull from FORGE_SMOKE_* (canonical) with STAGING_*
+    # honored as a fallback so the existing staging deploy workflow
+    # keeps working without renaming GitHub secrets.  Production
+    # workflows export FORGE_SMOKE_* directly.
     parser.add_argument(
         "--base-url",
-        default=os.environ.get("STAGING_BASE_URL"),
+        default=(
+            os.environ.get("FORGE_SMOKE_BASE_URL")
+            or os.environ.get("STAGING_BASE_URL")
+        ),
         help=(
-            "ALB base URL (e.g. https://forge-mfg-staging.example.mil). "
-            "Falls back to STAGING_BASE_URL env var."
+            "ALB base URL (e.g. https://forge-mfg.us-gov-west-1.example.mil). "
+            "Falls back to FORGE_SMOKE_BASE_URL or STAGING_BASE_URL env."
         ),
     )
     parser.add_argument(
         "--allowed-origin",
-        default=os.environ.get("STAGING_ALLOWED_ORIGIN"),
+        default=(
+            os.environ.get("FORGE_SMOKE_ALLOWED_ORIGIN")
+            or os.environ.get("STAGING_ALLOWED_ORIGIN")
+        ),
         help=(
-            "CORS allowed origin to probe (e.g. "
-            "https://forge-mfg-staging.example.mil).  Falls back to "
-            "STAGING_ALLOWED_ORIGIN env; defaults to --base-url when "
-            "unset."
+            "CORS allowed origin to probe.  Falls back to "
+            "FORGE_SMOKE_ALLOWED_ORIGIN or STAGING_ALLOWED_ORIGIN env; "
+            "defaults to --base-url when unset."
         ),
     )
     return parser.parse_args(argv)
@@ -438,7 +494,8 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     if not args.base_url:
         print(
-            "ERROR: --base-url (or STAGING_BASE_URL) is required",
+            "ERROR: --base-url (or FORGE_SMOKE_BASE_URL / "
+            "STAGING_BASE_URL) is required",
             file=sys.stderr,
         )
         return 2

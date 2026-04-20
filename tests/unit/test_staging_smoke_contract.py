@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 """
-Module:   Test Staging Smoke Harness Contract
-Purpose:  Verify the probe logic in `scripts.smoke.staging_smoke`
+Module:   Test Deploy Smoke Harness Contract
+Purpose:  Verify the probe logic in `scripts.smoke.deploy_smoke`
           against mocked httpx responses.  These are NOT live
           tests — they pin the assertion logic so a bad header
           match or a silently-accepted rogue-origin preflight
           fails locally before the deploy workflow runs.
+
+          Module file is named `test_staging_smoke_contract.py` for
+          historical reasons (6A-2 era); the module under test is
+          now `scripts.smoke.deploy_smoke` after the 6A-3B rename
+          merged the staging + production smoke paths.
 
 BoundState AI 2026
 Version: 0.1.0
@@ -22,7 +27,7 @@ from __future__ import annotations
 
 import httpx
 
-from scripts.smoke.staging_smoke import ProbeResult, run_probes
+from scripts.smoke.deploy_smoke import ProbeResult, run_probes
 
 # ── Mock transport helpers ─────────────────────────────────────────
 
@@ -280,7 +285,7 @@ def test_obtain_token_uses_admin_initiate_auth() -> None:
     from types import ModuleType
     from unittest.mock import MagicMock
 
-    from scripts.smoke import staging_smoke
+    from scripts.smoke import deploy_smoke as staging_smoke
 
     captured: dict[str, object] = {}
 
@@ -328,7 +333,7 @@ def test_obtain_token_prefers_pre_minted_env_var() -> None:
     """Finding 4: when the workflow has minted STAGING_TEST_TOKEN
     in a pre-smoke step (the default path), _obtain_token must not
     still fire admin_initiate_auth."""
-    from scripts.smoke import staging_smoke
+    from scripts.smoke import deploy_smoke as staging_smoke
 
     token = staging_smoke._obtain_token({
         "STAGING_TEST_TOKEN": "pre-minted-abc",
@@ -345,7 +350,7 @@ def test_obtain_token_prefers_pre_minted_env_var() -> None:
 def test_obtain_token_returns_none_when_nothing_supplied() -> None:
     """No token, no credentials → None.  The runner surfaces None as
     a probe failure (see test_missing_token_fails_auth_probe)."""
-    from scripts.smoke import staging_smoke
+    from scripts.smoke import deploy_smoke as staging_smoke
 
     assert staging_smoke._obtain_token({}) is None
 

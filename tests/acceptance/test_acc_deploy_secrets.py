@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Module:   ACC-13 Deploy Secrets — 6A-3A
-Purpose:  Acceptance proof that the staging deploy artifact carries
-          ZERO plaintext credentials.  Two scenarios:
+Module:   ACC-13 Deploy Secrets — 6A-3A + 6A-3B
+Purpose:  Acceptance proof that the deploy artifacts (staging,
+          production, rollback) carry ZERO plaintext credentials.
             ACC-13-01 — synthesize the CDK app and walk every
               AWS::ECS::TaskDefinition resource; assert no
               credential-shaped Environment.Name and every
@@ -13,6 +13,15 @@ Purpose:  Acceptance proof that the staging deploy artifact carries
               AWS OIDC, never as inline literals; deny-list
               regex for AWS access keys, DB-URL passwords, PEM
               headers in raw env / run blocks.
+            ACC-13-03 — same structured-YAML scan applied to
+              .github/workflows/deploy-production.yml (added in
+              6A-3B); production workflow must also use OIDC, must
+              promote (not build) images, and must carry no inline
+              credentials.
+            ACC-13-04 — same structured-YAML scan applied to
+              .github/workflows/rollback-production.yml (added in
+              6A-3B); rollback workflow must also use OIDC and
+              carry no inline credentials.
 
 BoundState AI 2026
 Version: 0.1.0
@@ -355,3 +364,144 @@ def test_acc_13_workflow_uses_oidc_not_long_lived_keys() -> None:
             f"workflow uses static AWS credentials ({forbidden}); "
             "OIDC role assumption is the spec-required pattern"
         )
+
+
+# ---------------------------------------------------------------------
+# ACC-13-03 + ACC-13-04 — production + rollback workflows (6A-3B)
+# ---------------------------------------------------------------------
+#
+# The 6A-3B slice introduced two more workflows that touch production
+# secrets and AWS credentials.  ACC-13 must walk them with the same
+# scrutiny it applies to the staging workflow.
+
+_PRODUCTION_WORKFLOW_PATH = (
+    Path(__file__).parents[2]
+    / ".github"
+    / "workflows"
+    / "deploy-production.yml"
+)
+_ROLLBACK_WORKFLOW_PATH = (
+    Path(__file__).parents[2]
+    / ".github"
+    / "workflows"
+    / "rollback-production.yml"
+)
+
+
+def _scan_workflow_for_plaintext(path: Path) -> list[tuple[str, str]]:
+    """Run the deny-list scan against a workflow YAML at `path`.
+
+    Returns a list of (offender_kind, sample) tuples — empty list
+    means clean.  Same logic as
+    `test_acc_13_deploy_workflow_contains_no_plaintext_credentials`
+    but parameterized so all three workflows share the same
+    truthful regex set.
+    """
+    yaml = pytest.importorskip("yaml")
+    text = path.read_text(encoding="utf-8")
+    parsed = yaml.safe_load(text)
+    assert isinstance(parsed, dict), (
+        f"{path.name} did not parse to a mapping; got "
+        f"{type(parsed).__name__}"
+    )
+    offenders: list[tuple[str, str]] = []
+    for s in _walk_strings(parsed):
+        if _AWS_ACCESS_KEY_RE.search(s):
+            offenders.append(("AWS access key", s[:120]))
+        if (
+            _DB_URL_INLINE_PASSWORD_RE.search(s)
+            and "$" not in s
+            and ":${{" not in s
+        ):
+            offenders.append(("DB URL inline password", s[:120]))
+        if _PEM_HEADER_RE.search(s):
+            offenders.append(("PEM private key header", s[:120]))
+    return offenders
+
+
+def _assert_workflow_uses_oidc(path: Path) -> None:
+    """Assert the workflow at `path` uses OIDC role assumption,
+    not long-lived AWS keys.  Spec §9.3.2 binding."""
+    yaml = pytest.importorskip("yaml")
+    parsed = yaml.safe_load(path.read_text(encoding="utf-8"))
+    permissions = parsed.get("permissions") or {}
+    assert permissions.get("id-token") == "write", (
+        f"{path.name}: permissions.id-token must be `write` for OIDC; "
+        f"got {permissions.get('id-token')!r}"
+    )
+    raw = path.read_text(encoding="utf-8")
+    assert "role-to-assume:" in raw, (
+        f"{path.name} does not appear to use OIDC role assumption"
+    )
+    for forbidden in ("aws-access-key-id:", "aws-secret-access-key:"):
+        assert forbidden not in raw, (
+            f"{path.name} uses static AWS credentials ({forbidden}); "
+            f"OIDC role assumption is the spec-required pattern"
+        )
+
+
+def test_acc_13_production_workflow_contains_no_plaintext_credentials() -> None:
+    """ACC-13-03: production promotion workflow must use
+    `${{ secrets.* }}` or AWS OIDC for credential material; deny-list
+    regex hits anywhere in env / run / with blocks fail this scan."""
+    offenders = _scan_workflow_for_plaintext(_PRODUCTION_WORKFLOW_PATH)
+    assert not offenders, (
+        "deploy-production.yml contains plaintext credential material:\n"
+        + "\n".join(
+            f"  - {kind}: {sample}" for kind, sample in offenders
+        )
+    )
+
+    # Affirmative: the production workflow references the well-known
+    # production secret names.  Renaming any of these would break
+    # the production deploy and should also update this test.
+    workflow_str = _PRODUCTION_WORKFLOW_PATH.read_text(encoding="utf-8")
+    for required_secret in (
+        "AWS_PRODUCTION_DEPLOY_ROLE_ARN",
+        "PRODUCTION_ACCOUNT_ID",
+        "STAGING_ACCOUNT_ID",
+        "PRODUCTION_TEST_PASSWORD",
+    ):
+        token = f"secrets.{required_secret}"
+        assert token in workflow_str, (
+            f"deploy-production.yml no longer references "
+            f"{required_secret!r} via secrets context — either the "
+            f"secret was renamed (update this test) or someone "
+            f"hardcoded it (fail)"
+        )
+
+
+def test_acc_13_production_workflow_uses_oidc_not_long_lived_keys() -> None:
+    """ACC-13-03: production promotion workflow uses OIDC."""
+    _assert_workflow_uses_oidc(_PRODUCTION_WORKFLOW_PATH)
+
+
+def test_acc_13_rollback_workflow_contains_no_plaintext_credentials() -> None:
+    """ACC-13-04: production rollback workflow must use
+    `${{ secrets.* }}` or AWS OIDC for credential material."""
+    offenders = _scan_workflow_for_plaintext(_ROLLBACK_WORKFLOW_PATH)
+    assert not offenders, (
+        "rollback-production.yml contains plaintext credential material:\n"
+        + "\n".join(
+            f"  - {kind}: {sample}" for kind, sample in offenders
+        )
+    )
+
+    workflow_str = _ROLLBACK_WORKFLOW_PATH.read_text(encoding="utf-8")
+    for required_secret in (
+        "AWS_PRODUCTION_DEPLOY_ROLE_ARN",
+        "PRODUCTION_ACCOUNT_ID",
+        "PRODUCTION_TEST_PASSWORD",
+    ):
+        token = f"secrets.{required_secret}"
+        assert token in workflow_str, (
+            f"rollback-production.yml no longer references "
+            f"{required_secret!r} via secrets context — either the "
+            f"secret was renamed (update this test) or someone "
+            f"hardcoded it (fail)"
+        )
+
+
+def test_acc_13_rollback_workflow_uses_oidc_not_long_lived_keys() -> None:
+    """ACC-13-04: production rollback workflow uses OIDC."""
+    _assert_workflow_uses_oidc(_ROLLBACK_WORKFLOW_PATH)

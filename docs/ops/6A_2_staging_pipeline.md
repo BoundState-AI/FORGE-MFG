@@ -53,7 +53,7 @@ contract — see `docs/ops/6A_1_govcloud_deploy_contract.md`.
 | Worker entrypoint | [`forge/events/__main__.py`](../../forge/events/__main__.py) | New |
 | Frontend HSTS + CSP | [`frontend/nginx.conf`](../../frontend/nginx.conf) | Modified |
 | Four-stack app composition | [`infra/govcloud/app.py`](../../infra/govcloud/app.py) | Modified (rev 0.3) |
-| Smoke harness (ADMIN flow) | [`scripts/smoke/staging_smoke.py`](../../scripts/smoke/staging_smoke.py) | New (rev 0.2) |
+| Smoke harness (ADMIN flow) | [`scripts/smoke/deploy_smoke.py`](../../scripts/smoke/deploy_smoke.py) | New (rev 0.2; renamed from `staging_smoke.py` in 6A-3B) |
 | PreTokenGen unit test | [`tests/unit/test_pre_token_gen.py`](../../tests/unit/test_pre_token_gen.py) | New |
 | DR stacks contract test | [`tests/unit/test_dr_stacks.py`](../../tests/unit/test_dr_stacks.py) | New |
 | Bootstrap stack contract test | [`tests/unit/test_bootstrap_stack.py`](../../tests/unit/test_bootstrap_stack.py) | New (rev 0.2) |
@@ -125,7 +125,7 @@ workflow_dispatch | push → staging branch
 │                         admin-initiate-auth → │
 │                         STAGING_TEST_TOKEN →  │
 │                         python -m scripts.    │
-│                         smoke.staging_smoke   │
+│                         smoke.deploy_smoke    │
 └───────────────────────────────────────────────┘
 ```
 
@@ -286,10 +286,18 @@ per workflow run.
 
 ## 7. Smoke-Test Steps
 
-The `smoke` job invokes `python -m scripts.smoke.staging_smoke`
+The `smoke` job invokes `python -m scripts.smoke.deploy_smoke`
 against the deployed ALB. Every probe must pass for the job to
 succeed; the authenticated probe is **mandatory** (adjustment 4
 of the 6A-2 review).
+
+> **6A-3B note:** the harness module was renamed from `staging_smoke`
+> to `deploy_smoke` because the same probe set now serves staging and
+> production.  The staging workflow continues to read its
+> `STAGING_*` GitHub secrets — the harness honors them as a fallback
+> for the canonical `FORGE_SMOKE_*` env vars used by production.  See
+> [`docs/ops/6A_3B_production_promotion.md`](6A_3B_production_promotion.md)
+> for the production-side wiring.
 
 | Probe | Expected |
 |---|---|

@@ -456,4 +456,4 @@ jobs:
           echo "STAGING_TEST_TOKEN=$TOKEN" >> "$GITHUB_ENV"
 
       - name: Run smoke probes
-        run: python -m scripts.smoke.staging_smoke
+        run: python -m scripts.smoke.deploy_smoke

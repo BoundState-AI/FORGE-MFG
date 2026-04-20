@@ -1,0 +1,631 @@
+# Module:   Deploy Production Pipeline
+# Purpose:  Production promotion workflow per spec §9.2 + 6A-3B
+#           contract.  Promotes a previously-tested image tag from
+#           staging ECR into production ECR, takes a pre-deploy RDS
+#           snapshot, runs migrations, rolls services, and verifies
+#           via smoke probes.  This workflow does NOT build images.
+# Rev:      0.1.0
+#
+# BoundState Proprietary
+# Co-Authored-By: Dr. Joseph Wilde, BoundState AI
+# Co-Authored-By: Claude "Beth" (Opus 4.7)
+#
+# 6A-3B contract reminders (see docs/ops/6A_3B_production_promotion.md):
+#
+#   - Trigger: workflow_dispatch ONLY.  No push trigger.  No
+#     deploy-on-merge.  Production promotion is intentional and manual.
+#   - Inputs: image_tag (the staging-validated SHA / tag) + release_label
+#     (operator-supplied human label that becomes part of the snapshot
+#     identifier — sanitized in preflight).
+#   - Per-job `environment: production`: GitHub Actions evaluates the
+#     environment protection rule (required reviewers) on the FIRST
+#     job that names the environment.  Naming it on every AWS-touching
+#     job also scopes the production environment secrets correctly.
+#   - Image promotion is digest-aware idempotent: absent → copy; same
+#     digest → continue; different digest → hard fail.  Production
+#     ECR repos are TagMutability=IMMUTABLE so divergence is impossible
+#     once a tag is in place, but we still verify post-push.
+#   - Snapshot precedes migrate; migrate precedes services.  This is
+#     the spec §9.2 expand-contract ordering.
+#   - First-ever production stand-up is NOT done via this workflow.
+#     Snapshot job hard-fails with a runbook pointer if the primary
+#     stack does not yet exist.  See ops doc §17.
+#
+# Workflow sequence:
+#   1. preflight       — validate inputs, sanitize release_label,
+#                         resolve source digests in staging ECR.
+#   2. ensure-bootstrap— idempotent production ECR repo provisioning.
+#   3. promote-images  — digest-aware copy from staging → production
+#                         ECR for api / frontend / worker.
+#   4. snapshot        — pre-deploy RDS snapshot tagged with
+#                         release_label + image_tag + workflow run id.
+#                         Hard-fails if primary stack absent.
+#   5. deploy-primary  — dr-foundation + primary infra (no ECS).
+#   6. migrate         — alembic upgrade head against production RDS.
+#   7. deploy-services — ECS services with the promoted image_tag.
+#   8. deploy-dr-replica — cross-region read replica.
+#   9. smoke           — production token mint + deploy_smoke probes.
+
+name: Deploy Production
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: >-
+          Staging-validated image tag (commit SHA or release tag) to
+          promote into production ECR.  Must already exist for api,
+          frontend, AND worker in the staging ECR repos.
+        required: true
+        type: string
+      release_label:
+        description: >-
+          Operator label baked into the pre-deploy RDS snapshot
+          identifier (e.g. rc3-2026-04-19).  Must start with a
+          letter and contain only ASCII letters, digits, and
+          hyphens (RDS snapshot identifier rules).  No consecutive
+          or trailing hyphens.  Max 24 characters (kept conservative
+          to leave headroom under the RDS 63-char snapshot id cap
+          after the forge-mfg-prod-pre- prefix and -YYYYMMDD-HHMMSS
+          suffix are added).
+        required: true
+        type: string
+
+permissions:
+  id-token: write          # OIDC assume-role on AWS
+  contents: read
+
+# Single concurrency group shared with rollback so a promote and a
+# rollback cannot interleave against the same production environment.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-gov-west-1
+  DR_REGION: us-gov-east-1
+
+jobs:
+  # -------------------------------------------------------------------
+  # 1. preflight — validate every input, sanitize, resolve source
+  #    digests.  Naming `environment: production` here triggers the
+  #    GitHub environment approval gate as the FIRST step in the
+  #    workflow run, before any AWS work happens.
+  # -------------------------------------------------------------------
+  preflight:
+    name: Preflight + sanitize + source digest resolution
+    runs-on: ubuntu-latest
+    environment: production
+    outputs:
+      api_digest: ${{ steps.digests.outputs.api_digest }}
+      frontend_digest: ${{ steps.digests.outputs.frontend_digest }}
+      worker_digest: ${{ steps.digests.outputs.worker_digest }}
+      snapshot_id: ${{ steps.sanitize.outputs.snapshot_id }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Sanitize release_label per finding 3.  RDS snapshot identifier
+      # rules: 1–63 chars, alphanumeric + hyphen, must start with a
+      # letter, no consecutive hyphens, no trailing hyphen.  We
+      # reserve a 14-char prefix (`forge-mfg-prod-`) and a 20-char
+      # timestamp suffix, leaving 29 chars for the operator label —
+      # cap at 24 to be conservative.
+      - name: Sanitize release_label
+        id: sanitize
+        env:
+          IMAGE_TAG_INPUT: ${{ inputs.image_tag }}
+          RELEASE_LABEL_INPUT: ${{ inputs.release_label }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$IMAGE_TAG_INPUT" =~ ^[A-Za-z0-9._-]{1,128}$ ]]; then
+            echo "::error::image_tag input contains disallowed characters or is too long"
+            exit 1
+          fi
+          if ! [[ "$RELEASE_LABEL_INPUT" =~ ^[A-Za-z][A-Za-z0-9-]{0,23}$ ]]; then
+            echo "::error::release_label must match ^[A-Za-z][A-Za-z0-9-]{0,23}$ (start with a letter, alphanumeric + hyphen, max 24 chars)"
+            exit 1
+          fi
+          if [[ "$RELEASE_LABEL_INPUT" == *--* ]]; then
+            echo "::error::release_label may not contain consecutive hyphens (RDS snapshot identifier rule)"
+            exit 1
+          fi
+          if [[ "$RELEASE_LABEL_INPUT" == *- ]]; then
+            echo "::error::release_label may not end with a hyphen (RDS snapshot identifier rule)"
+            exit 1
+          fi
+          TS=$(date -u +%Y%m%d-%H%M%S)
+          SNAPSHOT_ID="forge-mfg-prod-pre-${RELEASE_LABEL_INPUT}-${TS}"
+          # RDS snapshot identifiers must be ≤63 chars; the cap above
+          # guarantees ≤62 but assert for defense-in-depth.
+          if [ "${#SNAPSHOT_ID}" -gt 63 ]; then
+            echo "::error::computed snapshot id exceeds 63 chars: $SNAPSHOT_ID"
+            exit 1
+          fi
+          echo "snapshot_id=$SNAPSHOT_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS credentials via OIDC (production role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_PRODUCTION_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Resolve the SOURCE digests from staging ECR for all three
+      # services.  These flow into promote-images so the post-push
+      # parity check has something to compare against.  Failure here
+      # is the operator's signal that the requested image_tag was
+      # never pushed by the staging pipeline.
+      - name: Resolve source image digests in staging ECR
+        id: digests
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          STAGING_ACCOUNT_ID: ${{ secrets.STAGING_ACCOUNT_ID }}
+          STAGING_AWS_REGION: ${{ secrets.STAGING_AWS_REGION }}
+        run: |
+          set -euo pipefail
+          STAGING_REGION="${STAGING_AWS_REGION:-us-gov-west-1}"
+          for svc in api frontend worker; do
+            REPO="forge-mfg-staging-${svc}"
+            DIGEST=$(aws ecr describe-images \
+              --registry-id "$STAGING_ACCOUNT_ID" \
+              --region "$STAGING_REGION" \
+              --repository-name "$REPO" \
+              --image-ids "imageTag=$IMAGE_TAG" \
+              --query "imageDetails[0].imageDigest" \
+              --output text 2>/dev/null || echo "")
+            if [ -z "$DIGEST" ] || [ "$DIGEST" = "None" ]; then
+              echo "::error::staging ECR repo $REPO has no image at tag $IMAGE_TAG — cannot promote"
+              exit 1
+            fi
+            echo "${svc}_digest=$DIGEST" >> "$GITHUB_OUTPUT"
+            echo "resolved staging $svc digest: $DIGEST"
+          done
+
+  # -------------------------------------------------------------------
+  # 2. ensure-bootstrap — idempotent production ECR repo creation.
+  #    Only first-run-allowed step in the workflow; every later step
+  #    requires a pre-existing primary stack.  See ops doc §17 for
+  #    the one-time bootstrap runbook.
+  # -------------------------------------------------------------------
+  ensure-bootstrap:
+    name: Ensure production bootstrap (ECR repos)
+    needs: preflight
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ".[infra]"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: npm install -g aws-cdk
+      - name: Configure AWS credentials via OIDC (production role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_PRODUCTION_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: cdk deploy bootstrap (production)
+        run: |
+          cdk deploy forge-mfg-production-bootstrap \
+            --require-approval never \
+            --context forge:env=production \
+            --context forge:account=${{ secrets.PRODUCTION_ACCOUNT_ID }} \
+            --context forge:region=${{ env.AWS_REGION }} \
+            --context forge:dr_region=${{ env.DR_REGION }} \
+            --context forge:image_tag=${{ inputs.image_tag }}
+
+  # -------------------------------------------------------------------
+  # 3. promote-images — digest-aware copy from staging → production.
+  #    Per finding 2: idempotent on exact digest match, hard-fail on
+  #    digest divergence.  Production ECR is IMMUTABLE-tagged so
+  #    divergence is impossible once a tag is set, but we verify
+  #    post-push regardless.
+  # -------------------------------------------------------------------
+  promote-images:
+    name: Promote images (staging → production ECR)
+    needs: [preflight, ensure-bootstrap]
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC (production role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_PRODUCTION_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Promote each service image with digest parity check
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          STAGING_ACCOUNT_ID: ${{ secrets.STAGING_ACCOUNT_ID }}
+          STAGING_AWS_REGION: ${{ secrets.STAGING_AWS_REGION }}
+          PRODUCTION_ACCOUNT_ID: ${{ secrets.PRODUCTION_ACCOUNT_ID }}
+          API_SOURCE_DIGEST: ${{ needs.preflight.outputs.api_digest }}
+          FRONTEND_SOURCE_DIGEST: ${{ needs.preflight.outputs.frontend_digest }}
+          WORKER_SOURCE_DIGEST: ${{ needs.preflight.outputs.worker_digest }}
+        run: |
+          set -euo pipefail
+          STAGING_REGION="${STAGING_AWS_REGION:-us-gov-west-1}"
+          STAGING_REGISTRY="${STAGING_ACCOUNT_ID}.dkr.ecr.${STAGING_REGION}.amazonaws.com"
+          PROD_REGISTRY="${PRODUCTION_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+
+          # Login to BOTH registries.  When staging + production share
+          # an account these collapse to the same registry, but the
+          # docker login is still safe to repeat.
+          aws ecr get-login-password --region "$STAGING_REGION" \
+            | docker login --username AWS --password-stdin "$STAGING_REGISTRY"
+          aws ecr get-login-password --region "$AWS_REGION" \
+            | docker login --username AWS --password-stdin "$PROD_REGISTRY"
+
+          # Use `|` as the field separator because ECR digests are
+          # shaped `sha256:<hex>` — they themselves contain a colon,
+          # so a colon delimiter combined with `${var##*:}` (longest
+          # prefix strip) would silently truncate the digest to just
+          # the hex part and corrupt every `repo@digest` reference
+          # below.  `|` cannot legally appear in either a service
+          # name or an OCI digest, so the parse is unambiguous.
+          for entry in "api|$API_SOURCE_DIGEST" \
+                       "frontend|$FRONTEND_SOURCE_DIGEST" \
+                       "worker|$WORKER_SOURCE_DIGEST"; do
+            svc="${entry%%|*}"
+            src_digest="${entry##*|}"
+            staging_repo="forge-mfg-staging-${svc}"
+            prod_repo="forge-mfg-production-${svc}"
+            src_ref="${STAGING_REGISTRY}/${staging_repo}@${src_digest}"
+            dst_ref="${PROD_REGISTRY}/${prod_repo}:${IMAGE_TAG}"
+
+            echo "── promoting ${svc} ──"
+            echo "source: $src_ref"
+            echo "target: $dst_ref"
+
+            # Digest-aware idempotency check (finding 2).  If the
+            # production tag already exists, compare digests:
+            #   absent          → push
+            #   same digest     → skip (idempotent re-run after a
+            #                      later-stage failure)
+            #   different digest→ hard fail
+            EXISTING_DIGEST=$(aws ecr describe-images \
+              --registry-id "$PRODUCTION_ACCOUNT_ID" \
+              --region "$AWS_REGION" \
+              --repository-name "$prod_repo" \
+              --image-ids "imageTag=$IMAGE_TAG" \
+              --query "imageDetails[0].imageDigest" \
+              --output text 2>/dev/null || echo "")
+
+            if [ -n "$EXISTING_DIGEST" ] && [ "$EXISTING_DIGEST" != "None" ]; then
+              if [ "$EXISTING_DIGEST" = "$src_digest" ]; then
+                echo "production already at expected digest — skip push (idempotent)"
+                continue
+              fi
+              echo "::error::production ${svc} repo at tag ${IMAGE_TAG} has digest ${EXISTING_DIGEST} but staging source digest is ${src_digest} — promotion would replace a divergent image; refusing"
+              exit 1
+            fi
+
+            # Copy by digest, push by tag.  Pulling by digest is the
+            # only way to guarantee the bytes we promote are exactly
+            # the ones staging signed off on; pulling by tag would
+            # be vulnerable to a staging-side tag mutation.
+            docker pull "$src_ref"
+            docker tag "$src_ref" "$dst_ref"
+            docker push "$dst_ref"
+
+            # Post-push parity verification.
+            POST_DIGEST=$(aws ecr describe-images \
+              --registry-id "$PRODUCTION_ACCOUNT_ID" \
+              --region "$AWS_REGION" \
+              --repository-name "$prod_repo" \
+              --image-ids "imageTag=$IMAGE_TAG" \
+              --query "imageDetails[0].imageDigest" \
+              --output text)
+            if [ "$POST_DIGEST" != "$src_digest" ]; then
+              echo "::error::post-push digest ${POST_DIGEST} != staging source ${src_digest} for ${svc}"
+              exit 1
+            fi
+            echo "${svc} promoted; production digest matches staging"
+          done
+
+  # -------------------------------------------------------------------
+  # 4. snapshot — pre-deploy RDS snapshot.  Hard-fails if primary
+  #    stack absent (first-ever production stand-up belongs to the
+  #    one-time runbook in ops doc §17, not this workflow).
+  # -------------------------------------------------------------------
+  snapshot:
+    name: Pre-deploy RDS snapshot
+    needs: [preflight, promote-images]
+    runs-on: ubuntu-latest
+    environment: production
+    outputs:
+      snapshot_id: ${{ needs.preflight.outputs.snapshot_id }}
+      snapshot_arn: ${{ steps.snap.outputs.snapshot_arn }}
+    steps:
+      - name: Configure AWS credentials via OIDC (production role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_PRODUCTION_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Resolve production primary RDS ARN
+        id: rds
+        run: |
+          set -euo pipefail
+          ARN=$(aws cloudformation describe-stacks \
+            --stack-name forge-mfg-production-primary \
+            --query "Stacks[0].Outputs[?OutputKey=='PrimaryRdsArn'].OutputValue | [0]" \
+            --output text 2>/dev/null || echo "")
+          if [ -z "$ARN" ] || [ "$ARN" = "None" ]; then
+            echo "::error::PrimaryRdsArn output missing from forge-mfg-production-primary — primary stack must be deployed once before first production promotion; see docs/ops/6A_3B_production_promotion.md §17 for the one-time bootstrap runbook"
+            exit 1
+          fi
+          DB_ID=$(echo "$ARN" | awk -F: '{print $NF}')
+          echo "arn=$ARN" >> "$GITHUB_OUTPUT"
+          echo "db_identifier=$DB_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Create pre-deploy snapshot
+        id: snap
+        env:
+          SNAPSHOT_ID: ${{ needs.preflight.outputs.snapshot_id }}
+          DB_ID: ${{ steps.rds.outputs.db_identifier }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          RELEASE_LABEL: ${{ inputs.release_label }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          aws rds create-db-snapshot \
+            --db-instance-identifier "$DB_ID" \
+            --db-snapshot-identifier "$SNAPSHOT_ID" \
+            --tags \
+              Key=forge:image_tag,Value="$IMAGE_TAG" \
+              Key=forge:release_label,Value="$RELEASE_LABEL" \
+              Key=forge:trigger,Value=deploy-production \
+              Key=forge:source_workflow_run,Value="$RUN_ID"
+
+          echo "waiting for snapshot $SNAPSHOT_ID to become available..."
+          aws rds wait db-snapshot-available \
+            --db-snapshot-identifier "$SNAPSHOT_ID"
+
+          ARN=$(aws rds describe-db-snapshots \
+            --db-snapshot-identifier "$SNAPSHOT_ID" \
+            --query "DBSnapshots[0].DBSnapshotArn" \
+            --output text)
+          echo "snapshot_arn=$ARN" >> "$GITHUB_OUTPUT"
+          echo "snapshot ready: $ARN"
+
+  # -------------------------------------------------------------------
+  # 5. deploy-primary — dr-foundation + primary infra (no ECS).
+  # -------------------------------------------------------------------
+  deploy-primary:
+    name: Deploy primary + dr-foundation (production, infra only)
+    needs: snapshot
+    runs-on: ubuntu-latest
+    environment: production
+    outputs:
+      primary_rds_arn: ${{ steps.outputs.outputs.arn }}
+      db_secret_arn: ${{ steps.outputs.outputs.secret_arn }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ".[infra]"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: npm install -g aws-cdk
+      - name: Configure AWS credentials via OIDC (production role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_PRODUCTION_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: cdk deploy dr-foundation (production)
+        run: |
+          cdk deploy forge-mfg-production-dr-foundation \
+            --require-approval never \
+            --context forge:env=production \
+            --context forge:account=${{ secrets.PRODUCTION_ACCOUNT_ID }} \
+            --context forge:region=${{ env.AWS_REGION }} \
+            --context forge:dr_region=${{ env.DR_REGION }} \
+            --context forge:alb_domain=${{ secrets.PRODUCTION_ALB_DOMAIN }} \
+            --context forge:cert_arn=${{ secrets.PRODUCTION_CERT_ARN }} \
+            --context forge:alert_email=${{ secrets.PRODUCTION_ALERT_EMAIL }} \
+            --context forge:image_tag=${{ inputs.image_tag }}
+
+      - name: cdk deploy primary (production, infra only — no ECS services)
+        run: |
+          cdk deploy forge-mfg-production-primary \
+            --require-approval never \
+            --context forge:env=production \
+            --context forge:account=${{ secrets.PRODUCTION_ACCOUNT_ID }} \
+            --context forge:region=${{ env.AWS_REGION }} \
+            --context forge:dr_region=${{ env.DR_REGION }} \
+            --context forge:alb_domain=${{ secrets.PRODUCTION_ALB_DOMAIN }} \
+            --context forge:cert_arn=${{ secrets.PRODUCTION_CERT_ARN }} \
+            --context forge:alert_email=${{ secrets.PRODUCTION_ALERT_EMAIL }} \
+            --context forge:image_tag=${{ inputs.image_tag }}
+
+      - name: Resolve primary stack outputs
+        id: outputs
+        run: |
+          set -euo pipefail
+          ARN=$(aws cloudformation describe-stacks \
+            --stack-name forge-mfg-production-primary \
+            --query "Stacks[0].Outputs[?OutputKey=='PrimaryRdsArn'].OutputValue | [0]" \
+            --output text)
+          SECRET=$(aws cloudformation describe-stacks \
+            --stack-name forge-mfg-production-primary \
+            --query "Stacks[0].Outputs[?OutputKey=='DbMasterSecretArn'].OutputValue | [0]" \
+            --output text)
+          if [ -z "$ARN" ] || [ "$ARN" = "None" ]; then
+            echo "::error::PrimaryRdsArn output missing from production primary stack"
+            exit 1
+          fi
+          if [ -z "$SECRET" ] || [ "$SECRET" = "None" ]; then
+            echo "::error::DbMasterSecretArn output missing from production primary stack"
+            exit 1
+          fi
+          echo "arn=$ARN" >> "$GITHUB_OUTPUT"
+          echo "secret_arn=$SECRET" >> "$GITHUB_OUTPUT"
+
+  # -------------------------------------------------------------------
+  # 6. migrate — alembic upgrade head against production RDS.  This
+  #    is the schema-readiness gate; ECS services have not yet rolled.
+  # -------------------------------------------------------------------
+  migrate:
+    name: Alembic migrate production DB
+    needs: deploy-primary
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ".[dev]"
+      - name: Configure AWS credentials via OIDC (production role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_PRODUCTION_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Fetch production DB credentials
+        env:
+          DB_SECRET_ARN: ${{ needs.deploy-primary.outputs.db_secret_arn }}
+        run: |
+          set -euo pipefail
+          SECRET_JSON=$(aws secretsmanager get-secret-value \
+            --secret-id "$DB_SECRET_ARN" \
+            --query SecretString --output text)
+          USER=$(echo "$SECRET_JSON" | python -c "import json,sys; print(json.load(sys.stdin)['username'])")
+          PASS=$(echo "$SECRET_JSON" | python -c "import json,sys; print(json.load(sys.stdin)['password'])")
+          HOST=$(echo "$SECRET_JSON" | python -c "import json,sys; print(json.load(sys.stdin).get('host', ''))")
+          echo "::add-mask::$PASS"
+          {
+            echo "FORGE_DATABASE_URL=postgresql+psycopg2://$USER:$PASS@$HOST:5432/forge?sslmode=verify-full"
+          } >> "$GITHUB_ENV"
+      - name: Run migrations (expand-contract; fails pipeline on error)
+        run: alembic upgrade head
+
+  # -------------------------------------------------------------------
+  # 7. deploy-services — ECS rolling deploy with the promoted tag.
+  # -------------------------------------------------------------------
+  deploy-services:
+    name: Deploy services (production ECS rollout)
+    needs: migrate
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ".[infra]"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: npm install -g aws-cdk
+      - name: Configure AWS credentials via OIDC (production role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_PRODUCTION_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: cdk deploy services (production)
+        run: |
+          cdk deploy forge-mfg-production-services \
+            --require-approval never \
+            --context forge:env=production \
+            --context forge:account=${{ secrets.PRODUCTION_ACCOUNT_ID }} \
+            --context forge:region=${{ env.AWS_REGION }} \
+            --context forge:dr_region=${{ env.DR_REGION }} \
+            --context forge:alb_domain=${{ secrets.PRODUCTION_ALB_DOMAIN }} \
+            --context forge:cert_arn=${{ secrets.PRODUCTION_CERT_ARN }} \
+            --context forge:alert_email=${{ secrets.PRODUCTION_ALERT_EMAIL }} \
+            --context forge:image_tag=${{ inputs.image_tag }}
+
+  # -------------------------------------------------------------------
+  # 8. deploy-dr-replica — cross-region read replica.
+  # -------------------------------------------------------------------
+  deploy-dr-replica:
+    name: Deploy dr-replica (production warm standby)
+    needs: [deploy-primary, deploy-services]
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ".[infra]"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: npm install -g aws-cdk
+      - name: Configure AWS credentials via OIDC (production role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_PRODUCTION_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: cdk deploy dr-replica (production)
+        env:
+          PRIMARY_RDS_ARN: ${{ needs.deploy-primary.outputs.primary_rds_arn }}
+        run: |
+          cdk deploy forge-mfg-production-dr-replica \
+            --require-approval never \
+            --context forge:env=production \
+            --context forge:account=${{ secrets.PRODUCTION_ACCOUNT_ID }} \
+            --context forge:region=${{ env.AWS_REGION }} \
+            --context forge:dr_region=${{ env.DR_REGION }} \
+            --context forge:alb_domain=${{ secrets.PRODUCTION_ALB_DOMAIN }} \
+            --context forge:cert_arn=${{ secrets.PRODUCTION_CERT_ARN }} \
+            --context forge:alert_email=${{ secrets.PRODUCTION_ALERT_EMAIL }} \
+            --context forge:image_tag=${{ inputs.image_tag }} \
+            --context forge:primary_rds_arn="$PRIMARY_RDS_ARN"
+
+  # -------------------------------------------------------------------
+  # 9. smoke — production token mint + deploy_smoke probes.
+  # -------------------------------------------------------------------
+  smoke:
+    name: Production smoke
+    needs: deploy-dr-replica
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      FORGE_SMOKE_BASE_URL: ${{ secrets.PRODUCTION_BASE_URL }}
+      FORGE_SMOKE_ALLOWED_ORIGIN: https://${{ secrets.PRODUCTION_ALB_DOMAIN }}
+      FORGE_SMOKE_COGNITO_USER_POOL_ID: ${{ secrets.PRODUCTION_COGNITO_USER_POOL_ID }}
+      FORGE_SMOKE_COGNITO_APP_CLIENT_ID: ${{ secrets.PRODUCTION_COGNITO_APP_CLIENT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ".[dev]"
+      - name: Configure AWS credentials via OIDC (production role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_PRODUCTION_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Mint production smoke token
+        env:
+          PRODUCTION_TEST_USERNAME: ${{ secrets.PRODUCTION_TEST_USERNAME }}
+          PRODUCTION_TEST_PASSWORD: ${{ secrets.PRODUCTION_TEST_PASSWORD }}
+        run: |
+          set -euo pipefail
+          TOKEN=$(aws cognito-idp admin-initiate-auth \
+            --user-pool-id "$FORGE_SMOKE_COGNITO_USER_POOL_ID" \
+            --client-id "$FORGE_SMOKE_COGNITO_APP_CLIENT_ID" \
+            --auth-flow ADMIN_USER_PASSWORD_AUTH \
+            --auth-parameters "USERNAME=$PRODUCTION_TEST_USERNAME,PASSWORD=$PRODUCTION_TEST_PASSWORD" \
+            --query "AuthenticationResult.AccessToken" \
+            --output text)
+          if [ -z "$TOKEN" ] || [ "$TOKEN" = "None" ]; then
+            echo "::error::Failed to mint production smoke token — check PRODUCTION_TEST_USERNAME / PRODUCTION_TEST_PASSWORD"
+            exit 1
+          fi
+          echo "::add-mask::$TOKEN"
+          echo "FORGE_SMOKE_TEST_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+
+      - name: Run production smoke probes
+        run: python -m scripts.smoke.deploy_smoke
