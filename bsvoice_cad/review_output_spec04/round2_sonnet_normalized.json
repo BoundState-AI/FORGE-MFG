@@ -1,0 +1,356 @@
+{
+  "oracle_name": "Sonnet",
+  "role": "referee",
+  "normalized_issues": [
+    {
+      "issue_id": "R1-ISSUE-001",
+      "title": "Persisted enum values in AppendTurnAsync do not satisfy schema CHECK constraints",
+      "severity": "low",
+      "category": "api_contract",
+      "merged_from": [],
+      "core_problem": "R1 issue addressed in post-R1 revision: DhfEnumMappings.ToStorage() is now used throughout AppendTurnAsync and WriteDecorationAsync. SDR-04-009 and DHF-010 codify the requirement. Architecture tests enforce it. No reviewer flagged a residual gap in this specific area.",
+      "best_evidence": "Section 7 key properties: 'All enum values are converted via DhfEnumMappings.ToStorage()'; Section 4.5 defines all mappings; Section 13 EnumMappingTests verify round-trips.",
+      "recommended_fix": "No action required. Issue resolved in R1 revision.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-002",
+      "title": "WriteDecorationAsync enum conversion cannot produce required snake_case decoration_type literals",
+      "severity": "low",
+      "category": "api_contract",
+      "merged_from": [],
+      "core_problem": "R1 issue addressed: Section 8 WriteDecorationAsync now calls type.ToStorage() and DhfEnumMappings includes DecorationType mapping. No reviewer flagged a residual gap.",
+      "best_evidence": "Section 8: 'Type = type.ToStorage()' in the INSERT call; Section 4.5 DecorationType mapping defined.",
+      "recommended_fix": "No action required. Issue resolved in R1 revision.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-003",
+      "title": "AppendTurnAsync allows writes to closed sessions with no lifecycle guard",
+      "severity": "low",
+      "category": "operational_risk",
+      "merged_from": [],
+      "core_problem": "R1 issue addressed: Section 7 now includes explicit session-open guard that throws InvalidOperationException if session is closed or nonexistent. No reviewer flagged a residual gap.",
+      "best_evidence": "Section 7 step 0: 'Verify session is open... if (!sessionRow.IsOpen) throw new InvalidOperationException'.",
+      "recommended_fix": "No action required. Issue resolved in R1 revision.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-004",
+      "title": "OpenOrResumeSessionAsync advisory lock scope does not match the workstation-level mutation it performs",
+      "severity": "low",
+      "category": "concurrency",
+      "merged_from": [],
+      "core_problem": "R1 issue addressed: Section 6.1 now uses workstation-scoped advisory lock key 'dhf_session_open:{metadata.WorkstationId}' matching the scope of the UPDATE that closes prior sessions.",
+      "best_evidence": "Section 6.1: 'Advisory lock scoped to workstation only. This serializes ALL session open/resume/close decisions for this workstation, matching the scope of the UPDATE that closes prior sessions. (R1-ISSUE-004)'",
+      "recommended_fix": "No action required. Issue resolved in R1 revision.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-005",
+      "title": "Documented unique-violation retry fallback for session open is not implemented",
+      "severity": "low",
+      "category": "failure_handling",
+      "merged_from": [],
+      "core_problem": "R1 issue addressed: Section 6.1 now includes bounded retry loop handling both SerializationFailure (40001) and UniqueViolation (23505) with exponential backoff.",
+      "best_evidence": "Section 6.1 OpenOrResumeSessionAsync: 'const int maxRetries = 3; ... when ((ex.SqlState == PostgresErrorCodes.SerializationFailure || ex.SqlState == PostgresErrorCodes.UniqueViolation) && attempt < maxRetries - 1)'",
+      "recommended_fix": "No action required. Issue resolved in R1 revision. Grok's finding about retry insufficiency is tracked separately as R2-ISSUE-010.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-006",
+      "title": "entry_decorations mutability policy is internally contradictory",
+      "severity": "low",
+      "category": "contradiction",
+      "merged_from": [],
+      "core_problem": "R1 issue addressed: SDR-04-002 now clearly distinguishes insert-with-supersede model from entries/tool_calls immutability, explains why no DB trigger is installed on decorations, and states the application-level invariant enforced by architecture tests.",
+      "best_evidence": "SDR-04-002: 'dhf.entry_decorations uses an insert-with-supersede model... The DB does NOT enforce decoration immutability with triggers because post-hackathon operational cleanup... may require administrative DELETE. Application code MUST NOT issue UPDATE or DELETE against dhf.entry_decorations during normal operation; this invariant is enforced by architecture tests.'",
+      "recommended_fix": "No action required. Issue resolved in R1 revision.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-007",
+      "title": "Viewer page-load shallow validation writes integrity_event decorations with no deduplication",
+      "severity": "low",
+      "category": "operational_risk",
+      "merged_from": [],
+      "core_problem": "R1 issue addressed: Section 10.1 now explicitly states shallow validation is 'Side-effect-free: returns results in-memory only, does not write decorations or any other rows.' Only deep validation writes integrity_event decorations.",
+      "best_evidence": "Section 10.1: 'Side-effect-free: returns results in-memory only, does not write decorations or any other rows.'",
+      "recommended_fix": "No action required. Issue resolved in R1 revision.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-008",
+      "title": "Tool-call addinSessionId not validated against owning DHF session during append",
+      "severity": "low",
+      "category": "data_model",
+      "merged_from": [],
+      "core_problem": "R1 issue addressed: Section 7 step 0 now validates each tool call's AddinSessionId against the session's addin_session_id, throwing InvalidOperationException on mismatch.",
+      "best_evidence": "Section 7: 'foreach (var tc in turn.ToolCalls) { if (tc.AddinSessionId != sessionRow.AddinSessionId) throw new InvalidOperationException(...) }'",
+      "recommended_fix": "No action required. Issue resolved in R1 revision.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-009",
+      "title": "DbUp journal table bootstrap dependency: journal lives in schema created by first migration",
+      "severity": "low",
+      "category": "feasibility",
+      "merged_from": [],
+      "core_problem": "R1 issue addressed: Section 3.1 now explicitly states 'DbUp journals to public.dbup_journal (its default table in the public schema), avoiding a bootstrap dependency on the dhf schema that has not yet been created.'",
+      "best_evidence": "Section 3.1: 'DbUp journals to public.dbup_journal (its default table in the public schema), avoiding a bootstrap dependency on the dhf schema that has not yet been created. The dhf schema is created by migration 001.'",
+      "recommended_fix": "No action required. Issue resolved in R1 revision.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-010",
+      "title": "Regulatory table incorrectly claims user identity is stored per entry; schema stores it per session only",
+      "severity": "low",
+      "category": "contradiction",
+      "merged_from": [],
+      "core_problem": "R1 issue addressed: Section 12 regulatory table now correctly states 'User identity stored per session (joined to entries via session_id)' under \u00a711.70.",
+      "best_evidence": "Section 12: '21 CFR Part 11 \u00a711.70 Signature/record linking | User identity stored per session (joined to entries via session_id) | Partial'",
+      "recommended_fix": "No action required. Issue resolved in R1 revision.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-011",
+      "title": "Read API (IDhfRepository) exposes undefined DTO contracts to downstream consumers",
+      "severity": "low",
+      "category": "omission",
+      "merged_from": [],
+      "core_problem": "R1 issue addressed: Section 9.1 now defines all repository DTOs in full: DhfSessionSummary, DhfSessionDetail, DhfEntrySummary, DhfEntryDetail, ToolCallRow, DecorationRow.",
+      "best_evidence": "Section 9.1 Repository DTOs: complete record definitions for all six DTO types.",
+      "recommended_fix": "No action required. Issue resolved in R1 revision.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-012",
+      "title": "Timestamp normalization for hashing is unspecified; TIMESTAMPTZ round-trip may produce hash mismatches",
+      "severity": "critical",
+      "category": "contradiction",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "Timestamp insertion path violates the stated canonicalization rule"
+        },
+        {
+          "oracle": "Fran",
+          "title": "The timestamp canonicalization rule is contradicted by the append code, which hashes a normalized timestamp but appears to insert the raw timestamp"
+        }
+      ],
+      "core_problem": "The spec now defines the canonicalization rule correctly in Section 4.1, but the AppendTurnAsync code in Section 7 contradicts it: step 3 computes canonicalTimestamp, but step 4 sets Timestamp = turn.Timestamp (raw) while CanonicalTimestamp = canonicalTimestamp (used for hash). The DB INSERT receives the raw timestamp, not the canonical one. If turn.Timestamp has a non-UTC offset or sub-microsecond precision, Postgres stores a value that differs from what was hashed, causing shallow validation to fail on legitimate rows.",
+      "best_evidence": "Section 4.1: 'The same normalized string MUST be used for both the INSERT parameter and the hash input.' Section 7 DhfEntryRecord construction: 'Timestamp = turn.Timestamp, CanonicalTimestamp = canonicalTimestamp, // Used for hash input' \u2014 two different values used for DB and hash respectively.",
+      "recommended_fix": "Normalize turn.Timestamp to UTC microsecond precision once before constructing DhfEntryRecord. Use that single normalized DateTimeOffset for both the DB INSERT parameter and the hash input. Remove the separate CanonicalTimestamp field or make it the sole source for both paths. Add TimestampCanonTests covering non-UTC offsets and 7-digit fractional ticks.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-013",
+      "title": "Immutability enforcement is ineffective against the orchestrator itself given DROP TRIGGER privilege",
+      "severity": "high",
+      "category": "security",
+      "merged_from": [
+        {
+          "oracle": "GrokContrarian",
+          "title": "DROP TRIGGER privilege renders immutability claim illusory"
+        }
+      ],
+      "core_problem": "The orchestrator DB user has DROP TRIGGER privilege, meaning it can unilaterally bypass all append-only enforcement, mutate rows, and recreate triggers. The spec acknowledges this in Section 3.2 but defers remediation to post-hackathon. Grok escalates this to critical; the prior round scored it medium. The core fact is unchanged and acknowledged. The 'defense-in-depth' framing is accurate for hackathon scope but the regulatory framing in Section 12 must not overstate the protection.",
+      "best_evidence": "Section 3.2: 'the orchestrator also has DROP TRIGGER privilege (it's the only DB user in hackathon scope). A malicious or buggy orchestrator could drop triggers, mutate rows, and recreate triggers.' Section 12 Part 11 \u00a711.10: 'Hash chain + DB triggers + defense-in-depth | Partial (orchestrator has DROP TRIGGER privilege; post-hackathon separation)'",
+      "recommended_fix": "For hackathon: ensure Section 12 regulatory language does not overstate protection (currently acceptable). Post-hackathon: create a separate read-write application role without DROP TRIGGER privilege; use a SECURITY DEFINER maintenance function owned by a DBA role. Do not use 'defense-in-depth' language in regulatory submissions until role separation is implemented.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-014",
+      "title": "Deep validation creates brittle dependency on filesystem state for ACC-02 acceptance criterion",
+      "severity": "low",
+      "category": "testability",
+      "merged_from": [],
+      "core_problem": "R1 issue partially addressed: Section 10.2 now states 'Missing screenshot files produce warnings, not failures' and ACC-02 states 'warnings logged but non-blocking'. Section 13 ACC-02 criterion clarifies 'When screenshots are present in the test fixture, they MUST hash-verify cleanly.' This is a reasonable resolution for hackathon scope.",
+      "best_evidence": "Section 10.2: 'Missing screenshot files produce warnings, not failures, because screenshot retention has a practical cleanup window.' Section 13 ACC-02: 'warnings logged but non-blocking'.",
+      "recommended_fix": "No action required. Issue adequately resolved for hackathon scope.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-015",
+      "title": "Session isolation relies on workstation_id which may be spoofable or shared across VMs",
+      "severity": "high",
+      "category": "security",
+      "merged_from": [
+        {
+          "oracle": "GrokContrarian",
+          "title": "workstation_id trust boundary enables adversarial session termination"
+        },
+        {
+          "oracle": "Codex",
+          "title": "Cross-workstation collision handling can terminate another active session based on an untrusted identifier"
+        }
+      ],
+      "core_problem": "SDR-04-008 acknowledges workstation_id is spoofable/collidable but defers remediation. The cross-workstation branch in Section 6.1 automatically closes an existing open session on another workstation when addin_session_id matches, even though the trust boundary is explicitly acknowledged as weak. This can silently split another workstation's ledger session. Grok and Codex both flag this; Codex specifically notes the auto-close behavior is the dangerous action, not just the identifier weakness.",
+      "best_evidence": "SDR-04-008: 'A spoofed or colliding workstation_id can cause one orchestrator to prematurely close another's sessions.' Section 6.1 cross-workstation branch: 'Same AddinSessionId on a DIFFERENT workstation... Close the stale session before opening a new one.'",
+      "recommended_fix": "For hackathon: acceptable given single-orchestrator-per-workstation constraint; ensure SDR-04-008 post-hackathon note is prominent. Immediate improvement: do not auto-close cross-workstation sessions silently \u2014 require explicit operator confirmation or reject as an error requiring manual resolution. Post-hackathon: replace Environment.MachineName with a cryptographically generated persistent workstation token stored in config.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-016",
+      "title": "Hash canonicalization column lists are a brittle synchronization point with schema evolution",
+      "severity": "medium",
+      "category": "data_model",
+      "merged_from": [
+        {
+          "oracle": "GrokContrarian",
+          "title": "Hash column lists and enum mappings create brittle synchronization surface"
+        }
+      ],
+      "core_problem": "DhfHashColumns and ToolCallHashColumns are static ordered lists that must be manually kept in sync with schema migrations, DTOs, and the HashColumnSyncTests allowlist. Any added column, renamed field, or new enum value requires coordinated changes across multiple files. The HashColumnSyncTests mitigate but do not eliminate the risk. Grok proposes reflection-based derivation; this is a valid long-term improvement but not a hackathon blocker given the sync test exists.",
+      "best_evidence": "Sections 4.2, 4.3: static IReadOnlyList<string> HashedColumns arrays. Section 13 HashColumnSyncTests: 'asserts DhfHashColumns.HashedColumns and ToolCallHashColumns.HashedColumns cover all non-excluded columns... Excluded columns... are listed explicitly in the test as an allowlist'.",
+      "recommended_fix": "For hackathon: HashColumnSyncTests provide adequate protection. Post-hackathon: consider [Hashed] attribute-driven reflection to derive column lists from DTOs, eliminating the manual sync surface.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-017",
+      "title": "Writer computes its own hashes with no external witness; self-attestation limits regulatory credibility",
+      "severity": "low",
+      "category": "governance",
+      "merged_from": [],
+      "core_problem": "No reviewer raised this in R2. Retaining from R1 ledger at low severity. The hash chain is self-attested by the same process that writes it, which limits its evidentiary weight in regulatory contexts. Acknowledged in Section 12 regulatory framing.",
+      "best_evidence": "Section 12: 'Submission language MUST say design audit log foundation and MUST NOT say FDA-compliant.'",
+      "recommended_fix": "Post-hackathon: consider an independent witness service or notarization step for hash chain anchoring.",
+      "conflict_flag": false,
+      "weak_signal": true
+    },
+    {
+      "issue_id": "R2-ISSUE-001",
+      "title": "dhf.sessions metadata columns are fully mutable with no trigger protection; session attribution can be rewritten without breaking entry hash chain",
+      "severity": "critical",
+      "category": "governance",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "`dhf.sessions` is fully mutable except by convention, so attribution and epoch metadata can be rewritten after the fact"
+        }
+      ],
+      "core_problem": "The immutability triggers in migration 005 protect dhf.entries and dhf.tool_calls but not dhf.sessions. The sessions table allows unrestricted UPDATE to all columns including user_identity, workstation_id, sw_version, addin_version, orchestrator_version, protocol_version, addin_session_id, and started_at. None of these fields are covered by the entry hash chain (entries only store session_id as a FK). An attacker or buggy orchestrator can rewrite who performed the actions, where, and under which software version, while all entry hashes continue to validate correctly.",
+      "best_evidence": "Migration 005 comment: '-- dhf.sessions.ended_at is UPDATE-able (that's how we close sessions), so no trigger.' Sessions table schema includes user_identity, workstation_id, sw_version, addin_version, orchestrator_version, protocol_version, addin_session_id, started_at \u2014 all mutable, none hashed into entry chain.",
+      "recommended_fix": "Add a DB trigger on dhf.sessions that permits only the ended_at column to transition from NULL to a non-NULL value (and rejects all other UPDATE operations). If session metadata must be auditable, compute and store a session_metadata_hash at INSERT time and include it in the first entry's previous_hash or as a separate integrity anchor. Add ImmutabilityTriggerTests coverage for sessions.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R2-ISSUE-002",
+      "title": "Graceful shutdown closes session, contradicting SDR-04-005 resume semantics for transient orchestrator disconnect",
+      "severity": "high",
+      "category": "contradiction",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "Graceful shutdown closes the session, which conflicts with the stated rule that reconnect with the same `AddinSessionId` resumes the prior session"
+        }
+      ],
+      "core_problem": "SDR-04-005 states that same-AddinSessionId reconnect resumes the prior session, distinguishing genuine add-in reload (new ID) from transient orchestrator disconnect (same ID). However, Section 6.2 states that graceful shutdown calls CloseSessionAsync which sets ended_at = NOW(). If the orchestrator restarts cleanly while the add-in remains loaded with the same AddinSessionId, the session is closed, and the next AddinReadyMessage opens a new session rather than resuming. This makes session boundaries dependent on orchestrator process lifecycle, not add-in epoch, contradicting the stated design intent.",
+      "best_evidence": "SDR-04-005: 'If the orchestrator reconnects to an add-in whose AddinSessionId matches an already-open dhf.sessions row, it resumes that session.' Section 6.2: 'OrchestratorProgram.ShutdownAsync calls DhfSessionManager.CloseSessionAsync(sessionId) which sets ended_at = NOW().'",
+      "recommended_fix": "Choose one of: (A) Do not close the session on graceful orchestrator shutdown; leave it open so a restart with the same AddinSessionId resumes correctly. Close only on add-in disconnect or new AddinSessionId. (B) Explicitly redefine graceful orchestrator shutdown as a session-ending event, update SDR-04-005 to reflect this, update ACC-15 acceptance criteria, and document that orchestrator restart always creates a new session regardless of AddinSessionId continuity.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R2-ISSUE-003",
+      "title": "WriteDecorationAsync has no supersede parameter; insert-with-supersede model cannot be implemented as specified",
+      "severity": "high",
+      "category": "api_contract",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "The supersede decoration model has no write interface"
+        }
+      ],
+      "core_problem": "SDR-04-002 defines an insert-with-supersede model where new decoration rows reference supersedes_decoration_id to logically replace a prior decoration. The dhf.entry_decorations schema includes the supersedes_decoration_id FK column. However, the WriteDecorationAsync signature takes only (entryId, type, payload, createdBy, ct) and the INSERT statement omits supersedes_decoration_id entirely. There is no API path to supply the prior decoration ID, making the supersede model unimplementable as written. Additionally, there is no defined read contract for resolving which decoration is current after replacement.",
+      "best_evidence": "SDR-04-002: 'new decoration rows may reference supersedes_decoration_id to logically replace a prior decoration.' Section 8 WriteDecorationAsync INSERT: 'INSERT INTO dhf.entry_decorations (decoration_id, entry_id, decoration_type, created_by, payload, decoration_hash) VALUES (...)' \u2014 supersedes_decoration_id absent from both parameter list and INSERT.",
+      "recommended_fix": "Add an optional Guid? supersedesDecorationId parameter to WriteDecorationAsync. Include it in the INSERT when non-null. Define the read contract: GetDecorationsAsync should indicate which decorations are superseded (e.g., a boolean IsSuperseded computed from whether any other row references this decoration_id). Add DecorationWriterTests coverage for the supersede path.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R2-ISSUE-004",
+      "title": "Integrity-event deduplication key is ambiguous and not enforced by DB constraint; concurrent deep validations can produce duplicates",
+      "severity": "high",
+      "category": "operational_risk",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "Integrity-event deduplication is contradictory and not enforceable under concurrency"
+        },
+        {
+          "oracle": "Fran",
+          "title": "Integrity-event deduplication is defined as `same eventType on the same entry`, which is too coarse to preserve distinct failures"
+        }
+      ],
+      "core_problem": "Section 8.2 states deduplication checks for 'an existing integrity_event decoration of the same eventType on the same entry' but also says 'If an identical event already exists, no new row is written' \u2014 these are two different keys (eventType alone vs. full event identity). The dhf.entry_decorations table has no unique index supporting either rule. Concurrent deep validation runs can race past the check-then-insert and produce duplicate rows. Additionally, using eventType alone as the dedup key can suppress distinct failures that share a type (e.g., two different screenshot_hash_mismatch events on the same entry for before and after screenshots).",
+      "best_evidence": "Section 8.2: 'it checks for an existing integrity_event decoration of the same eventType on the same entry before inserting a new one. If an identical event already exists, no new row is written.' Migration 004: no unique constraint on entry_decorations beyond the PK.",
+      "recommended_fix": "Define a single explicit dedup key, e.g., (entry_id, decoration_type, decoration_hash) or (entry_id, eventType, affected_artifact_path). Add a partial unique index on dhf.entry_decorations for integrity_event rows using that key. Use INSERT ... ON CONFLICT DO NOTHING to make the dedup atomic. Update Section 8.2 to use consistent language matching the enforced key.",
+      "conflict_flag": true,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R2-ISSUE-005",
+      "title": "Session close/split operations are not coordinated with append operations; turns can be lost or committed post-close",
+      "severity": "high",
+      "category": "concurrency",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "Session close/split operations are not coordinated with append operations"
+        }
+      ],
+      "core_problem": "OpenOrResumeSessionCore uses a workstation-scoped advisory lock ('dhf_session_open:{workstationId}'). AppendTurnAsync uses a session-scoped advisory lock ('dhf_append:{sessionId}'). CloseSessionAsync (Section 6.2) acquires no lock at all. These lock domains do not coordinate: a session can be closed or split while an append transaction is in flight. The append's session-open guard reads ended_at at the start of the transaction, but a concurrent close can set ended_at after that read and before the INSERT commits. Additionally, AppendTurnAsync has no retry path for serialization failures (40001), unlike OpenOrResumeSessionAsync.",
+      "best_evidence": "Section 6.1 lock key: 'dhf_session_open:{metadata.WorkstationId}'. Section 7 lock key: 'dhf_append:{turn.SessionId}'. Section 6.2: 'CloseSessionAsync(sessionId) which sets ended_at = NOW()' \u2014 no lock acquisition mentioned.",
+      "recommended_fix": "Make CloseSessionAsync acquire the same per-session advisory lock ('dhf_append:{sessionId}') before setting ended_at, ensuring it cannot race with an in-flight append. Alternatively, use SELECT ... FOR UPDATE on the session row in both close and append paths. Add bounded retry handling for serialization failures in AppendTurnAsync matching the pattern in OpenOrResumeSessionAsync.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R2-ISSUE-006",
+      "title": "Session open retry loop has no jitter and AppendTurnAsync has no equivalent retry; insufficient for sustained contention",
+      "severity": "medium",
+      "category": "operational_risk",
+      "merged_from": [
+        {
+          "oracle": "GrokContrarian",
+          "title": "Session open retry loop insufficient for sustained contention"
+        }
+      ],
+      "core_problem": "The OpenOrResumeSessionAsync retry loop uses fixed linear backoff (50ms * attempt) with no jitter and only 3 attempts. Under thundering-herd reconnect scenarios (multiple orchestrators restarting simultaneously), all retriers will collide at the same intervals. AppendTurnAsync has no retry wrapper at all despite using Serializable isolation, which can produce 40001 errors under concurrent appends.",
+      "best_evidence": "Section 6.1: 'const int maxRetries = 3; ... await Task.Delay(50 * (attempt + 1), ct)' \u2014 no jitter. Section 7 AppendTurnAsync: no catch block for PostgresException, no retry loop.",
+      "recommended_fix": "Add jitter to the session open retry (e.g., random 0\u201350ms added to each delay). Add a bounded retry loop to AppendTurnAsync for SerializationFailure (40001) with the same jitter pattern. Consider increasing maxRetries to 5 for both paths. Document maximum expected lock acquisition time.",
+      "conflict_flag": false,
+      "weak_signal": false
+    }
+  ],
+  "dropped_findings": [
+    {
+      "oracle": "GrokContrarian",
+      "title": "Hash column lists and enum mappings create brittle synchronization surface \u2014 proposed fix (reflection + attributes)",
+      "reason": "The core concern is tracked as R1-ISSUE-016 (medium). The proposed fix (reflection-based derivation) is a valid post-hackathon improvement but not a spec defect. The HashColumnSyncTests provide adequate mitigation for hackathon scope. The finding is partially merged into R1-ISSUE-016."
+    },
+    {
+      "oracle": "GrokContrarian",
+      "title": "DROP TRIGGER privilege renders immutability claim illusory \u2014 severity escalation to critical",
+      "reason": "The core concern is tracked as R1-ISSUE-013 (retained at high). Grok proposes critical severity, but the spec explicitly acknowledges the gap in Section 3.2 and SDR-TL-006, and the regulatory table in Section 12 correctly marks it Partial. The 'defense-in-depth' framing is accurate for hackathon scope. Severity inflation not warranted given honest disclosure and post-hackathon remediation plan."
+    }
+  ]
+}

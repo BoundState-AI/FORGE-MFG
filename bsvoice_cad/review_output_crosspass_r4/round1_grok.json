@@ -1,0 +1,57 @@
+{
+  "oracle_name": "GrokContrarian",
+  "role": "Contrarian Reviewer",
+  "document_type": "BSVoice-CAD SPEC Suite (SPEC-00 through SPEC-07 + Corpus Manifest + Deployment Migration)",
+  "overall_verdict": "major_revision",
+  "findings": [
+    {
+      "title": "Viewer URL-as-capability model enables tenant-wide session enumeration once any single session UUID is known",
+      "severity": "critical",
+      "category": "security",
+      "location": "SPEC-00 SDR-TL-012 (Known sidebar-exposure trade-off paragraph); SPEC-06 SDR-06-007 (v1.4.0 rewrite) and \u00a74.2 GET /api/dhf/sessions?sessionId={uuid}; SPEC-04 \u00a79.2 ListSessionsAsync tenant scoping",
+      "evidence": "\"Once a caller presents a valid session UUID, they can see other session UUIDs and metadata for the same tenant via the sidebar list... This reduces the effective entropy of URL-as-capability from 122 bits per session to 122 bits for 'first session access within a tenant.' Accepted in v1\"",
+      "problem": "A single leaked or shoulder-surfed session URL grants an adversary the complete list of all other sessions for that tenant (including design IP, medical-device geometry, and audit trails). The 'neutral landing page' claim is false once any capability is presented; 404 responses for unknown sessionIds are identical across tenants, but the sidebar bypasses this. This directly contradicts the stated threat model that v1 is 'NOT defensible for actual regulated customer use' while building the entire viewer around it.",
+      "why_it_matters": "Medtronic pilot and any PHI-adjacent use become immediately non-compliant. Adversary who obtains one session link (email forward, log leak, demo video) can enumerate and read all other designs for that customer. No rate limiting or capability narrowing is specified on the sidebar endpoint.",
+      "proposed_fix": "Remove the tenant-scoped sidebar list in v1; require per-session capability for every individual entry fetch. Move to Clerk SSO (migration doc \u00a74) immediately rather than deferring to v1.5. Add explicit 'session-isolation' test that verifies a valid sessionId cannot discover any other tenant's sessions.",
+      "confidence": 0.95
+    },
+    {
+      "title": "BSMS 'structurally hallucination-resistant' claim depends on untested LLM bouncer/synthesizer outputs with no build-time semantic enforcement",
+      "severity": "high",
+      "category": "testability",
+      "location": "SPEC-07 \u00a74.2 bouncer persona prompt, \u00a76.2 synthesizer prompt, \u00a711.1 BouncerAcceptRejectTests and Synthesis*Tests (all use 'recorded/mocked responses'), \u00a73.3 failure-mode table (MalformedBouncerOutput \u2192 session lock), SPEC-00 SDR-TL-009 (BSMS mandate) and changelog v1.1.0 'build-breaking LLM tests replaced with recorded/mocked responses'",
+      "evidence": "\"Live LLM calls are NOT build-breaking... Uses recorded/mocked Sonnet responses\"; \"Bouncer persona... Sonnet 4.6 synthesis... the database is ground truth\"",
+      "problem": "The entire claim that the system 'fails closed' and produces row-level citations rests on two Sonnet 4.6 calls producing exactly the right JSON with the right rejection_code, candidate_domains, and parsed_intent. Model updates, temperature variance, or prompt drift can produce malformed output that triggers circuit-breaker session lock (SPEC-04 LockSessionAsync). No property-based test, no prompt checksum, no canary against live model. The 'recorded' tests only test the parser, not the semantic correctness of the persona.",
+      "why_it_matters": "A single bad model response can lock a regulated customer's session (DHF-014) or silently accept an out-of-scope utterance as valid vocabulary. This is the opposite of 'structurally hallucination-resistant' and makes the regulatory framing (SPEC-00 SDR-TL-006) untenable. Adversary can craft utterances that trigger the exact failure path the tests never exercise.",
+      "proposed_fix": "Restore build-breaking canary tests that call live Sonnet 4.6 with a fixed prompt hash and assert exact JSON schema + semantic invariants (e.g., rejection_code closed enum, security_event only on injection patterns). Add prompt-version column in a new vocab.bouncer_prompts table and fail startup if the embedded prompt does not match the DB version.",
+      "confidence": 0.9
+    },
+    {
+      "title": "SPEC-00 claims 'interfaces only, no implementation' but is filled with SQL, C# records, exact test names, migration scripts, and implementation rationales",
+      "severity": "high",
+      "category": "scope",
+      "location": "SPEC-00 \u00a70 Non-goals ('state machine details, record field definitions, SQL schemas, build sequence... live in per-module specs'), \u00a73 Mandatory vs Stretch table, \u00a74 SDR-TL-013/014 (full SQL, C# snippets, migration 009), \u00a76 Glossary (AddinTeardownMessage, RecoveryEventContext JSONB fields), and every per-module spec's 'Changelog' and 'Project Shape' sections that duplicate implementation details",
+      "evidence": "\"This document defines the module boundaries, the seam contracts... Implementation details live in the per-module specs (SPEC-01 through SPEC-07)\"",
+      "problem": "The integration contract document contains the exact SQL for migrations 007-009, the full C# record definitions for RecoveryEventContext and DhfTurnContext, test names (HeartbeatTimeoutTcpAbortTests), and implementation trade-off rationales ('doubles implementation complexity for a hackathon-scope system'). This is not 'interfaces only'. It makes independent per-module Oracle reviews impossible because the 'seams' already prescribe the implementation.",
+      "why_it_matters": "Violates the stated review ordering (SPEC-00 first, then leaf modules). Creates tight coupling: a change to recovery_context JSONB in SPEC-04 immediately invalidates SPEC-00, SPEC-03, and SPEC-07. The document has become the de-facto implementation spec, defeating the modular decomposition claim and inflating complexity.",
+      "proposed_fix": "Move all SQL, concrete record shapes, test names, and migration details into the owning per-module specs. SPEC-00 should contain only the module map, seam contracts (message shapes, error codes, lifecycle invariants), and cross-cutting SDRs that do not embed implementation. Re-factor the current SPEC-00 into a true integration contract; create a separate 'Implementation Notes' appendix if needed.",
+      "confidence": 0.85
+    },
+    {
+      "title": "Recovery event persistence model (SDR-TL-013) chose 'hackathon-scope' complexity reduction while the surrounding text claims regulatory foundation for 21 CFR Part 11",
+      "severity": "high",
+      "category": "contradiction",
+      "location": "SPEC-00 SDR-TL-006 (DHF regulatory framing + v1.5.0 clarification), SDR-TL-013 (Alternative considered and rejected paragraph: 'Rejected because (a) doubles hash-chain complexity for a hackathon-scope system'), SPEC-04 \u00a72 SDR-04-012 and \u00a711 DHF-016, SPEC-00 \u00a73 never-descopable list (post-timeout state reconciliation)",
+      "evidence": "\"Positioned as 'design audit log foundation for future 21 CFR 820.30 / Part 11 alignment.' This system is NOT 21 CFR Part 11 compliant... 'Foundation' in this SDR means 'a data structure that could be extended toward compliance in future work,' NOT 'a partial implementation of any compliance requirement.'\" + \"Rejected because... doubles implementation complexity for a hackathon-scope system.\"",
+      "problem": "The document simultaneously asserts that the DHF is a 'foundation' for regulated audit trails (immutable entries, hash chain, recovery events with structured context) while explicitly choosing the technically inferior same-table design because it is simpler for a hackathon. The recovery event is listed as never-descopable, yet its storage model was chosen for implementation expediency rather than long-term audit integrity (separate table would have isolated recovery events from turn hash-chain rules). This is a direct contradiction between the regulatory framing and the actual decision criteria.",
+      "why_it_matters": "A regulator or Medtronic auditor reading SDR-TL-006 will see the 'foundation for Part 11' language and the never-descopable recovery gate, then discover the design was driven by hackathon constraints. This creates legal/compliance risk and forces downstream rework when the system must be made actually compliant (e.g., separate recovery table, per-tenant schemas, electronic signatures).",
+      "proposed_fix": "Remove all 'foundation for 21 CFR' language from SPEC-00 until the system is designed for compliance (separate recovery table, immutable recovery_context, electronic signature support). Or, accept the hackathon design and relabel the SDR as 'hackathon audit log' with explicit disclaimer that regulatory readiness is out of scope for v1. Update the never-descopable list to exclude recovery persistence model.",
+      "confidence": 0.9
+    }
+  ],
+  "top_3_must_fix": [
+    "Viewer URL-as-capability model enables tenant-wide session enumeration once any single session UUID is known (critical security defect for stated use case)",
+    "BSMS hallucination-resistance claim depends on untested LLM bouncer/synthesizer with only mocked tests (brittle external dependency)",
+    "SPEC-00 claims 'interfaces only, no implementation' while embedding full SQL, C# records, test names, and migration details (contradicts own non-goals and review model)"
+  ]
+}

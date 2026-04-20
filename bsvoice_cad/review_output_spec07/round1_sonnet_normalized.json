@@ -1,0 +1,318 @@
+{
+  "oracle_name": "Sonnet",
+  "role": "referee",
+  "normalized_issues": [
+    {
+      "issue_id": "R1-ISSUE-001",
+      "title": "Resolution cardinality contradiction: multi-domain pipeline vs. single-term output contract",
+      "severity": "critical",
+      "category": "api_contract",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "Multi-domain inputs have no consistent output contract"
+        },
+        {
+          "oracle": "Codex",
+          "title": "Resolution cardinality is internally inconsistent for multi-domain utterances"
+        }
+      ],
+      "core_problem": "The spec simultaneously describes a pipeline that generates multiple domain queries for a single utterance (\u00a73.1 shows 'resolved_terms: [ResolvedTerm, ...]', \u00a75.1 example hits threads+materials+manufacturing) and a synthesis layer that selects 'the ONE row' with a singular ResolvedTerm output contract (\u00a76.2, \u00a76.4). These are irreconcilable without a design decision.",
+      "best_evidence": "\u00a73.1 Stage 4 output: 'resolved_terms: [ResolvedTerm, ...]'; \u00a76.2 prompt: 'select the ONE row'; \u00a76.4 defines only singular 'ResolvedTerm : VocabularyResolution'; \u00a711.2 test expects multi-domain queries for 'tap a 6-32 UNC hole in titanium'.",
+      "recommended_fix": "Make an explicit architectural decision: (a) one resolved term per utterance \u2014 restrict planner to primary domain, remove plural fields from \u00a73.1 diagram, or (b) multiple resolved terms per utterance \u2014 rewrite \u00a76.2 synthesis prompt, define a multi-term result schema with per-term confidence/citation/ambiguity, update \u00a76.4 DTOs, \u00a78.2 decoration payload, and all affected tests.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-002",
+      "title": "Audit citation persistence is mandatory by policy but implemented as fire-and-forget with no durability contract",
+      "severity": "critical",
+      "category": "governance",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "Audit citation persistence is declared mandatory but implemented as fire-and-forget"
+        },
+        {
+          "oracle": "Codex",
+          "title": "Async decoration writes have no durability or ordering contract"
+        }
+      ],
+      "core_problem": "SDR-07-006 states 'Every resolution records its citation in a decoration payload' and ACC-21/ACC-22 require DHF citation recording as acceptance criteria. \u00a73.2 simultaneously designates decoration writes as 'Fire-and-forget; not in critical path' with no retry, idempotency, ordering, or failure-state definition. A tool call can execute and succeed while its citation is silently lost.",
+      "best_evidence": "\u00a73.2 table: 'Decoration write (async) | \u2014 | \u2014 | Fire-and-forget; not in critical path'; \u00a73.3 failure modes table has no row for decoration-write failure; SDR-07-006: 'Every resolution records its citation'; ACC-21/22 require DHF citation.",
+      "recommended_fix": "Either (a) await the decoration write before reporting resolution success to SPEC-05, making it part of the success path, or (b) implement a durable outbox/queue with idempotency keys, retry policy, and an explicit failure state that prevents the pipeline from claiming a resolution was recorded when it was not. Add a failure mode row to \u00a73.3 for decoration-write failure.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-003",
+      "title": "Raw utterance is absent from planner and synthesis input contracts, breaking alias fallback and exact-match rules",
+      "severity": "high",
+      "category": "api_contract",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "Planner alias fallback references @utterance, but planner input does not contain the utterance"
+        },
+        {
+          "oracle": "Fran",
+          "title": "Synthesis prompt depends on raw utterance that Stage 4 does not pass"
+        }
+      ],
+      "core_problem": "Two separate pipeline stages require the raw utterance text but neither receives it. (1) \u00a75.2 thread alias fallback uses 'WHERE alias_text = @utterance' but the planner only receives a BouncerResult (\u00a75.1), which has no utterance field. (2) \u00a76.2 synthesis prompt says it receives 'a user utterance' and rule 1 checks 'exactly matches the utterance's subject/parameters', but \u00a73.1 Stage 4 input is only 'ResultSets + BouncerDecision.intent'.",
+      "best_evidence": "\u00a74.4 BouncerResult record: fields are Decision, Reason, CandidateDomains, ParsedIntent, CacheHit, LatencyMs \u2014 no utterance string. \u00a75.2: 'SELECT canonical_id FROM vocab.aliases WHERE alias_text = @utterance'. \u00a73.1 Stage 4 input: 'ResultSets + BouncerDecision.intent'. \u00a76.2: '(a) a user utterance and parsed intent'.",
+      "recommended_fix": "Add the raw (and normalized) utterance string to the planner input contract and to the Stage 4 synthesizer request schema. Update BouncerResult or define a separate PipelineContext object that carries the utterance through all stages.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-004",
+      "title": "IVocabRepository cannot enforce the declared repeatable-read transaction scope across multi-query utterances",
+      "severity": "high",
+      "category": "api_contract",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "IVocabRepository cannot enforce the required single repeatable-read snapshot per utterance"
+        }
+      ],
+      "core_problem": "\u00a73.1 Stage 3 policy states 'all queries within single read transaction; repeatable read isolation for multi-query consistency', but IVocabRepository (\u00a79.1) exposes only independent per-method async calls with no transaction, session, or batch API. There is no mechanism for the pipeline to execute multiple planner queries within one repeatable-read snapshot without leaking transaction management outside the repository or changing the interface.",
+      "best_evidence": "\u00a73.1: 'Policy: all queries within single read transaction; repeatable read isolation'; \u00a79.1 IVocabRepository: all methods are independent Task<T> calls with no shared context parameter or unit-of-work.",
+      "recommended_fix": "Add a repository batch/read-session contract, e.g. an ExecuteQueriesAsync(IReadOnlyList<VocabQuery>, CancellationToken) method or an explicit IVocabReadSession that owns the transaction scope and exposes the per-domain query methods within it.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-005",
+      "title": "Manufacturing domain is in scope and bouncer closed-set but has no grammar, schema, or repository contract",
+      "severity": "high",
+      "category": "omission",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "Manufacturing is in scope but has no grammar, schema, or repository contract"
+        },
+        {
+          "oracle": "Fran",
+          "title": "Several advertised domains have no repository/query contract"
+        }
+      ],
+      "core_problem": "The bouncer persona prompt (\u00a74.2) and VocabDomains.All closed set include 'manufacturing', 'welding', 'drawing_abbrev', 'units', and 'primitives'. \u00a75.1 example explicitly routes 'tap a 6-32 UNC hole in titanium' to the manufacturing domain. None of these domains have grammar rules (\u00a75.2\u20135.7 cover only threads/materials/fasteners/gdnt/sw_api/med_anatomy), repository methods (\u00a79.1 has no ManufacturingRow or analogous types), or defined query paths. Accepted bouncer outputs for these domains have no implementable execution path.",
+      "best_evidence": "\u00a74.2 bouncer domain list includes 'manufacturing', 'welding', 'drawing_abbrev', 'units', 'primitives'; \u00a75.1: 'tap a 6-32 UNC hole in titanium hits threads, manufacturing, and materials domains'; \u00a79.1 IVocabRepository: no manufacturing/welding/drawing_abbrev/units/primitives methods.",
+      "recommended_fix": "Either (a) remove unsupported domains from v1 VocabDomains.All, the bouncer prompt, and all examples, or (b) add schema, grammar rules, repository methods, synthesis behavior, and required tests for each domain before shipping. At minimum, manufacturing must be addressed given its use in the mandatory demo example.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-006",
+      "title": "Material grammar lookup paths (UNS, ASTM, AMS) are not exposed by IVocabRepository",
+      "severity": "high",
+      "category": "api_contract",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "Material grammar depends on lookups that IVocabRepository does not expose"
+        }
+      ],
+      "core_problem": "\u00a75.3 material grammar specifies three lookup paths: UNS number against vocab.materials.uns_number, ASTM/AMS against vocab.canonical_terms.standard_source. IVocabRepository (\u00a79.1) only exposes FindMaterialsByGradeNameAsync and GetMaterialAsync. The UNS and standard-source paths cannot be implemented through the repository interface without violating SDR-07-004 (no raw SQL in pipeline code).",
+      "best_evidence": "\u00a75.3: 'UNS <letter><5 digits> \u2192 exact match against vocab.materials.uns_number'; 'ASTM <letter>-<number> \u2192 exact match against vocab.canonical_terms.standard_source'; \u00a79.1: only FindMaterialsByGradeNameAsync and GetMaterialAsync for materials.",
+      "recommended_fix": "Add FindMaterialsByUnsNumberAsync(string unsNumber) and FindMaterialsByStandardSourceAsync(string standardSource, string domain) to IVocabRepository, or define a typed generic material lookup API covering all selectors in \u00a75.3.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-007",
+      "title": "Mandatory demo 2 requires material grammar/search path not included in mandatory scope",
+      "severity": "high",
+      "category": "scope",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "Mandatory demo 2 requires material resolution capability that mandatory scope does not require"
+        }
+      ],
+      "core_problem": "\u00a710.1 mandatory scope lists 'Query planner with thread grammar rules (\u00a75.2) and fastener grammar rules (\u00a75.4)' but not material grammar. Yet mandatory demo 2 requires resolving 'specify the plate in titanium, medical grade' to ASTM_F136:Ti_6Al_4V_ELI \u2014 which requires a material grammar/search path to convert free text to a canonical ID. GetMaterialAsync only fetches after the ID is already known.",
+      "best_evidence": "\u00a710.1 mandatory scope: 'Query planner with thread grammar rules (\u00a75.2) and fastener grammar rules (\u00a75.4)'; \u00a710.1 demo 2: 'vocabulary resolves to ASTM_F136:Ti_6Al_4V_ELI'; \u00a75.3 material grammar is not listed as mandatory.",
+      "recommended_fix": "Move material grammar rules (\u00a75.3) and at minimum FindMaterialsByGradeNameAsync into mandatory scope, or demote demo 2 to stretch scope.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-008",
+      "title": "Build-breaking tests depend on live LLM latency and nondeterministic model outputs",
+      "severity": "high",
+      "category": "testability",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "Build-breaking tests depend on live LLM latency and behavior"
+        },
+        {
+          "oracle": "Codex",
+          "title": "Build-breaking latency tests depend on external LLM and network conditions"
+        },
+        {
+          "oracle": "Codex",
+          "title": "Build-breaking semantic tests assume stable live-model outputs"
+        }
+      ],
+      "core_problem": "\u00a711.1 BouncerLatencyTests 'fails the build if exceeded on CI' at p95 < 600ms; \u00a711.5 PipelineLatencyTests enforces p95 < 1.2s. \u00a711.1 BouncerAcceptRejectTests and \u00a711.4 synthesis tests require seeded utterances to match expected LLM classifications/outputs. Neither latency nor semantic correctness of live LLM calls is controllable by the codebase, making these tests a source of environmental false failures.",
+      "best_evidence": "\u00a711.1: 'BouncerLatencyTests \u2014 bouncer p95 latency under 600ms on test harness; fails the build if exceeded on CI'; \u00a711.5: 'PipelineLatencyTests \u2014 full pipeline p95 under 1.2s'; \u00a711.1 BouncerAcceptRejectTests requires model outputs to match pre-classified set.",
+      "recommended_fix": "Run CI build-breaking tests against mocked/recorded model responses and deterministic timing contracts. Move live-model latency and semantic correctness checks to a separate scheduled canary suite or non-blocking release gate that does not block merges.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-009",
+      "title": "Security-event logging stores full utterance text without redaction, retention, or access controls",
+      "severity": "high",
+      "category": "security",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "Security-event logging stores full utterance text with no redaction controls"
+        },
+        {
+          "oracle": "Codex",
+          "title": "Security-event logging stores full rejected utterances without redaction"
+        }
+      ],
+      "core_problem": "\u00a74.5 logs 'the full utterance text' at LogLevel.Warning for security events. The system handles medical vocabulary (\u00a75.7, \u00a74.2 domain list includes 'medical') and engineering IP. Rejected transcripts may contain PHI, proprietary design details, or attacker-crafted payloads. No redaction, retention policy, access control, or restricted sink is specified.",
+      "best_evidence": "\u00a74.5: 'logged at LogLevel.Warning with the full utterance text and a security_event = true structured field'; \u00a74.2 bouncer domains include 'medical'; \u00a75.7 covers medical anatomy vocabulary.",
+      "recommended_fix": "Default to redacted or hashed utterance text in standard warning logs. If full text is needed for security analysis, route it to a restricted audit sink with explicit access controls, retention limits, and tenant-boundary enforcement. Document the policy in \u00a74.5.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-010",
+      "title": "Thread class defaults unconditionally to '2B' (internal) regardless of utterance intent",
+      "severity": "high",
+      "category": "correctness",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "Thread class defaults to 2B unconditionally when omitted"
+        }
+      ],
+      "core_problem": "\u00a75.2 grammar rule for '<number>-<number> <series> <class>?' specifies 'default class = 2B' when class is omitted. 2B is an internal thread class (nut/tapped hole). An utterance about an external thread (bolt/screw) with omitted class would be silently resolved to the wrong canonical ID (e.g., 2A should be the external default). This produces wrong tool calls without triggering ambiguity escalation.",
+      "best_evidence": "\u00a75.2: 'Normalize: strip whitespace around dash, uppercase series, default class = 2B'; ASME B1.1 defines 2A as external and 2B as internal thread classes.",
+      "recommended_fix": "Only default to 2B when parsed_intent.action or context explicitly indicates an internal thread (tap, tapped hole, nut). For external thread context, default to 2A. When context is ambiguous, omit the class and return an AmbiguityEscalation with both 2A and 2B candidates rather than silently defaulting.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-011",
+      "title": "Persisted decoration payload lacks a stable versioned JSON schema for polymorphic VocabularyResolution",
+      "severity": "high",
+      "category": "data_model",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "Persisted decoration payload lacks an explicit JSON schema for polymorphic Resolution"
+        }
+      ],
+      "core_problem": "\u00a78.2 specifies that VocabularyResolutionDecoration (containing 'public required VocabularyResolution Resolution') is serialized to the payload JSON column of dhf.entry_decorations. VocabularyResolution is an abstract record with multiple concrete subtypes (\u00a76.4). The spec does not define a discriminator field, stable field set, or schema version. CLR polymorphic serialization defaults are fragile across serializer settings changes, subtype additions, or renames, potentially making stored rows unreadable.",
+      "best_evidence": "\u00a76.4: 'public abstract record VocabularyResolution'; \u00a78.2: 'public required VocabularyResolution Resolution { get; init; }' described as 'Serialized to JSON and written as the payload column'.",
+      "recommended_fix": "Define a concrete versioned JSON schema for each VocabularyResolution variant with an explicit discriminator property (e.g., 'kind': 'resolved'|'ambiguous'|'empty'|'failure'|'rejected') and a schema_version field. Document this schema in \u00a78.2 and ensure SPEC-06 rendering is bound to the schema, not CLR type names.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-012",
+      "title": "Confidence threshold configuration is underspecified \u2014 two config values, no binding algorithm",
+      "severity": "medium",
+      "category": "ambiguity",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "Confidence configuration is underspecified relative to the decision table"
+        }
+      ],
+      "core_problem": "\u00a76.3 defines a four-band threshold table (\u22650.85 accept, 0.70\u20130.85 accept+log, 0.50\u20130.70 ambiguity, <0.50 ambiguity). \u00a713 exposes two config values: confidenceFloorForResolution: 0.70 and ambiguityThreshold: 0.85. The spec never defines the algorithm that maps these config values to the four-band behavior, leaving multiple incompatible implementations possible.",
+      "best_evidence": "\u00a76.3 threshold table with four bands; \u00a713: 'confidenceFloorForResolution: 0.70' and 'ambiguityThreshold: 0.85' with no pseudocode binding them to \u00a76.3 logic.",
+      "recommended_fix": "Add a pseudocode or decision-tree definition in \u00a76.3 that explicitly maps confidenceFloorForResolution and ambiguityThreshold to each branch of the threshold logic. Ensure the two config values cover all four bands without gaps or overlaps.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-013",
+      "title": "Process-lifetime repository cache has no invalidation path for corpus hot-fix migrations",
+      "severity": "medium",
+      "category": "operational_risk",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "Process-lifetime repository cache has no invalidation path for corpus hot-fixes"
+        }
+      ],
+      "core_problem": "\u00a77 specifies the repository cache has 'TTL is the process lifetime' for canonical_terms rows. \u00a79.2 acknowledges that hot-fix migrations can run mid-session. After a hot-fix, the in-process cache will continue serving stale rows until the process restarts, causing returned parameters and citations to diverge from the database.",
+      "best_evidence": "\u00a77: 'Entries are effectively immutable (standards don't change mid-session) so TTL is the process lifetime'; \u00a79.2: 'repeatable-read transaction to ensure consistency if vocabulary data were to be modified mid-session (rare, but possible if a hot-fix migration runs)'.",
+      "recommended_fix": "Add a cache invalidation mechanism keyed to corpus/migration version (e.g., a version counter in the database that the cache checks periodically), a LISTEN/NOTIFY-based invalidation, or replace process-lifetime TTL with a bounded TTL (e.g., 15 minutes) shorter than expected hot-fix intervals.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-014",
+      "title": "Framing claims 'deterministic pipeline' while two LLM calls are structurally central",
+      "severity": "medium",
+      "category": "documentation",
+      "merged_from": [
+        {
+          "oracle": "Grok",
+          "title": "Core framing contradiction: claims deterministic non-NLP design while depending on two LLM calls"
+        }
+      ],
+      "core_problem": "\u00a70 states 'Every term the agent resolves passes through a deterministic pipeline' and positions the layer as the antidote to probabilistic NLP approaches. The actual pipeline has two Sonnet 4.6 LLM calls (bouncer and synthesis) as structurally required stages. The determinism claim is misleading, though the design rationale (LLM as translator, database as ground truth) is sound and worth preserving.",
+      "best_evidence": "\u00a70: 'deterministic pipeline against a structured Postgres database'; \u00a73.1: Bouncer (Sonnet 4.6) and Sonnet Synthesis are required stages; SDR-07-002 mandates BSMS shape including Sonnet reasoning.",
+      "recommended_fix": "Revise \u00a70 framing to accurately describe the architecture: the query execution and canonicalization are deterministic; the classification and disambiguation use LLM judgment constrained by structured database results. The safety argument rests on the database being ground truth, not on the pipeline being fully deterministic \u2014 make that distinction explicit.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-015",
+      "title": "No transcription normalization stage for voice-mangled technical nomenclature",
+      "severity": "medium",
+      "category": "feasibility",
+      "merged_from": [
+        {
+          "oracle": "Grok",
+          "title": "Brittle dependency on perfect Whisper transcription for technical nomenclature"
+        }
+      ],
+      "core_problem": "Grammar rules in \u00a75.2\u20135.7 assume clean parsed_intent containing exact strings like '6-32 UNC', 'Ti-6Al-4V', 'M6x1.0'. No normalization or phonetic-rewriting stage is specified for common voice manglings ('six thirty two', 'em six by one point zero', 'tee eye six aluminum four vanadium'). This is a realistic failure mode for voice-to-CAD that the spec does not address.",
+      "best_evidence": "\u00a75.2 grammar patterns require exact string forms; \u00a73.1 pipeline has no normalization stage between Whisper transcription (SPEC-05) and the bouncer; \u00a71 notes 'en-US only' but no phonetic normalization.",
+      "recommended_fix": "Add a transcription normalization step (either within the bouncer or as a pre-bouncer stage) with a phonetic-to-canonical mapping table for common voice renderings of engineering terms. At minimum, document known failure cases and their handling. This need not be exhaustive for v1 but should be acknowledged as a known gap.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-016",
+      "title": "Prompt injection via voice channel has a larger attack surface than \u00a74.5 acknowledges",
+      "severity": "medium",
+      "category": "security",
+      "merged_from": [
+        {
+          "oracle": "Grok",
+          "title": "Adversarial prompt injection surface larger than acknowledged due to voice channel"
+        }
+      ],
+      "core_problem": "\u00a74.5 only logs security events when the bouncer explicitly rejects with 'injection_pattern' or 'role_override_attempt' in the reason. Successful injections (where the bouncer accepts a crafted utterance) produce no security telemetry. The bouncer fast-path cache could cache a jailbroken acceptance. Voice transcription introduces phonetic ambiguity that may allow injection patterns to survive Whisper without triggering keyword detection.",
+      "best_evidence": "\u00a74.5: security logging only on explicit rejection; \u00a74.3: cache stores bouncer decisions including accepts; \u00a74.2 persona prompt is the primary gate with no secondary validation layer.",
+      "recommended_fix": "Add post-transcription substring scanning for known injection patterns before the bouncer cache lookup (so injections are never cached as accepts). Consider a secondary validation pass on bouncer accepts for high-risk patterns. Document the threat model explicitly in \u00a74.5.",
+      "conflict_flag": false,
+      "weak_signal": false
+    }
+  ],
+  "dropped_findings": [
+    {
+      "oracle": "Grok",
+      "title": "Unacknowledged feasibility risk from non-existent 2026 LLM versions and latency assumptions",
+      "reason": "The document is dated 2026-04-18 and explicitly uses future model identifiers consistent with its fictional setting. The latency budget concern is real but already captured in R1-ISSUE-008 (build-breaking latency tests). The model-identifier concern is a worldbuilding artifact of the spec's fictional date, not an actionable implementation defect. Dropping the 'non-existent models' framing; latency test concern is merged into R1-ISSUE-008."
+    },
+    {
+      "oracle": "Grok",
+      "title": "Complexity inflation: hardcoded per-domain grammars plus LLM synthesis creates maintenance nightmare on standard revisions",
+      "reason": "This is a valid architectural concern but is a design preference / future-maintainability opinion rather than a correctness or feasibility defect in the current spec. The per-domain approach is a deliberate SDR-07-002 choice. Flagging as style/scope opinion; not actionable as a spec defect without a concrete alternative design. Dropped as too_vague for this review round."
+    }
+  ]
+}

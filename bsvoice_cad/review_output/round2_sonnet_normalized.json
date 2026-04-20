@@ -1,0 +1,252 @@
+{
+  "oracle_name": "Sonnet",
+  "role": "referee",
+  "normalized_issues": [
+    {
+      "issue_id": "R1-ISSUE-002",
+      "title": "COM timeout creates unrecorded model mutations: quarantine rule erases evidence, recovery is mandatory but descopable, and turn completion boundary is undefined",
+      "severity": "critical",
+      "category": "operational_risk",
+      "merged_from": [
+        {
+          "oracle": "Grok",
+          "title": "COM Cancellation Boundary Admits Unrecoverable Model Mutation"
+        },
+        {
+          "oracle": "Fran",
+          "title": "Quarantine rule can erase evidence of real model mutations"
+        },
+        {
+          "oracle": "Fran",
+          "title": "Post-timeout recovery flow lacks deterministic selection and success criteria"
+        },
+        {
+          "oracle": "Fran",
+          "title": "Turn completion boundary is undefined when a timeout triggers recovery"
+        },
+        {
+          "oracle": "Codex",
+          "title": "Timeout recovery is mandatory in Seam B but descopable in Section 3"
+        }
+      ],
+      "core_problem": "Three interlocking defects compound the COM timeout hazard: (1) A timed-out COM call that later completes and mutates the model has its completion quarantined and excluded from DHF, producing an audit trail that omits a real mutation. (2) The post-timeout recovery flow is declared mandatory in Seam B but 'error recovery' appears in the LIFO descope list as stretch, allowing a team to legally remove the safety gate. (3) The contract does not define when a timed-out turn is 'complete' for DHF purposes \u2014 at timeout, after quarantine, or after recovery \u2014 leaving hash-chain ordering and replay semantics implementation-defined in the highest-risk path.",
+      "best_evidence": "Seam B: 'the COM operation may still complete and mutate the model'; Glossary Quarantine: 'logged and discarded; it never updates session state, never contributes to DHF'; Seam B: 'mandatory post-timeout recovery flow (state refresh or undo-group rollback)'; Section 3: 'Descope priority (LIFO): ... error recovery ... all stretch.'",
+      "recommended_fix": "1) Require that any post-timeout COM completion that may imply model mutation be captured in DHF as an out-of-band recovery event before the next turn opens. 2) Split 'error recovery' in the descope list into mandatory-safety (post-timeout state reconciliation) and optional-UX (user-facing retry messaging); mark the former never-descopable. 3) Define the exact DHF close point for timeout cases and whether recovery outcome is stored in the same turn entry, a follow-up entry, or a separate recovery event. 4) Specify the selection rule between 'state refresh' and 'undo-group rollback' and the observable success criterion for each.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-003",
+      "title": "SPEC-04 has an undeclared semantic dependency on SPEC-02 (AddinSessionId), invalidating the stated parallel-convergence and dependency map",
+      "severity": "high",
+      "category": "contradiction",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "SPEC-04 has an unstated semantic dependency on SPEC-02"
+        }
+      ],
+      "core_problem": "The Module Map declares SPEC-04 depends only on SPEC-01 message shapes, and Section 7 states SPEC-02 and SPEC-04 can converge in parallel because 'they don't touch each other.' However, SPEC-04's session epoching, StateVersion reset, and reconciliation semantics all depend on how SPEC-02 generates and rotates AddinSessionId \u2014 a derivation algorithm explicitly deferred to SPEC-02. The dependency map is incomplete and the review/build order is unsound.",
+      "best_evidence": "Module Map: 'SPEC-04 ... Depends On SPEC-01 (message shapes only)'; Glossary: 'AddinSessionId ... Derivation algorithm ... is specified in SPEC-02'; Section 7: 'SPEC-02 + SPEC-04 converge in parallel (they don't touch each other)'.",
+      "recommended_fix": "Either (a) move the AddinSessionId semantic contract (generation algorithm, rotation rules, epoch semantics) into SPEC-00 or SPEC-01 so SPEC-04 can depend on it without depending on SPEC-02, or (b) explicitly declare SPEC-04 depends on SPEC-02 and update the dependency table, Module Map, and review order accordingly.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-006",
+      "title": "DHF session termination reason attribution overclaims what heartbeat absence can observe",
+      "severity": "high",
+      "category": "operational_risk",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "Termination reason attribution is stronger than the stated detection mechanism"
+        },
+        {
+          "oracle": "Grok",
+          "title": "DHF Session Reconciliation Rules Insufficiently Specified for Adversarial Disconnects"
+        }
+      ],
+      "core_problem": "The glossary states ungraceful termination is 'detected via heartbeat absence' and that 'the resulting session closure records the termination reason,' listing four distinct causes (add-in crash, SolidWorks exit, orchestrator kill, WebSocket disconnect). Heartbeat absence cannot distinguish among these causes, so the system will record cause codes it cannot actually observe, producing false audit data. Additionally, no top-level invariants are given for concurrent reconnect races or duplicate AddinSessionId scenarios that could corrupt hash-chain integrity.",
+      "best_evidence": "Glossary DHF Session: 'Ungraceful termination (add-in crash, SolidWorks exit, orchestrator kill, WebSocket disconnect) is detected via heartbeat absence; the resulting session closure records the termination reason.'",
+      "recommended_fix": "Reduce closure reason vocabulary to observable categories: explicit-shutdown, superseded-session, and heartbeat-timeout-unknown. If finer attribution is desired, specify the additional out-of-band signals required (e.g., OS process exit codes, explicit teardown messages) and which module is responsible for emitting them. Add at least one adversarial scenario (dual add-in instances, forced disconnect during COM call) as a required SPEC-04 invariant.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R2-ISSUE-001",
+      "title": "Grounding tools (screenshot, get_feature_tree) are simultaneously mandatory and stretch",
+      "severity": "high",
+      "category": "contradiction",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "Grounding tools are simultaneously mandatory and stretch"
+        }
+      ],
+      "core_problem": "Section 3 mandatory scope explicitly includes 'screenshot' and 'get_feature_tree' in the 9-tool demo, and ACC-08 ('Screenshot and feature-tree grounding return valid data') is listed as never-descopable. The same section's LIFO descope list includes 'grounding tools ... all stretch.' Implementers cannot determine whether these capabilities are required for the first shippable build.",
+      "best_evidence": "Section 3 mandatory: 'screenshot, get_feature_tree'; ACC-08: 'Screenshot and feature-tree grounding return valid data'; Section 3 descope: 'grounding tools ... all stretch.'",
+      "recommended_fix": "Remove screenshot/get_feature_tree from the stretch bucket, or redefine 'grounding tools' in the descope list to explicitly exclude the two ACC-08 capabilities and clarify what 'grounding tools' does refer to in that context.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-010",
+      "title": "Cross-module acceptance tests (ACC-01/02/03/04/08/10/12) have no executable home and cannot be enforced in CI",
+      "severity": "high",
+      "category": "testability",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "Cross-module acceptance tests have no explicit executable home"
+        }
+      ],
+      "core_problem": "The document forbids per-module test projects from spanning modules, but defines no integration/E2E test project or harness that owns the never-descopable ACC IDs. These tests require multiple modules and external dependencies (SolidWorks, WebSocket transport, DB, model client) and cannot be placed in any existing test project as described.",
+      "best_evidence": "Section 2: 'Per-module test projects test only their own module's internal invariants.' Section 3: 'The following ACC IDs are referenced as never-descopable scope gates.'",
+      "recommended_fix": "Add a dedicated integration/E2E test project (e.g., BSVoiceCAD.Tests.Integration), state which ACC IDs it owns, define its allowed assembly references, and specify its runtime dependency requirements (SolidWorks instance, Postgres, Anthropic API or test double).",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-008",
+      "title": "SPEC-01 tests cannot enforce DHF JSONB serialization policy without violating module boundaries",
+      "severity": "high",
+      "category": "feasibility",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "SPEC-01 tests cannot enforce DHF JSONB serialization policy without violating module boundaries"
+        }
+      ],
+      "core_problem": "SDR-TL-007 assigns enforcement of both wire-format and DHF JSONB payload serialization to SPEC-01 tests. DHF JSONB payloads are owned by SPEC-04. Enforcing SPEC-04 serialization in SPEC-01 tests either requires SPEC-01 to take an undeclared dependency on SPEC-04 (violating the architecture) or leaves DHF serialization unenforced where it is produced.",
+      "best_evidence": "SDR-TL-007: 'All wire formats and DHF JSONB payloads use camelCase property names... Both rules are enforced build-breaking in SPEC-01 tests.'",
+      "recommended_fix": "Split enforcement by ownership: keep wire-format serialization tests in SPEC-01 and move DHF JSONB serialization tests to SPEC-04 or the shared architecture-test project with explicit cross-module scope declared.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R2-ISSUE-002",
+      "title": "Module-to-assembly mapping is too vague to implement NetArchTest rules, especially for SPEC-03's split namespace",
+      "severity": "high",
+      "category": "feasibility",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "Module boundaries are not concrete enough to implement the promised NetArchTest rules"
+        }
+      ],
+      "core_problem": "The Module Map uses namespace-like labels (e.g., 'BSVoiceCAD.Orchestrator.Lifecycle + BSVoiceCAD.Addin.Bridge') while Section 2 uses assembly-level enforcement language. NetArchTest rules operate on assemblies, not namespaces. SPEC-03 is split across orchestrator and add-in bridge namespaces in different runtimes (.NET 8 and .NET Framework 4.8), making it impossible to write deterministic arch rules without knowing the exact project/assembly boundaries.",
+      "best_evidence": "Module Map 'Lives In' column: 'BSVoiceCAD.Orchestrator.Lifecycle + BSVoiceCAD.Addin.Bridge'; Section 2: 'Violations are detected by NetArchTest rules living in BSVoiceCAD.Tests.Architecture that is permitted to reference all module assemblies.'",
+      "recommended_fix": "List the exact .csproj/assembly names for each spec, or explicitly define the namespace sets and assembly boundaries that ArchTests must enforce. For SPEC-03's cross-runtime split, clarify which portion lives in which runtime and how the arch-test project references both.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R2-ISSUE-003",
+      "title": "No top-level contract for turns that never reach completion (crash, disconnect, kill mid-turn)",
+      "severity": "high",
+      "category": "operational_risk",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "No top-level contract exists for turns that never reach completion"
+        }
+      ],
+      "core_problem": "The document defines DHF behavior only for 'completed turns' but does not state what happens to abandoned or in-flight turns during crash, disconnect, kill, or shutdown. SPEC-03 and SPEC-04 can implement incompatible recovery behavior, and replay/integrity checks will be ambiguous when failures occur mid-turn.",
+      "best_evidence": "Seam C: 'produces one DHF write per completed turn'; Glossary Turn: 'one DHF entry per completed turn.' No definition of incomplete-turn handling exists at the seam level.",
+      "recommended_fix": "Define the failure-path contract for incomplete turns at the SPEC-00 seam level: whether to append an aborted-turn record, emit a separate session event, or guarantee no record \u2014 and specify how that is reconciled on restart/reconnect.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R2-ISSUE-004",
+      "title": "NetArchTest enforcement claim overclaims: runtime seam failures (WebSocket, threading, serialization) are not covered",
+      "severity": "medium",
+      "category": "testability",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "Architecture-test enforcement claim ignores runtime seam failures"
+        }
+      ],
+      "core_problem": "The document states seam violations are 'detected by NetArchTest rules,' but NetArchTest is a compile-time dependency checker. It cannot detect runtime WebSocket behavior, cross-runtime serialization mismatches, reconnect semantics, or threading violations \u2014 which are the riskiest integration behaviors in this architecture.",
+      "best_evidence": "Section 2: 'Each seam is one-directional. Violations are detected by NetArchTest rules...' and 'The full transport contract \u2014 including connection lifecycle, error semantics, reconnect behavior, and threading guarantees \u2014 is defined in SPEC-01.'",
+      "recommended_fix": "Limit NetArchTest claims to compile-time dependency enforcement. Add a separate requirement for contract/integration tests covering transport behavior, serialization round-trips, reconnect semantics, and threading invariants, and assign them to the integration test project.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-012",
+      "title": "Sonnet 4.6 role is contradicted between SDR-TL-003 and SDR-TL-008; 'decoration extraction' is undefined",
+      "severity": "medium",
+      "category": "ambiguity",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "LLM ownership is inconsistent after the SDR-TL-008 change"
+        }
+      ],
+      "core_problem": "SDR-TL-003 states 'Sonnet 4.6 for decoration extraction.' SDR-TL-008 states 'Opus 4.7 plays two roles, not three' and describes only vision interpreter and tool-calling agent. It is unclear whether Sonnet 4.6 remains in scope, what 'decoration extraction' means, which module owns it, and whether it is mandatory or stretch.",
+      "best_evidence": "SDR-TL-003: 'Opus 4.7 primary, Sonnet 4.6 for decoration extraction.' SDR-TL-008: 'Opus 4.7 plays two roles, not three. Vision interpreter ... and tool-calling agent.'",
+      "recommended_fix": "Reconcile the two SDRs: either remove Sonnet 4.6 from SDR-TL-003 and confirm it is out of scope, or define 'decoration extraction,' assign it to a module, and classify it as mandatory or stretch.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-006",
+      "title": "Regulatory framing creates compliance misuse risk without governance owner or binding non-compliance language",
+      "severity": "medium",
+      "category": "governance",
+      "merged_from": [
+        {
+          "oracle": "Grok",
+          "title": "Regulatory Framing Invites Compliance Misuse Despite Disclaimer"
+        }
+      ],
+      "core_problem": "SDR-TL-006 positions DHF as a '21 CFR 820.30 / Part 11 alignment foundation' while disclaiming compliance, but no governance owner is assigned for the gap-analysis or legal review. The Medtronic partnership pitch context increases the risk that customers treat the audit log as Part 11-ready based on the 'foundation' language.",
+      "best_evidence": "SDR-TL-006: 'Positioned as \"design audit log foundation for future 21 CFR 820.30 / Part 11 alignment.\" NOT marketed as compliant. Gap-analysis table lives in SPEC-04.'",
+      "recommended_fix": "Either remove all 21 CFR / Part 11 references from top-level SDRs, or assign an explicit governance owner for the gap-analysis and add binding non-compliance language that survives per-module decomposition (e.g., a required disclaimer in any customer-facing artifact).",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-014",
+      "title": "Single-model assumption for vision and ambiguity events creates untestable dependency on unreleased model behavior",
+      "severity": "medium",
+      "category": "feasibility",
+      "merged_from": [
+        {
+          "oracle": "Grok",
+          "title": "Brittle Single-Model Assumption for Vision and Ambiguity Events"
+        }
+      ],
+      "core_problem": "The architecture assumes Opus 4.7 (an unreleased 2026 model) will reliably produce structured vision observations and ambiguity_resolution turns. Removal of the consensus layer plus deferral of details to SPEC-05 creates an untestable dependency. Adversarial scenarios (model behavior shift, rate limiting, deprecation, vision misinterpretation) break the turn-type taxonomy and hash-chain integrity.",
+      "best_evidence": "SDR-TL-008: 'The system relies on single-model inference with extended thinking enabled; the DHF provides external traceability including ambiguity events.' Glossary Vision Context: 'Structured observations extracted by Opus 4.7.'",
+      "recommended_fix": "Define an abstract model-output contract (expected structured output schema, failure modes, fallback behavior) at the SPEC-00 or SPEC-05 level, and require synthetic test doubles that can simulate model failures for integration testing.",
+      "conflict_flag": false,
+      "weak_signal": false
+    }
+  ],
+  "dropped_findings": [
+    {
+      "oracle": "Grok",
+      "title": "DHF Session Reconciliation Rules Insufficiently Specified for Adversarial Disconnects",
+      "reason": "duplicate \u2014 merged into R1-ISSUE-006 (termination reason attribution / reconciliation)"
+    },
+    {
+      "oracle": "Fran",
+      "title": "Post-timeout recovery flow lacks deterministic selection and success criteria",
+      "reason": "duplicate \u2014 merged into R1-ISSUE-002 as sub-point 4"
+    },
+    {
+      "oracle": "Fran",
+      "title": "Turn completion boundary is undefined when a timeout triggers recovery",
+      "reason": "duplicate \u2014 merged into R1-ISSUE-002 as sub-point 3"
+    },
+    {
+      "oracle": "Codex",
+      "title": "Timeout recovery is mandatory in Seam B but descopable in Section 3",
+      "reason": "duplicate \u2014 merged into R1-ISSUE-002 as sub-point 2"
+    }
+  ]
+}

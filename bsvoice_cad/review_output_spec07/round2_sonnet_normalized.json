@@ -1,0 +1,301 @@
+{
+  "oracle_name": "Sonnet",
+  "role": "referee",
+  "normalized_issues": [
+    {
+      "issue_id": "R2-ISSUE-001",
+      "title": "Batch repository contract exposes only CanonicalTermRow, dropping domain-specific fields required for synthesis and tool-call population",
+      "severity": "critical",
+      "category": "api_contract",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "Batch repository result shape does not specify how domain-specific fields survive into synthesis"
+        },
+        {
+          "oracle": "Codex",
+          "title": "Batch repository contract drops domain-specific fields needed for resolution and tool-call population"
+        }
+      ],
+      "core_problem": "ExecuteQueriesAsync returns IReadOnlyDictionary<VocabQuery, VocabQueryResult> where VocabQueryResult only carries IReadOnlyList<CanonicalTermRow>. The pipeline's \u00a70 example requires thread-specific fields (major diameter, pitch, tap drill) and demo moment 1 requires HoleWizard population from resolution. Stage 4 synthesis and downstream tool-call construction have no declared path to domain-extension fields (ThreadRow, MaterialRow, etc.) from the batch API.",
+      "best_evidence": "\u00a79.1: `public sealed record VocabQueryResult { public required IReadOnlyList<CanonicalTermRow> Rows { get; init; } }` vs \u00a70: 'the repository returns the exact major diameter (0.138\"), pitch (32 TPI), tap drill (#36 / 0.1065\")' and \u00a710.1 demo moment 1 requiring HoleWizard population.",
+      "recommended_fix": "Change VocabQueryResult to carry a typed per-domain row union or discriminated payload (e.g., a base CanonicalTermRow plus an optional domain-extension object keyed by domain type). Update Stage 3/4 contracts to consume domain-specific fields without undeclared extra round-trips.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R2-ISSUE-002",
+      "title": "ParsedIntent.Parameters is typed as Dictionary<string, string> but the bouncer prompt requires a boolean normalization_uncertain flag",
+      "severity": "high",
+      "category": "data_model",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "Bouncer contract cannot represent the documented `normalization_uncertain` flag"
+        },
+        {
+          "oracle": "Codex",
+          "title": "`ParsedIntent.Parameters` cannot represent the required boolean `normalization_uncertain` flag"
+        }
+      ],
+      "core_problem": "\u00a74.2 persona prompt instructs the model to add `\"normalization_uncertain\": true` inside the parameters object. \u00a74.4 declares `public required IReadOnlyDictionary<string, string> Parameters { get; init; }`. A boolean value cannot be deserialized into a string-valued dictionary without lossy coercion or a contract violation. The planner cannot reliably detect uncertain normalization.",
+      "best_evidence": "\u00a74.2: 'add a \"normalization_uncertain\": true flag in the parameters.' \u00a74.4: `IReadOnlyDictionary<string, string> Parameters`.",
+      "recommended_fix": "Either widen Parameters to IReadOnlyDictionary<string, object> (or JsonElement) with a documented schema, or add a dedicated typed field `NormalizationUncertain: bool` outside the parameter map on ParsedIntent.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R2-ISSUE-003",
+      "title": "Security-event classification depends on substring matching against LLM-generated free-text reason field \u2014 not guaranteed by contract",
+      "severity": "high",
+      "category": "security",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "Security-event routing depends on free-text reason tokens that the bouncer contract does not guarantee"
+        },
+        {
+          "oracle": "Codex",
+          "title": "Security-event logging depends on unstable free-text `reason` tokens"
+        }
+      ],
+      "core_problem": "\u00a74.5 routes security events to the restricted audit sink based on whether the model-generated `reason` string contains the tokens `injection_pattern` or `role_override_attempt`. The bouncer JSON schema (\u00a74.2) only specifies `\"reason\": \"one-line explanation\"` \u2014 no constraint on wording. Model phrasing changes silently break security routing, ACC-23, and telemetry alerts without any detection mechanism.",
+      "best_evidence": "\u00a74.2 response format: `\"reason\": \"one-line explanation if reject or needs_clarification\"`. \u00a74.5: 'Any bouncer rejection tagged with reason containing the token injection_pattern or role_override_attempt is logged...'",
+      "recommended_fix": "Add a machine-readable `rejection_code` field (closed enum: `out_of_scope`, `injection_pattern`, `role_override_attempt`, `no_engineering_content`, etc.) and a boolean `security_event` field to the bouncer JSON schema. Use these structured fields for logging, audit routing, and ACC-23 checks instead of substring matching.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R2-ISSUE-004",
+      "title": "Bouncer cache replays stale raw Utterance from prior request when two inputs normalize to the same cache key",
+      "severity": "high",
+      "category": "operational_risk",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "Bouncer cache can replay the wrong raw utterance on cache hit"
+        }
+      ],
+      "core_problem": "The cache key is a hash of the normalized utterance (lowercased, filler-stripped). BouncerResult.Utterance stores the raw transcribed text. Two different raw utterances that normalize identically (e.g., 'um tap a 6-32 UNC hole' and 'tap a 6-32 UNC hole') share a cache key. On a cache hit, the cached BouncerResult \u2014 including its original raw Utterance \u2014 is returned for the new request. This corrupts audit decorations and can leak prior user text into DHF records.",
+      "best_evidence": "\u00a74.3: 'Cache key is a hash of the normalized utterance (lowercased, stripped of filler words).' \u00a74.4: `public required string Utterance { get; init; } // raw transcribed text, passed through`. \u00a711.1: 'BouncerResult.Utterance field contains the exact raw utterance string'.",
+      "recommended_fix": "Do not include the raw Utterance in the cached payload. Cache only decision/domain/parsed-intent data and inject the current request's raw utterance and latency into the reconstructed BouncerResult at cache-hit time. Alternatively, key the cache on the exact raw utterance (not normalized form).",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R2-ISSUE-005",
+      "title": "Persisted StageLatencies payload includes DecorationWriteMs and TotalMs that are unknowable before the write completes \u2014 circular dependency",
+      "severity": "high",
+      "category": "contradiction",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "Persisted latency payload is circular because it includes the write time of the record being written"
+        }
+      ],
+      "core_problem": "\u00a78.2 defines StageLatencies with DecorationWriteMs and TotalMs as required fields inside VocabularyResolutionDecoration. \u00a73.2 states these are 'recorded as decoration metadata.' The decoration write duration and final total are not known until after the INSERT completes, making a single-pass append-only write impossible. Either a second UPDATE pass is required (violating DHF immutability) or the stored values will be zero/estimated.",
+      "best_evidence": "\u00a78.2 StageLatencies: `public required int DecorationWriteMs { get; init; }` and `public required int TotalMs { get; init; }` inside the decoration payload. \u00a73.2: 'Budgets are measured via System.Diagnostics.Stopwatch at stage boundaries and recorded as decoration metadata.'",
+      "recommended_fix": "Remove DecorationWriteMs and TotalMs from the persisted decoration payload. Record them in a separate telemetry/metrics sink (Serilog structured log or OpenTelemetry span) that does not require embedding them in the immutable DHF row. Or explicitly specify a two-phase write with ownership and consistency rules.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R2-ISSUE-006",
+      "title": "Shared CancellationToken across parallel per-domain synthesis tasks contradicts per-domain timeout isolation",
+      "severity": "high",
+      "category": "operational_risk",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "Shared cancellation token contradicts per-domain timeout isolation"
+        }
+      ],
+      "core_problem": "\u00a73.1 Stage 4 specifies 'parallel via Task.WhenAll with shared cancel token.' \u00a73.3 failure modes state 'Sonnet synthesis call timeout (>3s) ... for affected domain; other domains may still resolve.' A shared token means one domain timing out cancels all sibling synthesis tasks, making partial resolution impossible and contradicting the stated failure isolation behavior.",
+      "best_evidence": "\u00a73.1: 'one synthesis call per domain, parallel via Task.WhenAll with shared cancel token.' \u00a73.3: 'Return VocabularyResolutionFailure(reason=SynthesisTimeout) for affected domain; other domains may still resolve.'",
+      "recommended_fix": "Use a parent request CancellationToken linked to per-domain CancellationTokenSource instances with individual 3-second timeouts. Per-domain timeout cancels only that domain's task; the parent token cancels all (e.g., on bouncer timeout or user cancellation). Document this token hierarchy explicitly.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R2-ISSUE-007",
+      "title": "FindByAliasAsync interface omits alias_type parameter required by the planner's spoken-alias fallback query",
+      "severity": "high",
+      "category": "api_contract",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "Alias lookup interface omits the `alias_type='spoken'` filter required by the planner"
+        }
+      ],
+      "core_problem": "\u00a75.2 defines the alias fallback as `SELECT canonical_id FROM vocab.aliases WHERE alias_text = @utterance AND alias_type = 'spoken'`. \u00a79.1 declares `FindByAliasAsync(string aliasText, string domain, ...)` with no alias_type parameter. The public contract cannot express the filter the planner requires, forcing either over-broad matches or hidden special-case filtering outside the declared API.",
+      "best_evidence": "\u00a75.2 fallback SQL: `alias_type = 'spoken'` filter. \u00a79.1: `Task<IReadOnlyList<CanonicalTermRow>> FindByAliasAsync(string aliasText, string domain, CancellationToken ct = default)` \u2014 no aliasType parameter.",
+      "recommended_fix": "Add an optional `aliasType` parameter (string or enum) to FindByAliasAsync, or formalize alias_type as a field in VocabQuery.Args so ExecuteQueriesAsync can apply it through the batch path.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R2-ISSUE-008",
+      "title": "Per-domain DomainResolution for zero-row domains is unspecified \u2014 aggregate PipelineOutcome becomes ambiguous",
+      "severity": "high",
+      "category": "omission",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "Per-domain output is undefined for candidate domains whose queries return zero rows"
+        }
+      ],
+      "core_problem": "\u00a76.1 states synthesis is invoked 'once per domain that returned results.' \u00a73.3 defines zero-row behavior as EmptyResolution. \u00a76.4 requires PipelineResult.DomainResolutions to be a list. For a multi-domain utterance where one domain returns zero rows, there is no synthesis call and no specified mechanism to produce a DomainResolution for that domain. Downstream consumers cannot distinguish 'evaluated and empty' from 'never processed,' making PartiallyResolved vs Empty outcome computation undefined.",
+      "best_evidence": "\u00a76.1: 'synthesis is invoked once per domain that returned results.' \u00a76.4 PipelineOutcome enum includes PartiallyResolved and Empty as distinct values. \u00a73.3: zero-row \u2192 EmptyResolution, but no specification of how this becomes a DomainResolution entry.",
+      "recommended_fix": "Require one DomainResolution per candidate domain in the planner's output. For domains whose Stage 3 result sets are empty, create an EmptyResolution deterministically before Stage 4 (no synthesis call needed). This makes the DomainResolutions list complete and PipelineOutcome computation unambiguous.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R2-ISSUE-009",
+      "title": "Query priority tiebreaker is claimed but synthesis prompt and pipeline code have no mechanism to honor it",
+      "severity": "medium",
+      "category": "feasibility",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "Planner query priority is claimed as a tiebreaker but no mechanism tells synthesis to honor it"
+        }
+      ],
+      "core_problem": "\u00a75.8 states 'Order conveys priority: queries earlier in the list are considered more likely to be correct. Synthesis uses this ordering as a tiebreaker when multiple queries each return a single row within the same domain.' The \u00a76.2 synthesis system prompt makes no mention of query order or priority. No pipeline code is specified to pass ordering metadata to the model or enforce the tiebreak deterministically.",
+      "best_evidence": "\u00a75.8: 'Synthesis uses this ordering as a tiebreaker.' \u00a76.2 synthesis prompt: no reference to query order or priority.",
+      "recommended_fix": "Either (a) perform the tiebreak deterministically in pipeline code before invoking synthesis (preferred \u2014 keeps synthesis stateless), or (b) add explicit query-priority metadata to the synthesis input JSON and reference it in the prompt. Document which approach is authoritative.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R2-ISSUE-010",
+      "title": "Raw utterance stored and rendered verbatim in DHF decorations without access controls, contradicting the PHI/IP redaction rationale",
+      "severity": "high",
+      "category": "security",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "Raw utterance is persisted and rendered verbatim despite the spec's own PHI/IP redaction rationale"
+        }
+      ],
+      "core_problem": "SDR-07-010 and \u00a74.5 justify hashing utterances in standard logs because 'the system handles medical vocabulary and engineering IP; rejected transcripts may contain PHI or proprietary design details.' Yet \u00a78.2 stores `public required string Utterance { get; init; }` in the decoration payload, and \u00a78.3 renders 'Utterance text (verbatim)' in the viewer \u2014 with no equivalent access controls, redaction rules, or role-gating defined for the DHF path.",
+      "best_evidence": "SDR-07-010: 'rejected transcripts may contain PHI or proprietary design details.' \u00a78.2: `public required string Utterance { get; init; }`. \u00a78.3: 'Utterance text (verbatim)' rendered in viewer.",
+      "recommended_fix": "Define a DHF utterance-handling policy: either (a) store only the normalized/canonicalized intent fragments needed for audit and omit raw text, (b) gate full-text display in the viewer behind a restricted role, or (c) apply the same redaction/restricted-sink pattern used for security logs. The policy must be consistent with SDR-07-010's stated rationale.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R2-ISSUE-011",
+      "title": "standard_source field format is inconsistent between lookup inputs and citation output, causing false misses",
+      "severity": "medium",
+      "category": "data_model",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "`standard_source` is underspecified and internally inconsistent between lookup and citation"
+        }
+      ],
+      "core_problem": "\u00a75.3 uses FindByStandardSourceAsync with inputs like 'ASTM F136' and 'AMS 4928' (no revision year). \u00a76.4 Citation.StandardSource comment shows 'ASME B1.1-2019' (with revision year). \u00a79.1 FindByStandardSourceAsync comment shows 'ASTM F136' (without). The spec does not define whether standard_source includes revision/year or just the base identifier, creating divergence between corpus storage, lookup matching, and citation rendering.",
+      "best_evidence": "\u00a75.3: `FindByStandardSourceAsync` with 'ASTM F136'. \u00a76.4: `// 'ASME B1.1-2019'`. \u00a79.1: `// e.g., \"ASTM F136\"`.",
+      "recommended_fix": "Define one canonical storage format for standard_source (recommend: base identifier without year, e.g., 'ASTM F136'). Store revision year separately in a revision_year column. Citation rendering combines them. Document normalization rules for lookup inputs that may include year suffixes.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R2-ISSUE-012",
+      "title": "SchemaVersion first-property ordering requirement is unenforceable with default System.Text.Json behavior",
+      "severity": "medium",
+      "category": "testability",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "`SchemaVersion` first-property requirement is not enforceable with the stated serializer contract"
+        }
+      ],
+      "core_problem": "\u00a78.2 states 'The SchemaVersion field is always the first property in the serialized JSON.' System.Text.Json does not guarantee property ordering without explicit JsonPropertyOrder attributes or a custom writer. This requirement is untestable as written and can silently drift across runtime or compiler changes.",
+      "best_evidence": "\u00a78.2: 'The SchemaVersion field is always the first property in the serialized JSON.' and 'Serialization uses System.Text.Json with a custom JsonConverter<VocabularyResolution>.'",
+      "recommended_fix": "Apply [JsonPropertyOrder(0)] to SchemaVersion on VocabularyResolutionDecoration, or implement a custom JsonConverter that writes SchemaVersion first. Add a DecorationSchemaVersionTests assertion that verifies the serialized byte sequence starts with the SchemaVersion property.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R2-ISSUE-013",
+      "title": "Medical domain is in v1 mandatory scope but bouncer persona, grammar rules, and corpus are aerospace/toolmaker-centric with no medical-specific content",
+      "severity": "high",
+      "category": "scope",
+      "merged_from": [
+        {
+          "oracle": "Grok",
+          "title": "Medical domain in v1 scope contradicts deferred tuning and generic prompt"
+        }
+      ],
+      "core_problem": "\u00a71 lists medical as a v1 domain. \u00a710.1 mandatory scope includes medical grammar (\u00a75.7). The bouncer persona (\u00a74.2) is an 'aerospace toolmaker and QC inspector' with no medical examples, rejection criteria, or anatomical vocabulary. \u00a75.7 medical grammar is minimal alias-only with no examples. \u00a71 Out of scope explicitly defers 'medical-specific NLP tuning beyond the generic bouncer persona.' This creates a correctness gap for one of six v1 domains at hackathon demo time.",
+      "best_evidence": "\u00a71: 'v1 domain scope: threads, materials, fasteners, gdnt, sw_api, medical.' \u00a74.2 persona: 'retired aerospace toolmaker and QC inspector' \u2014 no medical content. \u00a71 Out of scope: 'medical-specific NLP tuning beyond the generic bouncer persona (v1.5 customer-specific tuning is deferred).'",
+      "recommended_fix": "Either (a) remove medical from v1 mandatory scope and move it to stretch (consistent with the deferred tuning statement), or (b) add medical-specific bouncer instructions (anatomical term examples, rejection criteria for non-medical anatomical misuse) and expand \u00a75.7 grammar before hackathon. Option (a) is lower risk for the demo deadline.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R2-ISSUE-014",
+      "title": "Pre-cache injection scan forwards known-malicious patterns to the LLM rather than hard-rejecting them",
+      "severity": "medium",
+      "category": "security",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "Pre-cache injection scan does not actually block known attack patterns from reaching the LLM"
+        },
+        {
+          "oracle": "Grok",
+          "title": "Adversarial voice injection evasion not addressed in updated threat model"
+        }
+      ],
+      "core_problem": "\u00a74.3 states the pre-cache scan 'prevents injection-accepting results from being cached' but still forwards matched patterns to the full bouncer LLM call. The defense-in-depth claim relies on the LLM correctly rejecting patterns it was explicitly told to reject \u2014 a single model miss converts a known-bad input into an accepted request. Additionally, phonetic obfuscation of injection patterns (listed in \u00a74.5 threat model) bypasses the deterministic substring/regex scan entirely, and the v1.5 deferral of phonetic normalization leaves this gap open.",
+      "best_evidence": "\u00a74.3: 'If the scan matches, the utterance bypasses the cache and proceeds to the full bouncer LLM call.' \u00a74.5 threat model: 'Phonetic obfuscation of injection patterns (homophone substitution to evade keyword detection)' listed but only substring/regex blocklist before cache.",
+      "recommended_fix": "For high-confidence injection pattern matches (not borderline), implement a deterministic hard-reject path that returns VocabularyResolutionRejected without an LLM call. Reserve the LLM path for borderline/ambiguous matches where false positives are a real concern. Document the confidence threshold for hard-reject vs. LLM-evaluate. For phonetic evasion, acknowledge the gap explicitly in \u00a74.5 and add it to the v1.5 backlog with a specific ticket reference.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R2-ISSUE-015",
+      "title": "Thread class defaulting relies on LLM-derived parsed_intent.action accuracy with no deterministic fallback when action is absent or ambiguous",
+      "severity": "medium",
+      "category": "correctness",
+      "merged_from": [
+        {
+          "oracle": "Grok",
+          "title": "Thread class defaulting remains brittle despite R1-ISSUE-010 fix"
+        }
+      ],
+      "core_problem": "\u00a75.2 context-dependent class defaulting requires parsed_intent.action to reliably signal internal ('tap', 'tapped hole', 'nut', 'internal') vs. external ('bolt', 'screw', 'stud', 'external') context. This signal comes from the bouncer LLM, which may fail to tag action on voice-mangled input. The spec's fallback (return queries for both 2A and 2B) is correct but will trigger frequent ambiguity escalations for common utterances like 'add a 6-32 thread' where action is absent. No keyword set or deterministic antecedent resolution is specified for the planner to use independently of parsed_intent.",
+      "best_evidence": "\u00a75.2: 'If class is omitted AND context is ambiguous or absent: DO NOT default. Return queries for BOTH 2A and 2B candidates.' The planner has no independent mechanism to determine internal/external context beyond parsed_intent.action.",
+      "recommended_fix": "Define an explicit keyword set in the planner (not LLM-dependent) for internal/external classification as a secondary signal. Document the expected ambiguity escalation rate for common utterances and confirm it is acceptable for the demo. If the rate is high, consider defaulting to 2B (most common internal use case) with a low-confidence flag rather than always escalating.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R2-ISSUE-016",
+      "title": "Awaited decoration write on critical path couples voice CAD availability to audit system with no circuit-breaker",
+      "severity": "high",
+      "category": "operational_risk",
+      "merged_from": [
+        {
+          "oracle": "Grok",
+          "title": "Critical path decoration write creates unsafe latency and availability coupling"
+        }
+      ],
+      "core_problem": "R1-ISSUE-002 was addressed by making the decoration write awaited (SDR-07-006). This correctly enforces citation durability but now blocks the real-time voice pipeline on every resolution pending a DHF INSERT. A single Postgres contention spike, SPEC-04 migration regression, or network hiccup fails the entire vocabulary resolution with DecorationWriteFailed, requiring the user to retry. No circuit-breaker, retry-with-backoff, or async-with-guarantee pattern is specified. The 40ms p95 budget for decoration write is tight for a blocking call under load.",
+      "best_evidence": "\u00a73.1 Stage 5: 'pipeline does NOT report success to SPEC-05 until decoration is persisted.' \u00a73.3: 'Decoration write failure \u2192 VocabularyResolutionFailure(reason=DecorationWriteFailed); agent does NOT proceed with tool call.' \u00a73.2: decoration write p95 = 40ms.",
+      "recommended_fix": "Retain the awaited write as the primary path (correct for audit integrity) but add: (a) a configurable retry with exponential backoff (1-2 retries within the latency budget) before returning DecorationWriteFailed, and (b) a circuit-breaker that opens after N consecutive write failures and routes to a degraded mode with explicit user notification. Document the degraded mode behavior in \u00a73.3.",
+      "conflict_flag": true,
+      "weak_signal": false
+    }
+  ],
+  "dropped_findings": [
+    {
+      "oracle": "Grok",
+      "title": "Complexity inflation from per-domain parallel synthesis and multi-resolution types",
+      "reason": "unsupported \u2014 the per-domain parallel synthesis architecture (R1-ISSUE-001 fix) is a deliberate design decision with documented rationale. Grok's alternative (single LLM call with multi-domain JSON schema) is a valid design opinion but not a defect. The complexity increase is real but the finding does not identify a correctness or feasibility failure, only a preference for a different architecture."
+    }
+  ]
+}

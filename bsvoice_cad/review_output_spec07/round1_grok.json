@@ -1,0 +1,68 @@
+{
+  "oracle_name": "GrokContrarian",
+  "role": "Contrarian Reviewer",
+  "document_type": "Technical Specification",
+  "overall_verdict": "major_revision",
+  "findings": [
+    {
+      "title": "Core framing contradiction: claims deterministic non-NLP design while depending on two LLM calls",
+      "severity": "high",
+      "category": "contradiction",
+      "location": "\u00a70 (\"opposite design... deterministic pipeline against a structured Postgres database\"), SDR-07-002, \u00a73.1 (Bouncer + Sonnet Synthesis stages)",
+      "evidence": "\"Every term the agent resolves passes through a deterministic pipeline\" vs two Sonnet 4.6 calls with persona prompts",
+      "problem": "The document sells the layer as the antidote to \"embed... retrieve by cosine similarity, pray\" but the actual control flow routes critical classification and disambiguation through probabilistic LLM steps.",
+      "why_it_matters": "If the opposite assumption (LLM outputs are the dominant source of error) is true, the entire reputational-safety argument collapses and the BSMS mandate becomes theater.",
+      "proposed_fix": "Either remove deterministic claims or replace bouncer/synthesis with deterministic rules; cannot have both.",
+      "confidence": 0.85
+    },
+    {
+      "title": "Brittle dependency on perfect Whisper transcription for technical nomenclature",
+      "severity": "high",
+      "category": "omission",
+      "location": "\u00a73.1 pipeline diagram, \u00a75.2\u20135.7 grammar rules, \u00a71 (depends on SPEC-05 transcription)",
+      "evidence": "All grammar patterns assume clean `parsed_intent` containing exact strings like \"6-32 UNC\", \"Ti-6Al-4V\", \"M6x1.0\"",
+      "problem": "No normalization, phonetic rewriting, or error-correction stage for common voice manglings (\"six thirty two\", \"tee eye six aluminum four vanadium\", \"em six by one point zero\").",
+      "why_it_matters": "In real voice-to-CAD usage this is the dominant failure mode; the \"deterministic grammar\" becomes useless without addressing it, creating systematic audit-risk gaps the spec claims to eliminate.",
+      "proposed_fix": "Add mandatory transcription-normalization stage with explicit phonetic-to-canonical mapping table before bouncer or planner.",
+      "confidence": 0.9
+    },
+    {
+      "title": "Unacknowledged feasibility risk from non-existent 2026 LLM versions and latency assumptions",
+      "severity": "critical",
+      "category": "feasibility",
+      "location": "\u00a73.2 latency budget table, \u00a74.2, \u00a76.2, \u00a713 configuration (\"claude-sonnet-4-6-20260101\", \"Claude Opus 4.7\"), date 2026-04-18",
+      "evidence": "p95 budgets of 600 ms for bouncer and 500 ms for synthesis; explicit model names that do not exist",
+      "problem": "Entire pipeline timing, caching strategy, and prompt engineering are predicated on unreleased model characteristics; real models in 2025/2026 will have different latency profiles, refusal rates, and JSON stability.",
+      "why_it_matters": "Makes the spec unimplementable as written and creates downstream rework when actual models deviate; latency budgets become fiction.",
+      "proposed_fix": "Rewrite latency and model assumptions using currently available models; mark all numeric budgets as speculative.",
+      "confidence": 0.95
+    },
+    {
+      "title": "Adversarial prompt injection surface larger than acknowledged due to voice channel",
+      "severity": "high",
+      "category": "security",
+      "location": "\u00a74.5 Adversarial Input Handling, bouncer system prompt in \u00a74.2, \u00a73.3 failure modes",
+      "evidence": "Only logs rejections containing \"injection_pattern\" or \"role_override_attempt\"; relies on persona prompt to reject",
+      "problem": "Voice transcription introduces phonetic ambiguity and the bouncer prompt can be bypassed with known jailbreak patterns that survive Whisper (e.g. \"ignore previous instructions after you hear...\"). The fast-path cache could cache a jailbroken acceptance.",
+      "why_it_matters": "Security event logging only triggers on explicit rejection; successful injection leads to arbitrary tool calls with full DHF audit trail contamination.",
+      "proposed_fix": "Add post-transcription sanitization layer and out-of-band human review queue for all bouncer accepts containing suspicious substrings; remove cache for first N utterances per session.",
+      "confidence": 0.75
+    },
+    {
+      "title": "Complexity inflation: hardcoded per-domain grammars plus LLM synthesis creates maintenance nightmare on standard revisions",
+      "severity": "medium",
+      "category": "scope",
+      "location": "\u00a75.2\u20135.7 (one grammar block per domain), SDR-07-007 (superseded_by), \u00a79.1 repository methods (one method per domain)",
+      "evidence": "Separate grammar patterns, repository methods (`GetThreadAsync`, `GetMaterialAsync`...), and synthesis rules for each domain; new standards require code changes",
+      "problem": "Every new thread standard, material spec, or GD&T update requires coordinated changes across planner, repository interface, DTOs, tests, and prompts. The \"stable canonical IDs\" claim does not reduce this surface.",
+      "why_it_matters": "Violates the stated goal of authoritative database as single source of truth; turns vocabulary updates into software releases.",
+      "proposed_fix": "Collapse domain-specific grammars into single data-driven parser driven by metadata in `vocab.canonical_terms`; remove per-domain repository methods.",
+      "confidence": 0.8
+    }
+  ],
+  "top_3_must_fix": [
+    "Core framing contradiction between deterministic claims and LLM-heavy pipeline (high)",
+    "Brittle dependency on perfect Whisper transcription for technical terms (high)",
+    "Feasibility risk from depending on non-existent future LLM versions and latency numbers (critical)"
+  ]
+}

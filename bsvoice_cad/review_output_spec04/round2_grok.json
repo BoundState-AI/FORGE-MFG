@@ -1,0 +1,57 @@
+{
+  "oracle_name": "GrokContrarian",
+  "role": "Contrarian Reviewer",
+  "document_type": "BSVoice-CAD SPEC-04",
+  "overall_verdict": "major_revision",
+  "findings": [
+    {
+      "title": "workstation_id trust boundary enables adversarial session termination",
+      "severity": "high",
+      "category": "security",
+      "location": "SDR-04-008",
+      "evidence": "The close-other-sessions logic and advisory lock scoping rely on `workstation_id` to isolate sessions per physical machine. This assumes `workstation_id` is a stable, non-spoofed machine identifier (e.g., `Environment.MachineName`). ... A spoofed or colliding `workstation_id` can cause one orchestrator to prematurely close another's sessions.",
+      "problem": "Environment.MachineName is trivially spoofable in containers, VMs, or by malicious code; the partial unique index and lock key both depend on it, violating the 'clean ordering, clean epoch semantics' claimed in SDR-04-004.",
+      "why_it_matters": "What if the opposite assumption (hostile multi-instance environment) is true? The entire DHF session split/resume model (SDR-04-005 and Section 6.1 stale-session logic) collapses, allowing one actor to erase another's audit trail via premature close.",
+      "proposed_fix": "Replace with cryptographically generated persistent workstation token (stored in config or registry) that cannot be guessed or colliding; update advisory lock key and close queries immediately.",
+      "confidence": 0.9
+    },
+    {
+      "title": "DROP TRIGGER privilege renders immutability claim illusory",
+      "severity": "critical",
+      "category": "security",
+      "location": "Section 3.2 Enforcement Gap (Honest Disclosure)",
+      "evidence": "However, the orchestrator also has `DROP TRIGGER` privilege (it's the only DB user in hackathon scope). A malicious or buggy orchestrator could drop triggers, mutate rows, and recreate triggers. This is acknowledged in SDR-TL-006 (SPEC-00) and in Section 12 of this spec's integrity-validation discussion.",
+      "problem": "The 'defense-in-depth append-only enforcement' framing is false; the writer can unilaterally bypass every trigger, hash chain, and CHECK constraint. The decoration exception (SDR-04-002) compounds this.",
+      "why_it_matters": "Breaks the foundation for 21 CFR 820.30(j) and Part 11 claims in Section 12; a single compromised orchestrator binary can retroactively rewrite history while leaving superficially valid hashes, making downstream integrity validation pointless.",
+      "proposed_fix": "Remove DROP TRIGGER privilege from the application role now (not post-hackathon); use a SECURITY DEFINER function owned by a separate DBA role for any required maintenance. Delete the 'defense-in-depth' language until implemented.",
+      "confidence": 0.95
+    },
+    {
+      "title": "Hash column lists and enum mappings create brittle synchronization surface",
+      "severity": "high",
+      "category": "data_model",
+      "location": "Sections 4.2, 4.3, 4.5 and HashColumnSyncTests (Section 13)",
+      "evidence": "`DhfHashColumns.HashedColumns` and `ToolCallHashColumns.HashedColumns` ... `HashColumnSyncTests` \u2014 asserts ... cover all non-excluded columns ... and that all listed columns exist in the schema and corresponding DTOs. ... All enums persisted to Postgres ... MUST be converted through `DhfEnumMappings` \u2014 never via `.ToString()`",
+      "problem": "Manual static lists plus switch-based mappings plus architecture tests form a fragile multi-place invariant; any added column, renamed field, or new enum value requires coordinated changes across migration, DTO, hash classes, mappings, tests, and validator. Changed sections added SDR-04-009 and the sync test but did not reduce the surface.",
+      "why_it_matters": "Complexity inflation: the design fights its own schema instead of deriving canonical form from it. Edge case of future schema evolution (inevitable post-hackathon) guarantees downstream rework and silent integrity gaps if sync test is bypassed.",
+      "proposed_fix": "Replace static lists with reflection over DTOs using [Hashed] attributes and code-generated column lists; drive both DB CHECK constraints and mappings from a single source of truth.",
+      "confidence": 0.8
+    },
+    {
+      "title": "Session open retry loop insufficient for sustained contention",
+      "severity": "medium",
+      "category": "operational_risk",
+      "location": "Section 6.1 OpenOrResumeSessionAsync (changed since R1)",
+      "evidence": "const int maxRetries = 3; ... when ((ex.SqlState == PostgresErrorCodes.SerializationFailure || ex.SqlState == PostgresErrorCodes.UniqueViolation) && attempt < maxRetries - 1) ... await Task.Delay(50 * (attempt + 1), ct);",
+      "problem": "Bounded exponential backoff with only 3 attempts; no jitter; advisory lock and Serializable transaction are held for the full lookup+close+insert path. No equivalent retry wrapper exists for AppendTurnAsync despite similar lock usage.",
+      "why_it_matters": "Under realistic concurrent add-in reconnects or orchestrator restarts (post-hackathon multi-user scenario), the loop exhausts and surfaces exceptions, breaking the 'clean session lifecycle' guarantee. Speculative but follows directly from the R1 fixes introduced here.",
+      "proposed_fix": "Increase retries with full jitter, add circuit-breaker, and wrap AppendTurnAsync in identical retry logic; document maximum lock acquisition time.",
+      "confidence": 0.7
+    }
+  ],
+  "top_3_must_fix": [
+    "DROP TRIGGER privilege renders immutability claim illusory",
+    "workstation_id trust boundary enables adversarial session termination",
+    "Hash column lists and enum mappings create brittle synchronization surface"
+  ]
+}

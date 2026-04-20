@@ -1,0 +1,123 @@
+{
+  "oracle_name": "Fran",
+  "role": "adversarial logic reviewer",
+  "document_type": "technical specification",
+  "overall_verdict": "major_revision",
+  "findings": [
+    {
+      "title": "Queue dispatches to a new STA thread, not the SolidWorks-owned apartment",
+      "severity": "critical",
+      "category": "feasibility",
+      "location": "Section 2.2",
+      "evidence": "`SwUiThreadCommandQueue` ... `holds a dedicated STA thread` ... `Every SW COM call in the codebase enters through ISwCommandQueue.ExecuteAsync(...)`.",
+      "problem": "The spec equates `STA` with `the SolidWorks UI thread` but never defines how SolidWorks COM objects are created on, or marshaled to, this dedicated worker thread. A separate STA thread is not automatically the apartment that owns the SolidWorks API objects.",
+      "why_it_matters": "If SolidWorks objects are bound to the add-in/UI apartment, executing on a different STA can still produce wrong-thread failures, COM marshaling stalls, or undefined behavior despite the queue.",
+      "proposed_fix": "Replace the dedicated STA worker with dispatch onto the actual SolidWorks/UI thread captured at add-in startup, or explicitly document and validate a COM ownership model where all SolidWorks object acquisition and use happens on the dedicated apartment.",
+      "confidence": 0.96
+    },
+    {
+      "title": "The STA worker has no defined Windows message pump",
+      "severity": "high",
+      "category": "omission",
+      "location": "Section 2.2",
+      "evidence": "`The thread pumps a BlockingCollection<SwCommand> FIFO queue.`",
+      "problem": "A `BlockingCollection` consumer loop is not a COM/Win32 message pump. The spec does not define any `GetMessage`/`DispatchMessage` loop or equivalent reentrancy handling for the STA thread.",
+      "why_it_matters": "COM STA marshaling and UI/event reentrancy depend on message pumping. Without it, calls and callbacks can deadlock or never dispatch under load.",
+      "proposed_fix": "Use the existing SolidWorks UI thread and its message loop, or specify and implement a real Windows message loop around queued execution and validate it with COM integration tests.",
+      "confidence": 0.89
+    },
+    {
+      "title": "Shutdown contract contradicts non-preemptible COM execution",
+      "severity": "high",
+      "category": "contradiction",
+      "location": "Sections 2.3, 2.4, 2.5",
+      "evidence": "Section 2.3: `COM calls are non-preemptible.` Section 2.4: `joins the STA thread with a 5-second grace timeout.` Section 2.5: `Asserts Stop drains and joins within 5 seconds`.",
+      "problem": "The spec promises a 5-second stop/join behavior that cannot be guaranteed if the currently executing COM call runs longer than 5 seconds or hangs.",
+      "why_it_matters": "Add-in unload behavior becomes nondeterministic. The build-breaking test encodes a guarantee the implementation cannot actually satisfy.",
+      "proposed_fix": "Redefine shutdown semantics to cancel only queued work, mark an executing command as indeterminate if stop is requested, and specify the unload fallback when the active COM call does not return promptly.",
+      "confidence": 0.97
+    },
+    {
+      "title": "`SHA256.HashData` is not available on the declared target framework",
+      "severity": "critical",
+      "category": "feasibility",
+      "location": "Header / Section 8.1 / Section 11.4",
+      "evidence": "Target is `.NET Framework 4.8`, but Section 8.1 uses `var hash = SHA256.HashData(...)`, and Section 11.4 again requires `SHA256.HashData`.",
+      "problem": "`SHA256.HashData` is not a .NET Framework 4.8 API.",
+      "why_it_matters": "The example implementation and Day-0 validation path do not compile on the stated runtime target.",
+      "proposed_fix": "Replace all `SHA256.HashData` usage with a .NET Framework 4.8-compatible pattern such as `SHA256.Create().ComputeHash(...)`, or retarget the project to a framework that provides the API.",
+      "confidence": 0.99
+    },
+    {
+      "title": "Tool-call deduplication is lost across reconnects",
+      "severity": "high",
+      "category": "operational_risk",
+      "location": "Sections 6.4, 9.2, 9.3",
+      "evidence": "Section 6.4: `A per-connection Dictionary<string, ToolCallTracker>`. Section 9.2: `Clears the registry.` Section 9.3: `Every new connection begins with the handshake in Section 6.2.`",
+      "problem": "Because the registry is scoped per connection and cleared on disconnect, the same `CallId` can be replayed after reconnect and will be treated as new work.",
+      "why_it_matters": "A client that retries after a dropped connection can cause duplicate model mutations even though the protocol appears to support deduplication by `CallId`.",
+      "proposed_fix": "Persist call tracking across reconnects for the same `AddinSessionId`, or explicitly declare the protocol at-least-once and require every tool to be idempotent.",
+      "confidence": 0.96
+    },
+    {
+      "title": "Internal handler bugs are mapped as client validation failures",
+      "severity": "high",
+      "category": "api_contract",
+      "location": "Section 4",
+      "evidence": "Row: `ArgumentException / ArgumentNullException -> ValidationFailed` with note `Indicates handler bug; validator should have caught it upstream.`",
+      "problem": "The mapping says these exceptions indicate a handler bug, but the returned error code tells the client its request was invalid.",
+      "why_it_matters": "This misclassifies server defects as user/input problems, which hides real bugs and can trigger the wrong retry or recovery logic upstream.",
+      "proposed_fix": "Map only explicit, documented validation-layer exceptions to `ValidationFailed`. Treat unexpected `ArgumentException`/`ArgumentNullException` from handlers or services as `InternalError` unless the source is unambiguously user-input validation.",
+      "confidence": 0.97
+    },
+    {
+      "title": "Unplanned disconnect marks executing calls as `Cancelled` even though they may still complete",
+      "severity": "high",
+      "category": "contradiction",
+      "location": "Sections 2.3 and 9.2",
+      "evidence": "Section 2.3: `The worker runs the command to completion` after execution begins. Section 9.2 step 1: `Marks all InFlight calls as Cancelled locally`.",
+      "problem": "`InFlight` includes commands that have already started. Those commands can still mutate the model after transport loss, so labeling them `Cancelled` is false.",
+      "why_it_matters": "Reconnect and audit logic can incorrectly assume no side effects occurred when the model may have changed.",
+      "proposed_fix": "Split `InFlight` into at least queued-not-started and executing states, and mark executing-on-disconnect as `Abandoned` or `UnknownOutcome` rather than `Cancelled`.",
+      "confidence": 0.97
+    },
+    {
+      "title": "`GetFeatureTree` filtering criteria are undefined",
+      "severity": "high",
+      "category": "ambiguity",
+      "location": "Section 3.4",
+      "evidence": "`feature parameter lists are filtered to named user-facing parameters only (excludes SolidWorks-internal bookkeeping parameters)`",
+      "problem": "`named user-facing` and `bookkeeping` are not defined as concrete rules. The output contract depends on subjective implementation choices.",
+      "why_it_matters": "The agent is expected to resolve concrete parameter identifiers from this output. Undefined filtering rules make the contract untestable and likely to drift across SolidWorks versions.",
+      "proposed_fix": "Define exact inclusion/exclusion criteria for parameters, including required fields and version-stability expectations, or return the full parameter list and move filtering to a higher layer.",
+      "confidence": 0.91
+    },
+    {
+      "title": "Undo-group nesting is simultaneously allowed and disallowed",
+      "severity": "high",
+      "category": "contradiction",
+      "location": "Section 3.6",
+      "evidence": "`Multiple calls with different group IDs nest; tests restrict this to at most one active group at a time.`",
+      "problem": "The contract says nested undo groups exist, but the system behavior and tests assume only one active group. The spec does not define which rule wins.",
+      "why_it_matters": "Rollback, reconnect cleanup, and `GetActiveUndoGroupId()` semantics are undefined if nesting actually occurs.",
+      "proposed_fix": "Choose one model. Either forbid nesting in the contract and enforce a single active undo group, or specify full nested-stack behavior across start, commit, rollback, disconnect, and reconnect.",
+      "confidence": 0.94
+    },
+    {
+      "title": "Deserializer sync test checks source text, not runtime behavior",
+      "severity": "medium",
+      "category": "testability",
+      "location": "Section 5.3",
+      "evidence": "`asserts that the corresponding switch case exists in GeneratedMessageDeserializer.cs`",
+      "problem": "A source-text case-presence check does not verify discriminator values, target types, nested union routing, or actual deserialization success.",
+      "why_it_matters": "The test can pass while the runtime deserializer still routes a message to the wrong type or fails on real payloads.",
+      "proposed_fix": "Add runtime round-trip tests for every concrete polymorphic type using real serialized payloads and assert successful deserialization to the expected type.",
+      "confidence": 0.93
+    }
+  ],
+  "top_3_must_fix": [
+    "Replace the dedicated STA worker with dispatch onto the actual SolidWorks-owned UI/apartment thread, or prove a valid COM ownership model.",
+    "Remove `SHA256.HashData` or retarget the runtime; the current spec does not compile on .NET Framework 4.8.",
+    "Persist tool-call deduplication across reconnects or explicitly switch the protocol to at-least-once execution semantics."
+  ]
+}

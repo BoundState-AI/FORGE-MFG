@@ -1,0 +1,79 @@
+{
+  "oracle_name": "Fran",
+  "role": "adversarial logic reviewer",
+  "document_type": "technical specification",
+  "overall_verdict": "major_revision",
+  "findings": [
+    {
+      "title": "Persisted enum values in `AppendTurnAsync` do not match the schema contract",
+      "severity": "critical",
+      "category": "api_contract",
+      "location": "Section 3.1 `dhf.entries`; Section 7 `DhfLedger.AppendTurnAsync`",
+      "evidence": "Schema: `input_modality IN ('voice', 'text')` and `turn_type IN ('execution', 'clarification', 'confirmation', 'ambiguity_resolution')`. Code: `InputModality = turn.InputModality.ToString(),` and `TurnType = turn.TurnType.ToString(),`",
+      "problem": "The write path uses raw enum `ToString()` values (`Voice`, `Text`, `Execution`, `Clarification`, `Confirmation`, `AmbiguityResolution`), which do not match the lowercase/snake_case values accepted by the database.",
+      "why_it_matters": "The core insert path fails as written, or later fixes will change hash inputs and break validation consistency.",
+      "proposed_fix": "Define explicit enum-to-storage mapping functions for every persisted enum and use them consistently in write code, validators, and hash canonicalization; do not persist raw `ToString()` output.",
+      "confidence": 0.99
+    },
+    {
+      "title": "`AppendTurnAsync` can append to a session that has already been closed",
+      "severity": "critical",
+      "category": "operational_risk",
+      "location": "Section 6.2 `Close on Shutdown`; Section 7 `DhfLedger.AppendTurnAsync`",
+      "evidence": "`CloseSessionAsync(sessionId) which sets ended_at = NOW()`. `AppendTurnAsync` reads the tip from `dhf.entries` by `session_id` and inserts new rows, but never checks `dhf.sessions.ended_at`.",
+      "problem": "A caller with a stale `SessionId` can keep writing entries after the session was closed or superseded.",
+      "why_it_matters": "This breaks the stated session lifecycle and AddinSessionId epoch semantics; entries can land in a session after the spec says it ended.",
+      "proposed_fix": "In the append transaction, load the session row `FOR UPDATE` and reject writes when `ended_at IS NOT NULL`; also validate that the caller's expected AddinSessionId matches the session row.",
+      "confidence": 0.97
+    },
+    {
+      "title": "The open/resume advisory lock is not scoped to the boundary the method later mutates",
+      "severity": "high",
+      "category": "operational_risk",
+      "location": "Section 6.1 `Open or Resume`",
+      "evidence": "Comment: `Advisory lock to serialize open-or-resume decisions per workstation.` Code: `var lockKey = $\"dhf_session_open:{metadata.WorkstationId}:{addinSessionId}\";` Later SQL: `UPDATE dhf.sessions SET ended_at = NOW() WHERE ended_at IS NULL AND workstation_id = @WorkstationId`",
+      "problem": "Different `addinSessionId` values on the same workstation take different locks, but the method then updates all open sessions for that workstation.",
+      "why_it_matters": "Concurrent opens on one workstation can race, leaving multiple open sessions or closing the wrong session.",
+      "proposed_fix": "If workstation is the intended concurrency boundary, lock on workstation only. Otherwise, narrow the UPDATE/lookup scope to the same boundary as the lock.",
+      "confidence": 0.95
+    },
+    {
+      "title": "The documented unique-violation fallback cannot work as written",
+      "severity": "high",
+      "category": "api_contract",
+      "location": "Section 3.1 `idx_sessions_open_addin_session`; Section 6.1 final note",
+      "evidence": "Unique index: `ON dhf.sessions (addin_session_id) WHERE ended_at IS NULL`. Lookup query: `WHERE addin_session_id = @AddinSessionId AND workstation_id = @WorkstationId AND ended_at IS NULL`. Note: `the second will fail on unique-violation and retry via the lookup path.`",
+      "problem": "No retry logic is specified in the code, and a retry using the documented lookup cannot recover a conflict caused by an open row on another workstation because the lookup filters by workstation.",
+      "why_it_matters": "Session-open conflicts will surface as raw database failures with undefined recovery behavior.",
+      "proposed_fix": "Add explicit SQLSTATE `23505` retry handling and make uniqueness, lookup, and retry scopes identical.",
+      "confidence": 0.96
+    },
+    {
+      "title": "`dhf.entry_decorations` mutability is specified two different ways",
+      "severity": "high",
+      "category": "contradiction",
+      "location": "Section 2 SDR-04-002; Section 3.1 `005_immutability_triggers.sql` comments",
+      "evidence": "SDR-04-002: `dhf.entry_decorations is insert-only ... decorations may be superseded by new rows, never mutated in place.` Later: `UPDATE and DELETE are permitted for operational cleanup, so no trigger.`",
+      "problem": "The spec simultaneously claims decorations are insert-only and allows updates/deletes.",
+      "why_it_matters": "Consumers cannot know whether decorations are durable audit evidence or disposable operational data.",
+      "proposed_fix": "Pick one model. If decorations are audit history, enforce insert-only. If cleanup is allowed, define owner, criteria, and how cleanup itself is audited.",
+      "confidence": 0.99
+    },
+    {
+      "title": "Viewer-triggered integrity validation is not read-only and has no dedup rule",
+      "severity": "high",
+      "category": "operational_risk",
+      "location": "Section 8.2 `Integrity Event Decoration`; Section 9 `DhfRepository`; Section 10.1 `Shallow Validation`",
+      "evidence": "`Any integrity check failure ... is written as an integrity_event decoration`. `Read-only queries only. No write methods.` `Shallow validation ... runs on every viewer page load.`",
+      "problem": "A page load can write new rows, and repeated page loads can generate duplicate `integrity_event` decorations for the same defect.",
+      "why_it_matters": "Read operations mutate the ledger, create unbounded warning spam, and change the dataset under inspection.",
+      "proposed_fix": "Keep page-load validation side-effect free, or define explicit dedup semantics and move integrity-event writes off the viewer read path.",
+      "confidence": 0.95
+    }
+  ],
+  "top_3_must_fix": [
+    "Align persisted enum serialization with the database CHECK constraints; `AppendTurnAsync` currently writes values the schema rejects.",
+    "Reject appends to closed sessions and validate AddinSessionId ownership inside `AppendTurnAsync`.",
+    "Repair `OpenOrResumeSessionAsync` so lock scope, lookup scope, uniqueness scope, and conflict-retry behavior are consistent."
+  ]
+}

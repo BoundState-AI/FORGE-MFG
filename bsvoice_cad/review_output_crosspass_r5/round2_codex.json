@@ -1,0 +1,101 @@
+{
+  "oracle_name": "Codex",
+  "role": "implementation_feasibility_reviewer",
+  "document_type": "specification_bundle",
+  "overall_verdict": "major_revision",
+  "findings": [
+    {
+      "title": "Decoration-persistence ownership is still undefined at the architecture seam after the SPEC-07 C1 change",
+      "severity": "high",
+      "category": "api_contract",
+      "location": "SPEC-00 \u00a71 Module Map; SPEC-00 \u00a72 Seam E and Seam H; SPEC-07 v1.1.2 changelog C1 / SDR-07-012",
+      "evidence": "SPEC-00 Module Map lists `SPEC-05 ... Depends On | SPEC-01, SPEC-03, SPEC-07`; Seam E says `SPEC-05 has no direct assembly reference to SPEC-04`; Seam H says `The vocabulary layer emits decoration payloads ... SPEC-04's DhfDecorationWriter persists`; SPEC-07 C1 says `SPEC-05 persists the payload via SPEC-04's DhfDecorationWriter after AppendTurnAsync returns entry_id`.",
+      "problem": "The orchestration contract still describes the old persistence path while SPEC-07 moved persistence responsibility to SPEC-05. There is no authoritative SPEC-05\u2192SPEC-04 seam, dependency declaration, or interface contract for the post-AppendTurnAsync decoration write path.",
+      "why_it_matters": "This will break implementation planning, architecture tests, and project references first: one spec forbids a SPEC-05\u2192SPEC-04 dependency while another requires it.",
+      "proposed_fix": "Add an explicit seam and module dependency for SPEC-05\u2192SPEC-04 decoration persistence, name the exact interface(s) SPEC-05 consumes, and remove stale text implying SPEC-07 persists directly.",
+      "confidence": 0.98
+    },
+    {
+      "title": "`GetFeatureTreeInput` still lacks the `Compressed` wire field required by the add-in service contract",
+      "severity": "high",
+      "category": "api_contract",
+      "location": "SPEC-01 \u00a77.1 `GetFeatureTreeInput`; SPEC-02 \u00a73.4 `ISolidWorksFeatureService.GetFeatureTree(bool includeSuppressed, bool compressed)`",
+      "evidence": "SPEC-01 defines `public record GetFeatureTreeInput : IToolInput { public bool IncludeSuppressed { get; init; } = false; }` while SPEC-02 defines `IReadOnlyList<FeatureNode> GetFeatureTree(bool includeSuppressed, bool compressed);`.",
+      "problem": "The cross-process DTO cannot express whether the caller wants compressed or full feature-tree output, but the add-in-side service requires that parameter.",
+      "why_it_matters": "The orchestrator and add-in cannot implement or test the same contract. Either the viewer/agent cannot request full output, or the add-in must invent a default not specified on the wire.",
+      "proposed_fix": "Add `Compressed` to `GetFeatureTreeInput` with default and semantics in SPEC-01, or remove the `compressed` service parameter and document a fixed behavior everywhere.",
+      "confidence": 0.99
+    },
+    {
+      "title": "SPEC-02 still uses an unsupported `FeatureTreeHash = \"OVERSIZE\"` fallback",
+      "severity": "high",
+      "category": "data_model",
+      "location": "SPEC-02 \u00a77.5 `Full Message-Size Check (v1.4.0)`",
+      "evidence": "`The resulting ToolResultMessage substitutes a placeholder StateAfter (feature tree empty, IsFeatureTreeTruncated = true, FeatureTreeHash = \"OVERSIZE\") ...`",
+      "problem": "`OVERSIZE` is not a valid `FeatureTreeHash` value under SPEC-01, which only defines a real hash or the `NO_DOCUMENT` sentinel for null-document state.",
+      "why_it_matters": "This creates protocol-invalid state snapshots that will fail validation and hash-based change detection, and it encourages consumers to special-case an undocumented sentinel.",
+      "proposed_fix": "Replace the placeholder with a SPEC-01-compliant snapshot: keep a real hash of the complete tree, or define a new protocol-level sentinel in SPEC-01 and update validators/tests accordingly.",
+      "confidence": 0.97
+    },
+    {
+      "title": "Planned-disconnect escalation still contradicts the teardown send path",
+      "severity": "high",
+      "category": "contradiction",
+      "location": "SPEC-02 \u00a79.0.2 `SendTeardownAsync`; SPEC-02 \u00a79.1.1 step 3",
+      "evidence": "\u00a79.0.2 sends teardown directly with `_webSocket.SendAsync(...)`; \u00a79.1.1 step 3 says `Do NOT attempt to send AddinTeardownMessage. The send path goes through SwUiThreadCommandQueue and would block behind the stuck COM call.`",
+      "problem": "The spec simultaneously says teardown send is direct WebSocket I/O and that it is blocked behind the SolidWorks UI-thread queue.",
+      "why_it_matters": "Shutdown behavior, observability (`explicit_shutdown` vs `heartbeat_timeout`), and test expectations cannot be implemented consistently.",
+      "proposed_fix": "Pick one authoritative threading model for teardown send and update both the normal and escalation paths, including closure-reason expectations and tests.",
+      "confidence": 0.98
+    },
+    {
+      "title": "Day-0 validation still checks a nonexistent DHF closure-reason field",
+      "severity": "high",
+      "category": "testability",
+      "location": "SPEC-02 \u00a711 `Day-0 Validation`, item 11",
+      "evidence": "`confirm the orchestrator's DHF session row shows closure reason explicit_shutdown`",
+      "problem": "The current cross-spec contract says closure reason is not stored in `dhf.sessions`; it is only emitted in structured logs.",
+      "why_it_matters": "This acceptance check is unexecutable as written and invites an implementer to add out-of-spec schema just to satisfy the test.",
+      "proposed_fix": "Change the validation step to inspect the structured log event (`session_closed`) or another explicitly specified observability surface, not the DHF row.",
+      "confidence": 0.99
+    },
+    {
+      "title": "SPEC-07 still claims pipeline success waits for durable DHF persistence after that responsibility moved to SPEC-05",
+      "severity": "high",
+      "category": "contradiction",
+      "location": "SPEC-07 \u00a70 final paragraph; SDR-07-006",
+      "evidence": "\u00a70 says `The pipeline returns success ONLY after the citation is durably written`; SDR-07-006 says `The write is awaited on the critical path ... pipeline success is reported only after durable persistence.`",
+      "problem": "Those statements are incompatible with SPEC-07 v1.1.2 C1, which moved persistence to SPEC-05 after `AppendTurnAsync` returns `entry_id`.",
+      "why_it_matters": "Callers cannot know whether a SPEC-07 success means 'payload assembled' or 'decoration durably stored', which breaks retry, telemetry, and acceptance criteria.",
+      "proposed_fix": "Rewrite SPEC-07 success semantics so a successful SPEC-07 result means payload assembly only, and move durable-write guarantees entirely into the SPEC-05 contract.",
+      "confidence": 0.98
+    },
+    {
+      "title": "`StageLatencies` still requires `DecorationWriteMs` and `TotalMs` even though SPEC-07 no longer performs the write",
+      "severity": "medium",
+      "category": "api_contract",
+      "location": "SPEC-07 \u00a76.4 `StageLatencies`; SPEC-07 \u00a73.2 latency table",
+      "evidence": "`StageLatencies` includes `DecorationWriteMs` and `TotalMs`, while \u00a73.2 says `decoration INSERT is SPEC-05's budget` and Stage 5 is `In-memory DTO construction; no I/O`.",
+      "problem": "SPEC-07's output model requires latency fields that SPEC-07 cannot compute before returning `PipelineResult`.",
+      "why_it_matters": "Implementers must either fabricate values, mutate the returned object in SPEC-05, or violate the documented ownership boundary.",
+      "proposed_fix": "Remove `DecorationWriteMs` and `TotalMs` from SPEC-07's `StageLatencies`, or define a separate SPEC-05-owned envelope that augments the pipeline result after persistence.",
+      "confidence": 0.94
+    },
+    {
+      "title": "The viewer's raw-input privacy gate has no tenant-scoped configuration contract",
+      "severity": "medium",
+      "category": "security",
+      "location": "SPEC-06 SDR-06-008; SPEC-06 \u00a73 `ViewerOptions`; SPEC-06 \u00a713 `Configuration`",
+      "evidence": "SDR-06-008 says the gate is `provisioned per-tenant ... as a tenant-level configuration flag (ViewerOptions.VocabRawInputAllowed)`, but \u00a73 defines `ViewerOptions` with only `EnableStretchEndpoints`, and \u00a713 shows no `vocabRawInputAllowed` or tenant-keyed settings.",
+      "problem": "The spec promises per-tenant gating for raw utterance/parsed-intent display, but provides no config schema or lookup interface to vary that behavior by tenant.",
+      "why_it_matters": "The privacy control cannot be implemented as specified; the likely fallback is a global flag, which would overexpose or overhide data across tenants.",
+      "proposed_fix": "Define a tenant-keyed configuration source or resolver interface for `vocab_view_raw_input`, and add the concrete config shape used by SPEC-06 at runtime.",
+      "confidence": 0.95
+    }
+  ],
+  "top_3_must_fix": [
+    "Add an explicit SPEC-05\u2192SPEC-04 decoration-persistence seam/dependency and remove stale direct SPEC-07 persistence language.",
+    "Reconcile `GetFeatureTreeInput` with the add-in service by adding/removing the `Compressed` parameter consistently.",
+    "Remove the invalid `FeatureTreeHash = \"OVERSIZE\"` fallback and make oversize snapshots conform to SPEC-01."
+  ]
+}

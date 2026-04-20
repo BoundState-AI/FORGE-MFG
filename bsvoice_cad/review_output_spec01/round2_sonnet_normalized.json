@@ -1,0 +1,306 @@
+{
+  "oracle_name": "Sonnet",
+  "role": "referee",
+  "normalized_issues": [
+    {
+      "issue_id": "R1-ISSUE-001",
+      "title": "WebSocket framing contract conflates frames with messages",
+      "severity": "medium",
+      "category": "api_contract",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "WebSocket framing guidance contradicts actual receive-loop behavior"
+        },
+        {
+          "oracle": "Fran",
+          "title": "Oversize-message handling is underspecified before `EndOfMessage` and can desynchronize the socket"
+        }
+      ],
+      "core_problem": "Section 3 simultaneously states 'Receivers MUST accumulate frames until EndOfMessage = true before deserializing' and 'System.Net.WebSockets handles frame reassembly transparently; application code never sees partial frames.' These are contradictory. Additionally, the spec does not define what a receiver must do when the 4 MiB limit is crossed mid-stream before EndOfMessage \u2014 whether to drain-and-discard remaining frames or abort the connection immediately.",
+      "best_evidence": "Section 3: 'Receivers MUST accumulate frames until EndOfMessage = true before deserializing.' vs. 'System.Net.WebSockets handles frame reassembly transparently; application code never sees partial frames.'",
+      "recommended_fix": "Remove the 'handles frame reassembly transparently' claim. Replace with an explicit receive-loop contract: partial segments must be accumulated until EndOfMessage. Add a required behavior for limit breach: either drain-and-discard remaining frames without buffering, or close/abort the WebSocket immediately.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-002",
+      "title": "4 MiB message cap conflicts with mandatory full StateSnapshot/FeatureTree payloads and no truncation contract exists",
+      "severity": "critical",
+      "category": "feasibility",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "The 4 MiB message cap conflicts with the mandatory full-state snapshot contract"
+        },
+        {
+          "oracle": "Fran",
+          "title": "The 4 MiB cap conflicts with mandatory `StateSnapshot.FeatureTree` payloads and no truncation contract exists"
+        }
+      ],
+      "core_problem": "ToolResultMessage requires StateAfter (a full StateSnapshot), StateUpdateMessage requires a full StateSnapshot, and the post-handshake InitialState trigger mandates a full-state resync \u2014 all of which include a required IReadOnlyList<FeatureNode> FeatureTree. The spec provides no truncation flags, pagination fields, or depth-limit fields on StateSnapshot. The cited 'GetFeatureTreeInput with depth limits' mitigation does not exist in the contract. Large models make the mandatory initial snapshot impossible to send without violating either completeness or the 4 MiB limit.",
+      "best_evidence": "Section 3: 'producers MUST reduce it at the application layer (e.g., GetFeatureTreeInput with depth limits)' \u2014 but GetFeatureTreeInput only has IncludeSuppressed. Section 8: StateSnapshot.FeatureTree is required. Section 5: ToolResultMessage.StateAfter is required.",
+      "recommended_fix": "Define an explicit large-state contract: add truncation/pagination metadata to StateSnapshot (e.g., IsFeatureTreeTruncated, a follow-up fetch API), or make FeatureTree optional/on-demand in mandatory envelopes with a separate GetFeatureTree call. Remove the nonexistent 'depth limits' example from Section 3 unless the fields are added.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-003",
+      "title": "Stretch tool wire types registered as callable tools with no availability gate",
+      "severity": "high",
+      "category": "scope",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "Placeholder stretch tools are exposed as real tools with no executable contract"
+        },
+        {
+          "oracle": "Fran",
+          "title": "Placeholder stretch tools are registered as real tools with no availability gate"
+        },
+        {
+          "oracle": "Grok",
+          "title": "Hash canonicalization incorrectly shifts ordering burden to producers"
+        }
+      ],
+      "core_problem": "Empty placeholder stretch tool records carry [ToolName] attributes and [JsonDerivedType] registrations, causing ToolRegistry.All to include them as callable tools. Consumers building tool catalogs from ToolRegistry or generated schemas will advertise or invoke tools with no defined fields or implementation, causing guaranteed runtime failures. No ToolMetadata.IsImplemented flag or equivalent exclusion mechanism exists.",
+      "best_evidence": "Section 7.2: 'These are empty placeholder records... [ToolName] attributes are present from day one.' Section 11: 'ToolRegistry.All reflects the Protocol assembly at static construction time, finding every type with [ToolName] attributes.'",
+      "recommended_fix": "Add an explicit IsImplemented (or ImplementationStatus) flag to ToolMetadata. Require schema generation and tool exposure (e.g., Anthropic tool catalog) to exclude tools where IsImplemented == false. Alternatively, remove placeholders from ToolRegistry entirely until their wire contracts are defined.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-004",
+      "title": "Epoch stale-rejection rule and pre-epoch error responses have no valid AddinSessionId",
+      "severity": "critical",
+      "category": "contradiction",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "Pre-epoch error responses require `AddinSessionId` when no epoch exists"
+        },
+        {
+          "oracle": "Codex",
+          "title": "Orchestrator-side rejection of invalid add-in messages has no valid wire error contract"
+        }
+      ],
+      "core_problem": "Two related but distinct problems: (1) IClientMessage requires a non-nullable AddinSessionId, but the orchestrator must send ClientProtocolErrorMessage (a version-mismatch error) before any epoch is established \u2014 no valid AddinSessionId value exists at that point. (2) The spec mandates rejection of invalid ToolResultMessage envelopes with AddinProtocolErrorCode.MalformedEnvelope and stale-epoch add-in messages with AddinProtocolErrorCode.StaleEpoch, but the receiver of those messages is the orchestrator, which can only send ClientProtocolErrorMessage \u2014 whose enum has no MalformedEnvelope or StaleEpoch values.",
+      "best_evidence": "Section 4.1: IClientMessage requires 'string AddinSessionId { get; }'. Section 9: 'Before the first AddinReadyMessage is received, no epoch exists.' Section 10: 'orchestrator sends ClientProtocolErrorMessage(ErrorCode: VersionMismatch)'. Section 5: 'Receivers MUST reject invalid envelopes with AddinProtocolErrorCode.MalformedEnvelope.' Section 6.3: ClientProtocolErrorCode only contains VersionMismatch, MessageTooLarge, UnknownMessageType.",
+      "recommended_fix": "For pre-epoch errors: define a pre-epoch exception \u2014 either make AddinSessionId nullable/optional on pre-handshake protocol errors, or specify that the orchestrator echoes the AddinReadyMessage.AddinSessionId even when the epoch is not accepted. For directional error codes: add MalformedEnvelope and StaleEpoch to ClientProtocolErrorCode (orchestrator-emittable), or define a single bidirectional protocol-error envelope with a unified code set.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-005",
+      "title": "StateSnapshot null-document and live-document invariants are incomplete",
+      "severity": "high",
+      "category": "data_model",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "Null-document snapshots can still carry stale document-scoped fields"
+        },
+        {
+          "oracle": "Fran",
+          "title": "Live-document snapshot invariants are underdefined and validator coverage appears incomplete"
+        },
+        {
+          "oracle": "Codex",
+          "title": "`StateSnapshot` leaves document-present and sketch-active invariants undefined"
+        }
+      ],
+      "core_problem": "Two gaps: (1) When IsNullDocumentState=true, the rules only constrain Units, DocumentId, FeatureTree, FeatureTreeHash, and IsSketchActive \u2014 but DocumentName, DocumentType, ActiveSketchId, and ActiveSelection are unconstrained, allowing stale metadata to leak. (2) When IsNullDocumentState=false, only Units is required to be non-null; DocumentId, DocumentName, DocumentType are still nullable with no stated requirement, and the ActiveSketchId/IsSketchActive relationship is undefined (e.g., IsSketchActive=false with non-null ActiveSketchId is permitted).",
+      "best_evidence": "Section 8 null-document rules list only 5 constraints. Section 8 live-document rule: 'When IsNullDocumentState is false, Units MUST be non-null.' \u2014 no other live-document invariants stated. Section 14 StateSnapshotValidator description only covers the IsNullDocumentState=true branch.",
+      "recommended_fix": "Extend null-document rules to cover all document-scoped fields (DocumentName=null, DocumentType=null, ActiveSketchId=null, ActiveSelection=empty). Add live-document invariants (DocumentId, DocumentName, DocumentType required when IsNullDocumentState=false). Add sketch-state invariant (ActiveSketchId required iff IsSketchActive=true, forbidden otherwise). Make all of these build-breaking validator/test requirements.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-011",
+      "title": "Hash canonicalization contradicts itself on whether array ordering is producer responsibility or canonicalizer responsibility",
+      "severity": "high",
+      "category": "contradiction",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "Hash-ordering rules contradict the property-test requirement for reordered arrays"
+        },
+        {
+          "oracle": "Fran",
+          "title": "Hash canonicalization contradicts itself on whether array order is normalized"
+        },
+        {
+          "oracle": "Grok",
+          "title": "Hash canonicalization incorrectly shifts ordering burden to producers"
+        }
+      ],
+      "core_problem": "Section 13 states 'Arrays are hashed in their serialized order. Producers MUST emit arrays in canonical order' \u2014 placing ordering responsibility on producers. The same section then requires property tests to 'assert that logical equality (including reordered-but-equivalent arrays) implies hash equality' \u2014 which is only possible if HashCanonicalizer sorts arrays internally. These two rules are mutually exclusive unless the canonicalizer sorts, which the first rule denies.",
+      "best_evidence": "Section 13: 'Arrays are hashed in their serialized order. Producers MUST emit arrays in canonical order...' and 'HashCanonicalization_PropertyTests ... assert that logical equality (including reordered-but-equivalent arrays) implies hash equality.'",
+      "recommended_fix": "Choose one model: (A) HashCanonicalizer sorts all hashed arrays itself before hashing \u2014 remove the 'Producers MUST emit arrays in canonical order' requirement, keep the reorder-invariance property test; or (B) Producers must pre-sort, reordered arrays produce different hashes \u2014 remove the reorder-invariance claim from the property test. Option A is preferred as it eliminates distributed ordering logic.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-014",
+      "title": "ScreenshotResult file-path design creates permanent architectural lock-in",
+      "severity": "high",
+      "category": "feasibility",
+      "merged_from": [
+        {
+          "oracle": "Grok",
+          "title": "Brittle co-location assumption embedded in core wire types"
+        }
+      ],
+      "core_problem": "ScreenshotResult transmits a file path rather than image bytes or a content-addressable reference, hard-coding a Windows co-location assumption into the wire contract itself. This cannot be relaxed without a breaking wire-contract change, contradicting the spec's claim that deployment constraints are out of scope rather than load-bearing on the protocol.",
+      "best_evidence": "Section 0: 'This constraint is load-bearing: ScreenshotResult (Section 7.1) transmits file paths rather than image bytes.' Section 7.1: ScreenshotResult.FilePath is 'Absolute path in shared screenshot dir'.",
+      "recommended_fix": "Acknowledge explicitly in the spec that this is a v1-only design decision with a known v2 migration path. Consider adding a content-addressable reference field (e.g., a URI scheme that works for both local paths and remote URLs) to ease future migration, or at minimum document the exact breaking change required for remote deployment.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-006",
+      "title": "Version-mismatch error message may be undeserializable by the mismatched peer",
+      "severity": "high",
+      "category": "api_contract",
+      "merged_from": [
+        {
+          "oracle": "Grok",
+          "title": "Version-mismatch error message uses version-specific format"
+        }
+      ],
+      "core_problem": "When protocol versions diverge, the orchestrator sends ClientProtocolErrorMessage serialized under its own version. If the divergence includes changes to polymorphic registrations, record layouts, or enum values, the add-in may be unable to deserialize the error message \u2014 defeating the purpose of the handshake diagnostic.",
+      "best_evidence": "Section 10: 'Mismatch \u2192 orchestrator sends ClientProtocolErrorMessage(ErrorCode: VersionMismatch) with both versions populated, then closes the WebSocket. Exact string match required.'",
+      "recommended_fix": "Define a minimal, stable plain-JSON error format outside the polymorphic families that both sides can always parse regardless of version divergence (e.g., a fixed flat JSON object with type, errorCode, expectedVersion, receivedVersion), or send the error as a WebSocket text frame with a documented fixed schema before closing.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-012",
+      "title": "G29 decimal format can emit scientific notation, contradicting the no-scientific-notation rule",
+      "severity": "medium",
+      "category": "contradiction",
+      "merged_from": [],
+      "core_problem": "Section 13 states HashCanonicalizer.FormatDecimal calls value.ToString(\"G29\", CultureInfo.InvariantCulture) and 'post-processes any scientific-notation output into expanded decimal form.' The spec acknowledges G29 can produce scientific notation but relies on post-processing. This is a known fragility that the spec itself flags via HashDecimalFormatTests \u2014 the fix is in the implementation, not the spec text, but the spec should be clearer that G29 alone is insufficient.",
+      "best_evidence": "Section 13: 'calls value.ToString(\"G29\", CultureInfo.InvariantCulture) and post-processes any scientific-notation output into expanded decimal form. HashDecimalFormatTests verifies no scientific notation appears for edge-case values.'",
+      "recommended_fix": "This issue was partially addressed in R1 by adding the post-processing note and tests. Confirm the post-processing algorithm is specified (not just referenced) so implementers can reproduce it without reading source code. Consider specifying the exact expansion algorithm inline.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R2-ISSUE-001",
+      "title": "AddinSessionId generation underspecified: GetMachineGuid behavior, collision risk, and format validation absent",
+      "severity": "medium",
+      "category": "operational_risk",
+      "merged_from": [
+        {
+          "oracle": "Grok",
+          "title": "AddinSessionId generation and validation underspecified for adversarial conditions"
+        }
+      ],
+      "core_problem": "The GenerateAddinSessionId implementation references GetMachineGuid() without defining its behavior, entropy source, or fallback. No collision analysis is provided for rapid restarts or VM snapshot restore scenarios. No format/length validator is specified in Validation/Validators for the 32-character lowercase hex format. The epoch mechanism becomes a single point of failure if two sessions produce the same ID.",
+      "best_evidence": "Section 9: 'var machineGuid = GetMachineGuid();' \u2014 undefined. 'return Convert.ToHexString(hash)[..32].ToLowerInvariant();' \u2014 no validator specified.",
+      "recommended_fix": "Specify GetMachineGuid() behavior (e.g., reads HKLM\\SOFTWARE\\Microsoft\\Cryptography\\MachineGuid on Windows). Add a strict regex/length validator (32 lowercase hex chars) to Validation/Validators. Document collision probability and define recovery behavior (e.g., if a new AddinReadyMessage arrives with the same AddinSessionId as the current epoch, treat it as a reconnect).",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-016",
+      "title": "Over-specified CI test suite creates fragile build dependency",
+      "severity": "low",
+      "category": "testability",
+      "merged_from": [
+        {
+          "oracle": "Grok",
+          "title": "Over-specified CI tests create brittle dependency on perfect test environment"
+        }
+      ],
+      "core_problem": "Mandating 1000 FsCheck randomized cases as build-breaking creates non-deterministic CI failures dependent on FsCheck seed and machine performance. The combination of reflection-based completeness tests, schema sync tests, and architecture tests in every PR creates high-friction protocol changes.",
+      "best_evidence": "Section 15: 'HashCanonicalization_PropertyTests (FsCheck): 1000 randomized trees' listed as build-breaking.",
+      "recommended_fix": "Reduce property test iterations to 100 for CI (keep 1000 for nightly). This is a low-priority quality-of-life issue that does not affect correctness.",
+      "conflict_flag": false,
+      "weak_signal": true
+    }
+  ],
+  "dropped_findings": [
+    {
+      "oracle": "Grok",
+      "title": "Brittle co-location assumption embedded in core wire types",
+      "reason": "duplicate \u2014 merged into R1-ISSUE-014 (ScreenshotResult file-path design creates permanent architectural lock-in)"
+    },
+    {
+      "oracle": "Fran",
+      "title": "Oversize-message handling is underspecified before EndOfMessage and can desynchronize the socket",
+      "reason": "duplicate \u2014 the oversize-before-EndOfMessage behavior gap is merged into R1-ISSUE-001 (WebSocket framing contract)"
+    },
+    {
+      "oracle": "Codex",
+      "title": "WebSocket framing guidance contradicts actual receive-loop behavior",
+      "reason": "duplicate \u2014 merged into R1-ISSUE-001"
+    },
+    {
+      "oracle": "Codex",
+      "title": "Orchestrator-side rejection of invalid add-in messages has no valid wire error contract",
+      "reason": "duplicate \u2014 merged into R1-ISSUE-004 (epoch/pre-epoch error contract)"
+    },
+    {
+      "oracle": "Fran",
+      "title": "Malformed add-in envelopes cannot be reported with any valid client-side error code",
+      "reason": "duplicate \u2014 merged into R1-ISSUE-004"
+    },
+    {
+      "oracle": "Fran",
+      "title": "Pre-epoch error responses require AddinSessionId when no epoch exists",
+      "reason": "duplicate \u2014 merged into R1-ISSUE-004"
+    },
+    {
+      "oracle": "Codex",
+      "title": "The 4 MiB message cap conflicts with the mandatory full-state snapshot contract",
+      "reason": "duplicate \u2014 merged into R1-ISSUE-002"
+    },
+    {
+      "oracle": "Fran",
+      "title": "The 4 MiB cap conflicts with mandatory StateSnapshot.FeatureTree payloads and no truncation contract exists",
+      "reason": "duplicate \u2014 merged into R1-ISSUE-002"
+    },
+    {
+      "oracle": "Codex",
+      "title": "Placeholder stretch tools are exposed as real tools with no executable contract",
+      "reason": "duplicate \u2014 merged into R1-ISSUE-003"
+    },
+    {
+      "oracle": "Fran",
+      "title": "Placeholder stretch tools are registered as real tools with no availability gate",
+      "reason": "duplicate \u2014 merged into R1-ISSUE-003"
+    },
+    {
+      "oracle": "Codex",
+      "title": "Hash-ordering rules contradict the property-test requirement for reordered arrays",
+      "reason": "duplicate \u2014 merged into R1-ISSUE-011"
+    },
+    {
+      "oracle": "Fran",
+      "title": "Hash canonicalization contradicts itself on whether array order is normalized",
+      "reason": "duplicate \u2014 merged into R1-ISSUE-011"
+    },
+    {
+      "oracle": "Grok",
+      "title": "Hash canonicalization incorrectly shifts ordering burden to producers",
+      "reason": "duplicate \u2014 merged into R1-ISSUE-011"
+    },
+    {
+      "oracle": "Codex",
+      "title": "StateSnapshot leaves document-present and sketch-active invariants undefined",
+      "reason": "duplicate \u2014 merged into R1-ISSUE-005"
+    },
+    {
+      "oracle": "Fran",
+      "title": "Null-document snapshots can still carry stale document-scoped fields",
+      "reason": "duplicate \u2014 merged into R1-ISSUE-005"
+    },
+    {
+      "oracle": "Fran",
+      "title": "Live-document snapshot invariants are underdefined and validator coverage appears incomplete",
+      "reason": "duplicate \u2014 merged into R1-ISSUE-005"
+    }
+  ]
+}

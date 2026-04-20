@@ -1,0 +1,101 @@
+{
+  "oracle_name": "Fran",
+  "role": "adversarial logic reviewer",
+  "document_type": "wire protocol specification",
+  "overall_verdict": "major_revision",
+  "findings": [
+    {
+      "title": "Large-message streaming is required but not specified",
+      "severity": "critical",
+      "category": "api_contract",
+      "location": "Section 3 \u2014 Wire Framing",
+      "evidence": "\"Maximum single-message size: 4 MiB. Above this, the sender breaks the payload (e.g., large feature tree) into streamed smaller messages.\"",
+      "problem": "The spec mandates chunking for oversized payloads but defines no chunk message types, correlation fields, ordering rules, completion markers, reassembly behavior, integrity checks, or error handling.",
+      "why_it_matters": "Messages above 4 MiB cannot be implemented interoperably. This also conflicts with the claim that this spec defines all cross-process wire types.",
+      "proposed_fix": "Either define the chunked-transfer wire contract in this spec or remove streaming and require explicit rejection of any message larger than 4 MiB with a defined error code.",
+      "confidence": 0.99
+    },
+    {
+      "title": "Stretch tool wire types are included in the protocol without field definitions",
+      "severity": "high",
+      "category": "scope",
+      "location": "Section 0 \u2014 Scope; Section 7.2 \u2014 Stretch Tools",
+      "evidence": "\"This spec defines every type that crosses a process boundary\" and \"Full field definitions are deferred to stretch implementation ... the Protocol project scaffolds the record files with `// TODO: STRETCH` markers so the polymorphic registrations are complete from day one.\"",
+      "problem": "The document claims complete wire-type coverage while explicitly leaving some registered input/result records undefined.",
+      "why_it_matters": "Consumers cannot generate schemas, validators, or compatible serializers/deserializers for these tools. Any later field definition becomes an unstated wire-contract change.",
+      "proposed_fix": "Either fully specify every registered stretch tool record now or remove those types and registrations from the protocol until their fields are defined.",
+      "confidence": 0.98
+    },
+    {
+      "title": "Epoch rollover rule would reject the AddinReady message that announces the new epoch",
+      "severity": "high",
+      "category": "contradiction",
+      "location": "Section 9 \u2014 AddinSessionId and Epoch",
+      "evidence": "\"A message with an `AddinSessionId` other than the current epoch is rejected with `AddinProtocolErrorMessage(ErrorCode: \\\"STALE_EPOCH\\\")`.\" and \"The epoch changes only when `AddinReadyMessage` arrives with a new `AddinSessionId`.\"",
+      "problem": "No exception is defined for the first `AddinReadyMessage` of a new session, so the stale-epoch rule rejects the only message that can establish the new epoch.",
+      "why_it_matters": "Reconnects or add-in restarts are logically impossible without an unstated special case in consumers.",
+      "proposed_fix": "Explicitly define `AddinReadyMessage` as the only message allowed to introduce a new `AddinSessionId`, and specify how current epoch is initialized and replaced on connection/session changes.",
+      "confidence": 0.98
+    },
+    {
+      "title": "StateSnapshot requires Units even when there is no active document",
+      "severity": "high",
+      "category": "data_model",
+      "location": "Section 8 \u2014 State Snapshot",
+      "evidence": "\"public required UnitSystem Units { get; init; }\" with nullable `DocumentId`, `DocumentType?`, `FeatureTreeHash` allowing the `\"NO_DOCUMENT\"` sentinel, and `required bool IsNullDocumentState`.",
+      "problem": "The contract requires a unit system even for null-document state, but no unit value is defined when no document exists.",
+      "why_it_matters": "Implementations must either invent a fake unit value or violate the contract, making null-document snapshots inconsistent across producers.",
+      "proposed_fix": "Make `Units` nullable in null-document state or add an explicit sentinel enum member such as `Unknown`/`None` and define when it is used.",
+      "confidence": 0.96
+    },
+    {
+      "title": "ToolResultMessage success/result/error invariants are not enforced anywhere",
+      "severity": "high",
+      "category": "testability",
+      "location": "Section 5 \u2014 ToolResultMessage; Section 14 \u2014 Validation",
+      "evidence": "`Result { get; init; } // Null when Success = false`, `Error { get; init; } // Null when Success = true`, and \"Every `IToolInput` has a matching `AbstractValidator<T>`\".",
+      "problem": "The mutually exclusive relationship among `Success`, `Result`, and `Error` exists only in comments. The validation section covers tool inputs only, not top-level messages.",
+      "why_it_matters": "Invalid states such as `Success=true` with `Error` populated, or both `Result` and `Error` null, remain wire-valid and leave receiver behavior undefined.",
+      "proposed_fix": "Add explicit validators and build-breaking tests for top-level message invariants, at minimum enforcing `(Success && Result != null && Error == null) || (!Success && Result == null && Error != null)`.",
+      "confidence": 0.95
+    },
+    {
+      "title": "ToolRegistry does not define duplicate tool-name handling",
+      "severity": "medium",
+      "category": "governance",
+      "location": "Section 11 \u2014 Tool Registry and Schema Generation",
+      "evidence": "\"`ToolRegistry.All` reflects the Protocol assembly ... finding every type with `[ToolName]` attributes that implement `IToolInput` or `IToolResult`.\" and \"`ToolRegistryCompletenessTests` asserts every registered input has a matching result and vice versa.\"",
+      "problem": "The spec defines pairing but never states that each tool name must map to exactly one input type and exactly one result type.",
+      "why_it_matters": "Duplicate `[ToolName(\"...\")]` annotations can create ambiguous lookups, nondeterministic schema generation, or wrong type resolution at runtime.",
+      "proposed_fix": "Define one-to-one uniqueness for tool names as a protocol invariant and add a build-breaking test that rejects multiple input or result types for the same tool name.",
+      "confidence": 0.93
+    },
+    {
+      "title": "Wire framing text conflates WebSocket frames with messages",
+      "severity": "medium",
+      "category": "api_contract",
+      "location": "Section 3 \u2014 Wire Framing",
+      "evidence": "\"WebSocket frame boundaries define message boundaries.\" and \"Large messages that fragment at the WebSocket layer are reassembled by `System.Net.WebSockets` before deserialization.\"",
+      "problem": "These statements conflict. Fragmented WebSocket messages span multiple frames, so frame boundaries cannot define application message boundaries.",
+      "why_it_matters": "An implementer could incorrectly parse per frame, which breaks fragmented messages.",
+      "proposed_fix": "State that one complete JSON document maps to one WebSocket message, and explicitly say frame boundaries are irrelevant to application parsing.",
+      "confidence": 0.99
+    },
+    {
+      "title": "Decimal canonicalization rule is self-contradictory",
+      "severity": "medium",
+      "category": "contradiction",
+      "location": "Section 8 \u2014 State Snapshot; Section 13 \u2014 Hash Canonicalization",
+      "evidence": "\"`FeatureParameterNumber` uses `decimal` to eliminate floating-point nondeterminism in hashing. `HashCanonicalizer` serializes decimals with fixed-precision string conversion.\" and later \"`\\\"G29\\\" format for decimal, no scientific notation`\".",
+      "problem": "`G29` is not fixed precision and can emit exponent notation for some values, which conflicts with the stated `no scientific notation` rule.",
+      "why_it_matters": "Hash outputs can diverge across implementations or edge cases, undermining the determinism requirement.",
+      "proposed_fix": "Specify an exact decimal serialization algorithm that never emits scientific notation and add tests for extreme scales and magnitudes.",
+      "confidence": 0.91
+    }
+  ],
+  "top_3_must_fix": [
+    "Specify or remove the >4 MiB streaming/chunking mechanism in the wire contract.",
+    "Resolve the AddinSessionId epoch rollover contradiction so a new AddinReadyMessage can be accepted.",
+    "Remove or fully define all stretch-tool wire types before keeping them registered in the protocol."
+  ]
+}

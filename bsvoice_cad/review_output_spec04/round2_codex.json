@@ -1,0 +1,68 @@
+{
+  "oracle_name": "Codex",
+  "role": "implementation-feasibility reviewer",
+  "document_type": "technical spec",
+  "overall_verdict": "major_revision",
+  "findings": [
+    {
+      "title": "Timestamp insertion path violates the stated canonicalization rule",
+      "severity": "critical",
+      "category": "contradiction",
+      "location": "Section 4.1; Section 7 `AppendTurnAsync` step 3-4",
+      "evidence": "Section 4.1: \"The same normalized string MUST be used for both the INSERT parameter and the hash input.\" Section 7: `Timestamp = turn.Timestamp, CanonicalTimestamp = canonicalTimestamp, // Used for hash input`",
+      "problem": "The code path still stores the raw `turn.Timestamp` while hashing `canonicalTimestamp`. That contradicts the spec's own requirement and leaves DB persistence dependent on Npgsql/Postgres timestamp normalization behavior rather than the canonical value used for hashing.",
+      "why_it_matters": "A non-UTC or sub-microsecond input can round/truncate differently on insert than in the hash input, causing recomputed hashes to diverge after round-trip and making validation nondeterministic across environments.",
+      "proposed_fix": "Normalize `turn.Timestamp` to a concrete UTC microsecond-precision value before constructing `DhfEntryRecord`, use that exact normalized value for the DB parameter and for hash computation, and add an integration test covering non-UTC offsets and 7-digit fractional ticks.",
+      "confidence": 0.96
+    },
+    {
+      "title": "Session close/split operations are not coordinated with append operations",
+      "severity": "critical",
+      "category": "operational_risk",
+      "location": "Section 6.1 `OpenOrResumeSessionCore`; Section 6.2 `Close on Shutdown`; Section 7 `AppendTurnAsync`",
+      "evidence": "Section 6.1: `pg_advisory_xact_lock(hashtext(@k))` with `lockKey = $\"dhf_session_open:{metadata.WorkstationId}\"`; Section 7: `lockKey = $\"dhf_append:{turn.SessionId}\"`; Section 6.2 only says `CloseSessionAsync(sessionId)` sets `ended_at = NOW()`.",
+      "problem": "Open/resume/close uses a workstation-scoped lock, while append uses a session-scoped lock. These lock domains do not coordinate, so a session can be closed or split while an append is in flight. `AppendTurnAsync` also has no retry path for serialization failures.",
+      "why_it_matters": "This can drop turns on transient `40001` errors or allow commits that the application semantically considers post-close, depending on transaction interleaving.",
+      "proposed_fix": "Make close/split acquire the same per-session lock(s) used by append, or lock the target session rows consistently (`FOR UPDATE`) before both close and append decisions; add bounded retry handling for serialization failures in `AppendTurnAsync`.",
+      "confidence": 0.9
+    },
+    {
+      "title": "The supersede decoration model has no write interface",
+      "severity": "high",
+      "category": "api_contract",
+      "location": "Section 2 SDR-04-002; Section 8 `WriteDecorationAsync`; Section 9.1 `DecorationRow`",
+      "evidence": "SDR-04-002: \"new decoration rows may reference `supersedes_decoration_id` to logically replace a prior decoration\". Section 8 writer signature: `WriteDecorationAsync(Guid entryId, DecorationType type, JsonElement payload, string createdBy, CancellationToken ct)` and INSERT omits `supersedes_decoration_id`.",
+      "problem": "The spec requires insert-with-supersede behavior, but the only defined writer API cannot supply the prior decoration ID or express replacement semantics.",
+      "why_it_matters": "The declared data model cannot be implemented or tested as written, and readers have no contract for resolving which decoration is current after replacement.",
+      "proposed_fix": "Add an explicit supersede-capable API/parameter, define validation rules for replacement, and define the read contract for active-vs-superseded decorations.",
+      "confidence": 0.95
+    },
+    {
+      "title": "Integrity-event deduplication is contradictory and not enforceable under concurrency",
+      "severity": "high",
+      "category": "operational_risk",
+      "location": "Section 8.2 `Integrity Event Decoration`; Section 3.1 `004_entry_decorations.sql`",
+      "evidence": "Section 8.2: \"it checks for an existing `integrity_event` decoration of the same `eventType` on the same entry before inserting a new one. If an identical event already exists, no new row is written.\" The table/index definition has no unique constraint supporting that rule.",
+      "problem": "The dedup rule alternates between `same eventType` and `identical event`, which are not the same key. There is also no unique index or upsert strategy, so concurrent deep validations can still insert duplicates.",
+      "why_it_matters": "Dedup behavior becomes nondeterministic: distinct failures can be collapsed if they share an `eventType`, or duplicate rows can appear under concurrent validation runs.",
+      "proposed_fix": "Define a single dedup key explicitly (for example `entry_id + eventType + decoration_hash`) and enforce it with a unique index plus `INSERT ... ON CONFLICT DO NOTHING`.",
+      "confidence": 0.97
+    },
+    {
+      "title": "Cross-workstation collision handling can terminate another active session based on an untrusted identifier",
+      "severity": "high",
+      "category": "security",
+      "location": "Section 2 SDR-04-008; Section 6.1 cross-workstation branch",
+      "evidence": "SDR-04-008: \"This assumes `workstation_id` is a stable, non-spoofed machine identifier\" and \"A spoofed or colliding `workstation_id` can cause one orchestrator to prematurely close another's sessions.\" Section 6.1: \"Same AddinSessionId on a DIFFERENT workstation... Close the stale session before opening a new one.\"",
+      "problem": "The implementation automatically closes an existing open session on another workstation when `addin_session_id` matches, even though the trust boundary is explicitly acknowledged as spoofable/collidable.",
+      "why_it_matters": "A collision or spoof can silently split another workstation's ledger session and misattribute or interrupt writes, which is hard to detect after the fact.",
+      "proposed_fix": "Do not auto-close cross-workstation conflicts. Reject them as a recoverable error or require a stronger authenticated machine/instance identity before allowing one workstation to close another's session.",
+      "confidence": 0.91
+    }
+  ],
+  "top_3_must_fix": [
+    "Use the exact same normalized UTC microsecond timestamp value for both hash input and DB insertion.",
+    "Coordinate session close/split with append using the same locking/retry model.",
+    "Define and enforce a real integrity-event dedup key with a DB constraint/upsert path."
+  ]
+}

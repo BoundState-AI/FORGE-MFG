@@ -1,0 +1,320 @@
+{
+  "oracle_name": "Sonnet",
+  "role": "referee",
+  "normalized_issues": [
+    {
+      "issue_id": "R1-ISSUE-001",
+      "title": "Persisted enum values in AppendTurnAsync do not satisfy schema CHECK constraints",
+      "severity": "critical",
+      "category": "api_contract",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "Persisted enum values in `AppendTurnAsync` do not match the schema contract"
+        },
+        {
+          "oracle": "Codex",
+          "title": "AppendTurnAsync uses enum strings that do not satisfy entry table CHECK constraints"
+        }
+      ],
+      "core_problem": "The write path calls raw .ToString() on InputModality and TurnType enums, producing PascalCase values ('Voice', 'Text', 'Execution', etc.) that do not match the lowercase/snake_case literals required by the schema CHECK constraints ('voice', 'text', 'execution', 'ambiguity_resolution'). Core entry inserts will fail at runtime.",
+      "best_evidence": "Schema: `CHECK (input_modality IN ('voice', 'text'))` and `CHECK (turn_type IN ('execution', 'clarification', 'confirmation', 'ambiguity_resolution'))`. Code: `InputModality = turn.InputModality.ToString()` and `TurnType = turn.TurnType.ToString()`.",
+      "recommended_fix": "Define explicit enum-to-storage mapping functions for every persisted enum (InputModality, TurnType, ToolCallLifecycleState, UndoGroupOutcome) and use them consistently in write code, validators, and hash canonicalization. Add tests for every enum value.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-002",
+      "title": "WriteDecorationAsync enum conversion cannot produce required snake_case decoration_type literals",
+      "severity": "critical",
+      "category": "api_contract",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "WriteDecorationAsync cannot insert any documented decoration type with the shown enum conversion"
+        }
+      ],
+      "core_problem": "WriteDecorationAsync uses `type.ToString().ToLowerInvariant()` which produces 'rationalextraction', 'manualannotation', 'ambiguitycontext', 'integrityevent' \u2014 none of which match the schema's required snake_case literals ('rationale_extraction', 'manual_annotation', 'ambiguity_context', 'integrity_event'). All decoration inserts will fail.",
+      "best_evidence": "`Type = type.ToString().ToLowerInvariant()` but schema requires `decoration_type IN ('rationale_extraction','manual_annotation','ambiguity_context','integrity_event')`. DecorationWriterTests are listed as build-breaking in Section 13.",
+      "recommended_fix": "Define a stable enum-to-storage mapping for DecorationType (e.g., attribute-based or dictionary) and reuse it in inserts, reads, and tests.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-003",
+      "title": "AppendTurnAsync allows writes to closed sessions with no lifecycle guard",
+      "severity": "critical",
+      "category": "operational_risk",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "`AppendTurnAsync` can append to a session that has already been closed"
+        },
+        {
+          "oracle": "Codex",
+          "title": "AppendTurnAsync allows entries to be written into a closed session"
+        }
+      ],
+      "core_problem": "AppendTurnAsync reads the chain tip and inserts entries by session_id without ever checking dhf.sessions.ended_at. A stale caller holding a closed SessionId can continue appending entries after the session was closed or superseded, breaking the epoch semantics defined in SDR-04-004/005.",
+      "best_evidence": "CloseSessionAsync sets `ended_at = NOW()`. AppendTurnAsync queries `dhf.entries WHERE session_id = @SessionId` and inserts without any reference to `dhf.sessions.ended_at`.",
+      "recommended_fix": "Inside the append transaction, SELECT the session row FOR UPDATE and raise an exception if ended_at IS NOT NULL. Optionally also validate that the caller's expected AddinSessionId matches the session row.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-004",
+      "title": "OpenOrResumeSessionAsync advisory lock scope does not match the workstation-level mutation it performs",
+      "severity": "high",
+      "category": "concurrency",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "The open/resume advisory lock is not scoped to the boundary the method later mutates"
+        },
+        {
+          "oracle": "Codex",
+          "title": "OpenOrResumeSessionAsync does not actually serialize decisions per workstation"
+        }
+      ],
+      "core_problem": "The advisory lock key includes addinSessionId (`dhf_session_open:{workstationId}:{addinSessionId}`), so concurrent open/resume calls with different addinSessionIds on the same workstation take different locks. However, the UPDATE that closes prior sessions operates on all open sessions for the workstation. This mismatch allows concurrent races that can close the wrong session or leave multiple open sessions.",
+      "best_evidence": "`var lockKey = $\"dhf_session_open:{metadata.WorkstationId}:{addinSessionId}\"` but `UPDATE dhf.sessions SET ended_at = NOW() WHERE ended_at IS NULL AND workstation_id = @WorkstationId`.",
+      "recommended_fix": "Lock on workstation only (drop addinSessionId from the lock key) to match the scope of the UPDATE, or narrow the UPDATE to only close sessions with a different addinSessionId and document the resulting semantics.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-005",
+      "title": "Documented unique-violation retry fallback for session open is not implemented",
+      "severity": "high",
+      "category": "failure_handling",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "The documented unique-violation fallback cannot work as written"
+        },
+        {
+          "oracle": "Codex",
+          "title": "The spec promises retry-on-race behavior for session open, but the shown method has no retry logic"
+        }
+      ],
+      "core_problem": "The spec states 'the second will fail on unique-violation and retry via the lookup path' but OpenOrResumeSessionAsync contains no catch/retry loop for SQLSTATE 23505 or serialization failures (40001). Additionally, even if retry were added, the lookup filters by workstation_id which would miss a conflict caused by an open row on a different workstation. Concurrent orchestrator startup will surface raw DB failures.",
+      "best_evidence": "No catch/retry block exists in the shown OpenOrResumeSessionAsync code. The lookup query filters `AND workstation_id = @WorkstationId` but the unique index is on `(addin_session_id) WHERE ended_at IS NULL` without workstation scoping.",
+      "recommended_fix": "Add explicit bounded retry handling for SQLSTATE 23505 and 40001. Ensure the retry re-reads the open session using the same scope as the unique index (addin_session_id only, not workstation-scoped) to correctly recover from cross-workstation conflicts.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-006",
+      "title": "entry_decorations mutability policy is internally contradictory",
+      "severity": "high",
+      "category": "contradiction",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "`dhf.entry_decorations` mutability is specified two different ways"
+        },
+        {
+          "oracle": "Codex",
+          "title": "The decoration mutability policy is internally contradictory"
+        }
+      ],
+      "core_problem": "SDR-04-002 states decorations are 'insert-only' and 'never mutated in place.' The trigger comment in 005_immutability_triggers.sql states 'UPDATE and DELETE are permitted for operational cleanup, so no trigger.' These are incompatible policies. Consumers and implementers cannot determine whether decoration mutation is a defect or an allowed operation.",
+      "best_evidence": "SDR-04-002: 'dhf.entry_decorations is insert-only ... never mutated in place.' 005 comment: 'UPDATE and DELETE are permitted for operational cleanup, so no trigger.'",
+      "recommended_fix": "Choose one policy. If insert-only, add triggers and remove the cleanup allowance. If cleanup is permitted, define the allowed operations, who may perform them, and how cleanup events are themselves audited.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-007",
+      "title": "Viewer page-load shallow validation writes integrity_event decorations with no deduplication",
+      "severity": "high",
+      "category": "operational_risk",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "Viewer-triggered integrity validation is not read-only and has no dedup rule"
+        },
+        {
+          "oracle": "Codex",
+          "title": "Repeated validation failures can append unbounded duplicate integrity_event decorations"
+        }
+      ],
+      "core_problem": "Section 10.1 states shallow validation runs on every viewer page load. Section 8.2 states any integrity check failure is written as an integrity_event decoration. No deduplication or idempotency rule is defined. A persistent mismatch generates a new decoration row on every page load, creating unbounded storage growth and making a nominally read-only path a write source.",
+      "best_evidence": "Section 10.1: 'Shallow Validation ... runs on every viewer page load.' Section 8.2: 'Any integrity check failure ... is written as an integrity_event decoration.' IDhfRepository is declared 'Read-only queries only. No write methods.'",
+      "recommended_fix": "Either make page-load validation side-effect free (no writes), or define explicit deduplication semantics (e.g., check for existing open integrity_event of same type before inserting) and move integrity-event writes off the viewer read path.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-008",
+      "title": "Tool-call addinSessionId not validated against owning DHF session during append",
+      "severity": "high",
+      "category": "data_model",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "Tool-call addin session IDs are not enforced to match the owning DHF session"
+        }
+      ],
+      "core_problem": "ToolCallRecord carries its own AddinSessionId field. AppendTurnAsync inserts tool call rows without comparing their AddinSessionId to the owning session's addin_session_id. The schema has no constraint preventing this. Mixed-epoch tool calls can be recorded under a single entry, undermining SDR-04-004/005.",
+      "best_evidence": "`ToolCallRecord` has `public required string AddinSessionId { get; init; }`. AppendTurnAsync calls `MapToolCallRow(tc, entry.EntryId)` with no epoch validation. No FK or CHECK constraint enforces consistency.",
+      "recommended_fix": "Either remove the redundant per-tool-call addinSessionId (deriving it from the session) or enforce equality with the owning session's addin_session_id during append and add a DB-level constraint.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-009",
+      "title": "DbUp journal table bootstrap dependency: journal lives in schema created by first migration",
+      "severity": "high",
+      "category": "feasibility",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "DbUp journal placement creates a bootstrap dependency on a schema that does not exist yet"
+        }
+      ],
+      "core_problem": "DbUp must read its journal table to determine which scripts to run, but dhf.schema_versions is defined inside 001_initial_schema.sql which also creates the dhf schema. On a fresh database, DbUp cannot access the journal before running the migration that creates it.",
+      "best_evidence": "Spec: 'Idempotent via DbUp's journal table (`dhf.schema_versions`)'. 001_initial_schema.sql: `CREATE SCHEMA IF NOT EXISTS dhf;` and `CREATE TABLE dhf.schema_versions (...)`.",
+      "recommended_fix": "Specify a bootstrap step that creates the dhf schema and journal table before DbUp migration discovery runs, or configure DbUp to use a pre-existing schema (e.g., public) for its journal.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-010",
+      "title": "Regulatory table incorrectly claims user identity is stored per entry; schema stores it per session only",
+      "severity": "high",
+      "category": "contradiction",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "The regulatory mapping claims per-entry user identity, but the schema stores identity only per session"
+        }
+      ],
+      "core_problem": "Section 12 regulatory table states 'User identity stored per entry' as partial coverage for 21 CFR Part 11 \u00a711.70. However, user_identity exists only on dhf.sessions; dhf.entries has no user identity column. This misstates audit capability.",
+      "best_evidence": "Section 12: 'User identity stored per entry'. dhf.sessions has `user_identity TEXT NOT NULL`. dhf.entries has no user identity column.",
+      "recommended_fix": "Correct the regulatory table claim to 'per session' or add immutable user identity fields to dhf.entries if per-entry attribution is actually required for the regulatory framing.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-011",
+      "title": "Read API (IDhfRepository) exposes undefined DTO contracts to downstream consumers",
+      "severity": "high",
+      "category": "omission",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "The read API exposes undefined DTO contracts to downstream consumers"
+        }
+      ],
+      "core_problem": "IDhfRepository returns DhfSessionSummary, DhfSessionDetail, DhfEntrySummary, DhfEntryDetail, ToolCallRow, and DecorationRow, but none of these types are defined in this spec or listed as imported dependencies. Field lists, nullability, sort order, and pagination semantics are all absent.",
+      "best_evidence": "Section 9 declares the interface but provides no type definitions. SPEC-06 is listed as a consumer. DhfRepositoryTests are listed as build-breaking in Section 13.",
+      "recommended_fix": "Define all repository DTOs with field lists, nullability, sort order, and pagination semantics, or explicitly reference the spec where they are defined.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-012",
+      "title": "Timestamp normalization for hashing is unspecified; TIMESTAMPTZ round-trip may produce hash mismatches",
+      "severity": "medium",
+      "category": "testability",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "Speculative: hashed timestamp normalization is unspecified across .NET and Postgres storage"
+        }
+      ],
+      "core_problem": "Section 4.1 defines HashCanonicalizer rules but does not specify how DateTimeOffset/TIMESTAMPTZ values are normalized before hashing. Postgres TIMESTAMPTZ normalizes to UTC and may truncate sub-microsecond precision. If the in-memory DateTimeOffset serializes differently than the value read back from Postgres, shallow validation will produce false failures.",
+      "best_evidence": "Section 4.1 specifies decimal serialization format ('G29') but is silent on DateTimeOffset/TIMESTAMPTZ normalization. Timestamp is in DhfHashColumns.HashedColumns and is hashed before insert, then re-read for validation.",
+      "recommended_fix": "Require UTC normalization and fixed precision (e.g., microseconds) before hashing and before INSERT, or store the canonical timestamp string that was hashed alongside the TIMESTAMPTZ column.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-013",
+      "title": "Immutability enforcement is ineffective against the orchestrator itself given DROP TRIGGER privilege",
+      "severity": "medium",
+      "category": "security",
+      "merged_from": [
+        {
+          "oracle": "Grok",
+          "title": "Immutability model is security theater given orchestrator DROP TRIGGER rights"
+        }
+      ],
+      "core_problem": "The spec acknowledges the orchestrator has DROP TRIGGER privilege and can drop triggers, mutate rows, and recreate triggers. The 'defense-in-depth' framing is accurate but the triggers provide no protection against the sole writer. This weakens the regulatory foundation claim.",
+      "best_evidence": "Section 3.2: 'the orchestrator also has DROP TRIGGER privilege (it's the only DB user in hackathon scope). A malicious or buggy orchestrator could drop triggers, mutate rows, and recreate triggers.'",
+      "recommended_fix": "The spec already discloses this honestly and defers to post-hackathon role separation. For the current scope, ensure the regulatory framing consistently says 'foundation' not 'enforcement.' Post-hackathon: separate DBA and application roles as noted.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-014",
+      "title": "Deep validation creates brittle dependency on filesystem state for ACC-02 acceptance criterion",
+      "severity": "medium",
+      "category": "testability",
+      "merged_from": [
+        {
+          "oracle": "Grok",
+          "title": "Deep validation creates brittle external dependency on filesystem state and retention policy"
+        }
+      ],
+      "core_problem": "ACC-02 requires deep validation to pass with zero warnings, but deep validation recomputes screenshot SHA-256 from files on disk. Any container restart, file move, or premature cleanup breaks ACC-02. The spec mitigates this with a manual 'do not run cleanup-screenshots.ps1' instruction, which is fragile.",
+      "best_evidence": "Section 10.2: 'Recomputes screenshot_before_sha256 and screenshot_after_sha256 from file bytes on disk, if the files exist.' ACC-02: 'Screenshots must be retained through ACC-02 execution. cleanup-screenshots.ps1 MUST NOT be run before ACC-02 passes.'",
+      "recommended_fix": "Store screenshot SHA-256 at capture time as the authoritative value. Make deep validation treat missing files as warnings (already done) but also document that ACC-02 can pass with warnings if screenshots are absent, or pin screenshots to a test fixture path.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-015",
+      "title": "Session isolation relies on workstation_id which may be spoofable or shared across VMs",
+      "severity": "medium",
+      "category": "security",
+      "merged_from": [
+        {
+          "oracle": "Grok",
+          "title": "Session isolation depends on untrustworthy workstation_id as security boundary"
+        }
+      ],
+      "core_problem": "The close-other-sessions logic and advisory lock scoping both rely on workstation_id as a trust boundary. If workstation_id can be spoofed, cloned, or shared (e.g., VMs, containers), one orchestrator instance can prematurely close another's sessions.",
+      "best_evidence": "`UPDATE dhf.sessions SET ended_at = NOW() WHERE ended_at IS NULL AND workstation_id = @WorkstationId` \u2014 this closes all open sessions for a workstation on any new load.",
+      "recommended_fix": "Document the trust assumption for workstation_id explicitly. For hackathon scope this is acceptable; post-hackathon consider a stronger machine fingerprint or accept that the close-other-sessions behavior is intentional (only one orchestrator per workstation).",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-016",
+      "title": "Hash canonicalization column lists are a brittle synchronization point with schema evolution",
+      "severity": "medium",
+      "category": "data_model",
+      "merged_from": [
+        {
+          "oracle": "Grok",
+          "title": "Hash canonicalization lists create brittle synchronization point with schema and DTOs"
+        }
+      ],
+      "core_problem": "DhfHashColumns and ToolCallHashColumns are static ordered arrays. Any added column, renamed field, or DTO change not perfectly mirrored in both lists silently breaks validation or creates unverifiable historical entries. The design chose manual column lists over a single canonical serialization of the DTO.",
+      "best_evidence": "Static arrays in DhfHashColumns.HashedColumns and ToolCallHashColumns.HashedColumns. Notes explicitly exclude certain columns (feature_tree_before/after JSONB blobs, tool_call_id, entry_id).",
+      "recommended_fix": "Add architecture tests that assert the column lists are complete and consistent with the schema and DTOs. Consider whether a single canonical DTO serialization (excluding implementation IDs) would be simpler and less error-prone for future schema evolution.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-017",
+      "title": "Writer computes its own hashes with no external witness; self-attestation limits regulatory credibility",
+      "severity": "low",
+      "category": "governance",
+      "merged_from": [
+        {
+          "oracle": "Grok",
+          "title": "Writer computes its own hashes; no external witness or WORM storage for regulatory intent"
+        }
+      ],
+      "core_problem": "The orchestrator both generates events and computes/stores their hashes. A compromised orchestrator can fabricate transcripts and matching hashes; the chain validates but contains chosen lies. This is a fundamental limitation of self-attesting audit logs.",
+      "best_evidence": "AppendTurnAsync computes tipHash, toolCallsHash, RecordHash, then INSERTs all of them. Section 12 lists this as partial Part 11 coverage.",
+      "recommended_fix": "The spec already frames this as 'foundation' not 'compliant.' For hackathon scope this is acceptable. Post-hackathon: consider a separate privileged hash-computation service or external witness. No immediate action required beyond ensuring regulatory language stays conservative.",
+      "conflict_flag": false,
+      "weak_signal": true
+    }
+  ],
+  "dropped_findings": []
+}

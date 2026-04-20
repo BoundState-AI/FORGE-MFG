@@ -1,0 +1,68 @@
+{
+  "oracle_name": "Codex",
+  "role": "implementation-feasibility reviewer",
+  "document_type": "specification",
+  "overall_verdict": "revise",
+  "findings": [
+    {
+      "title": "Queued-call cancellation on disconnect is not implementable with the specified interfaces",
+      "severity": "high",
+      "category": "feasibility",
+      "location": "Sections 2.4, 6.5, 9.2",
+      "evidence": "Section 2.4: \"`CancellationToken` causes the `TaskScheduler` to transition the task to `Canceled` without executing the delegate.\" Section 6.5: \"If `CallId` is new: enqueue and track as `Queued`.\" Section 9.2: \"`Queued` calls \u2192 marked `Cancelled`. Their Tasks are completed with `OperationCanceledException`.\"",
+      "problem": "The spec requires disconnect handling to cancel already-enqueued tool calls, but it does not define any per-call `CancellationTokenSource`, queue handle, or dequeue API that `DisconnectHandler`/`ToolCallRegistry` can use to cancel posted work before the UI thread starts it.",
+      "why_it_matters": "Without a concrete cancellation hook, queued commands can still run after the registry says `Cancelled`, causing post-disconnect model mutations and making reconnect behavior nondeterministic.",
+      "proposed_fix": "Define ownership of a per-call `CancellationTokenSource` in the registry and require that token to be passed into `ISwCommandQueue.ExecuteAsync`, or extend `ISwCommandQueue` with a removable work-item handle and specify exact state-transition ordering during disconnect.",
+      "confidence": 0.96
+    },
+    {
+      "title": "Oversized WebSocket message handling leaves the connection state undefined",
+      "severity": "high",
+      "category": "api_contract",
+      "location": "Section 6.2",
+      "evidence": "\"A maximum message size of 1 MB is enforced; messages exceeding this limit are rejected with `AddinProtocolErrorMessage(ErrorCode = \"MESSAGE_TOO_LARGE\")` and the accumulated buffer is discarded.\"",
+      "problem": "Discarding only the accumulated buffer is insufficient for a fragmented WebSocket message. The spec does not say whether the receiver must continue reading and discarding frames until `EndOfMessage`, or close the socket immediately.",
+      "why_it_matters": "If unread frames from the oversized message remain on the socket, the next `ReceiveAsync` continues the same message and corrupts message framing for all subsequent traffic.",
+      "proposed_fix": "Specify one required behavior: either drain and discard until `EndOfMessage` before resuming normal reads, or close the WebSocket with a message-too-large policy and reset session state.",
+      "confidence": 0.94
+    },
+    {
+      "title": "Handshake ordering depends on client behavior because the server-side gate is unspecified",
+      "severity": "high",
+      "category": "operational_risk",
+      "location": "Sections 6.3 and 6.4",
+      "evidence": "Section 6.3 step 5 sends `StateUpdateMessage(Trigger = InitialState)` and step 6 says \"Client may now send `IClientMessage`s.\" Section 6.4 says \"Dispatches incoming messages by polymorphic type.\"",
+      "problem": "The document states when the client should start sending, but it does not define what the add-in does if messages arrive before the initial state snapshot is sent or before handshake completion is recorded server-side.",
+      "why_it_matters": "A pipelined `tool_call` can race the initial `StateUpdateMessage`, breaking the stated ordering guarantees around `StateVersion` and allowing model mutation before the baseline snapshot exists.",
+      "proposed_fix": "Define an explicit handshake state in `MessageDispatcher`: do not dispatch `IClientMessage`s until `AddinReadyMessage` and the initial state snapshot have been sent, or reject/buffer pre-handshake messages with a dedicated protocol error.",
+      "confidence": 0.93
+    },
+    {
+      "title": "Screenshot path validation contradicts the stated read-only ownership model",
+      "severity": "high",
+      "category": "contradiction",
+      "location": "Sections 7.2 and 7.4",
+      "evidence": "Section 7.2: \"The orchestrator is read-only.\" Section 7.4: \"The orchestrator validates that this path is readable from its process context by creating and deleting a temporary file.\"",
+      "problem": "Creating and deleting a file tests write access, not read access, and directly violates the declared rule that the orchestrator is read-only.",
+      "why_it_matters": "This fails in deployments where the orchestrator legitimately has only read permission to the shared directory, and it widens filesystem permissions beyond what the spec claims is required.",
+      "proposed_fix": "Replace the temp-file probe with a true read/accessibility check, or define an add-in-written probe file that the orchestrator only reads.",
+      "confidence": 0.98
+    },
+    {
+      "title": "`AddinSessionId` uniqueness guarantee is stronger than the implementation provides",
+      "severity": "medium",
+      "category": "feasibility",
+      "location": "Sections 8.1 and 8.2",
+      "evidence": "Section 8.1: \"guaranteed to change on add-in reload\" and the implementation uses `var loadTimestamp = DateTime.UtcNow.Ticks;` as part of the input.",
+      "problem": "`DateTime.UtcNow.Ticks` is not a monotonic unique reload identifier. Rapid reloads in the same process or clock rollback can produce the same input tuple, so the stated guarantee is not actually established by the algorithm.",
+      "why_it_matters": "If a session ID repeats, stale-epoch detection and `ToolCallRegistry` scoping can collide across add-in reloads.",
+      "proposed_fix": "Use a random 128-bit value (`Guid.NewGuid()` or equivalent) for `AddinSessionId`, or weaken the document language to probabilistic uniqueness and state the collision assumptions explicitly.",
+      "confidence": 0.84
+    }
+  ],
+  "top_3_must_fix": [
+    "Define a concrete cancellation mechanism for queued tool calls so disconnect-time `Cancelled` behavior can actually be enforced.",
+    "Specify mandatory oversized-WebSocket handling that drains the rest of the message or closes the socket to preserve framing.",
+    "Add a server-side handshake gate so `IClientMessage`s cannot execute before the initial state snapshot is sent."
+  ]
+}

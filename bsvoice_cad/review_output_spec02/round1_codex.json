@@ -1,0 +1,134 @@
+{
+  "oracle_name": "Codex",
+  "role": "implementation-feasibility reviewer",
+  "document_type": "technical specification",
+  "overall_verdict": "major_revision",
+  "findings": [
+    {
+      "title": "Queue targets a private STA thread instead of the SolidWorks UI apartment",
+      "severity": "critical",
+      "category": "feasibility",
+      "location": "Section 2.1-2.2",
+      "evidence": "Section 2.1: \"A call ... from anything other than the SolidWorks UI thread produces COMException 0x8001010E\"; Section 2.2: \"It holds a dedicated STA thread ... Every SW COM call in the codebase enters through ISwCommandQueue.ExecuteAsync(...)\"",
+      "problem": "The design identifies the SolidWorks UI thread as the required COM apartment, but the implementation marshals work to a separate queue-owned STA thread. A different STA is not the same apartment as the SolidWorks main thread.",
+      "why_it_matters": "Cross-apartment COM access can still fail or behave unpredictably even though the target thread is STA. The required queue tests only prove apartment state, not correctness against real SolidWorks COM objects.",
+      "proposed_fix": "Dispatch onto the actual SolidWorks apartment/thread, or explicitly define and validate an architecture where all SolidWorks COM object acquisition and use occur exclusively on the queue-owned STA with real integration tests proving it is supported.",
+      "confidence": 0.98
+    },
+    {
+      "title": "Forced disconnect can leave non-preemptible COM work mutating the model after the client is dropped",
+      "severity": "critical",
+      "category": "operational_risk",
+      "location": "Sections 2.3, 6.1, and 9.1",
+      "evidence": "Section 2.3: \"COM calls cannot be interrupted... The worker runs the command to completion\"; Section 9.1: \"Waits ... up to 60 seconds; forced drop otherwise\"; Section 6.1: \"On new connection attempt while a client is active, the current client is dropped\"",
+      "problem": "The spec allows the connection to be dropped after 60 seconds even though the executing command cannot be stopped and will continue running to completion.",
+      "why_it_matters": "A replacement client can connect and receive an initial state while the previous command is still changing the model. Rollback and dedup cleanup can race with ongoing mutations, producing inconsistent state and duplicated side effects.",
+      "proposed_fix": "Do not accept a replacement client or clear session state while a command is still executing. Define a degraded mode that blocks reconnect until the COM call finishes, or require terminating/reloading the add-in/process when a command exceeds the disconnect grace period.",
+      "confidence": 0.97
+    },
+    {
+      "title": "Deduplication state is lost on reconnect, allowing the same CallId to re-execute side effects",
+      "severity": "high",
+      "category": "operational_risk",
+      "location": "Sections 6.4, 9.1, and 9.2",
+      "evidence": "Section 6.4: \"A per-connection Dictionary<string, ToolCallTracker>\"; Sections 9.1 and 9.2: \"Clears ToolCallRegistry\" on disconnect",
+      "problem": "`ToolCallRegistry` is scoped to a WebSocket connection and is explicitly cleared on disconnect, so retries after a transport loss are treated as brand-new tool calls.",
+      "why_it_matters": "If the original tool completed but its result was lost, reconnecting and resending the same `CallId` can repeat mutating operations such as sketching or extruding against an already-modified model.",
+      "proposed_fix": "Scope deduplication to `AddinSessionId` instead of the socket connection, and retain `InFlight`/`Completed` records across reconnects until TTL expiry or explicit session reset.",
+      "confidence": 0.96
+    },
+    {
+      "title": "The spec uses `SHA256.HashData`, which is unavailable on .NET Framework 4.8",
+      "severity": "high",
+      "category": "feasibility",
+      "location": "Section 8.1 and Section 11 step 4",
+      "evidence": "Section 8.1 code: \"var hash = SHA256.HashData(...)\"; Section 11 step 4: \"SHA256.HashData and File.WriteAllBytes measured...\"; target is \".NET Framework 4.8\"",
+      "problem": "`SHA256.HashData` is not part of the .NET Framework 4.8 API surface.",
+      "why_it_matters": "The documented implementation and Day-0 validation step cannot compile or run as written on the stated target framework.",
+      "proposed_fix": "Replace `SHA256.HashData` with a net48-compatible helper such as `using var sha = SHA256.Create(); sha.ComputeHash(...)`, or specify a compatibility package that provides the API.",
+      "confidence": 0.99
+    },
+    {
+      "title": "WebSocket fragmentation handling is specified incorrectly",
+      "severity": "high",
+      "category": "api_contract",
+      "location": "Section 6.1",
+      "evidence": "\"Framing: one JSON document per WebSocket message. System.Net.WebSockets reassembles fragmented frames before the application sees them.\"",
+      "problem": "`System.Net.WebSockets` does not guarantee a whole message per receive call; callers must accumulate fragments until `EndOfMessage`.",
+      "why_it_matters": "Implementing the bridge from this text will produce partial-JSON parse failures or truncated messages under normal fragmentation behavior.",
+      "proposed_fix": "Specify an explicit receive loop that buffers frames until `EndOfMessage`, enforces a maximum message size, and only then deserializes one JSON document.",
+      "confidence": 0.99
+    },
+    {
+      "title": "Undo-group nesting is contradicted by the rest of the contract",
+      "severity": "high",
+      "category": "contradiction",
+      "location": "Section 3.6, Section 9.3, and Section 10",
+      "evidence": "Section 3.6: \"Multiple calls with different group IDs nest\" and \"tests restrict this to at most one active group at a time\"; Section 9.3 cleanup only checks `GetActiveUndoGroupId() != null`",
+      "problem": "The API advertises nested undo groups, but the observable state and cleanup logic only model a single active group.",
+      "why_it_matters": "Implementers cannot know whether nested groups are supported. Reconnect cleanup cannot safely unwind nested groups when only one active ID is exposed.",
+      "proposed_fix": "Either forbid nesting in the service contract and reject `StartUndoGroup` when one is already active, or define full stack semantics (`GetActiveUndoGroups`, cleanup order, tests) for nested groups.",
+      "confidence": 0.95
+    },
+    {
+      "title": "State versioning has no ordering contract between SolidWorks events and tool-result snapshots",
+      "severity": "high",
+      "category": "operational_risk",
+      "location": "Section 1 (Events/EventRelay), Section 6.3, and Section 8.3",
+      "evidence": "Project shape: \"EventRelay.cs # SW events \u2192 StateUpdateMessage\"; Section 6.3: tool calls run through `ISwCommandQueue`; Section 8.3: `StateVersionCounter` \"Increments monotonically on every StateUpdateMessage and ToolResultMessage.StateAfter\"",
+      "problem": "The spec never defines how event-driven state captures are serialized relative to tool execution and `StateAfter` snapshots.",
+      "why_it_matters": "A tool can trigger SolidWorks events before or after its own `StateAfter` capture, causing out-of-order or duplicate versions and making downstream state reconciliation untestable.",
+      "proposed_fix": "Route all event-originated state capture through the same queue and a single version allocator, and define ordering/coalescing rules between event updates and `ToolResultMessage.StateAfter`.",
+      "confidence": 0.9
+    },
+    {
+      "title": "`ExecuteAsync` reentrancy on the owned STA thread is unspecified",
+      "severity": "high",
+      "category": "feasibility",
+      "location": "Section 2.2",
+      "evidence": "`ISwCommandQueue` exposes `IsOnStaThread`, but the comment says it \"must not be used for flow control\"; no behavior is defined for `ExecuteAsync` when called from the queue's own STA thread",
+      "problem": "If code already running on the STA thread calls `ExecuteAsync` and waits on the returned task, the queue can self-deadlock.",
+      "why_it_matters": "This can surface in nested service calls, event handlers, or helper code added later. The spec gives implementers no safe reentrancy rule.",
+      "proposed_fix": "Define one behavior explicitly: either execute inline when already on the owner thread, or reject nested `ExecuteAsync` calls with a deterministic exception and tests.",
+      "confidence": 0.88
+    },
+    {
+      "title": "`HttpListener` deployment prerequisites are omitted",
+      "severity": "high",
+      "category": "feasibility",
+      "location": "Section 6.1 and Section 11",
+      "evidence": "Section 6.1: \"Uses `System.Net.HttpListener`\" and binds `ws://127.0.0.1:7878/bsvoice-cad`; Day-0 validation only says the sample server \"binds\"",
+      "problem": "`HttpListener` on Windows commonly requires HTTP.sys URL ACL registration for non-admin processes, but the spec defines no installer/provisioning step.",
+      "why_it_matters": "The add-in may fail to start its bridge on standard-user machines even if the code is correct.",
+      "proposed_fix": "Add a deployment requirement that reserves the URL prefix during installation, or switch to a listener implementation that does not depend on HTTP.sys URL ACLs.",
+      "confidence": 0.8
+    },
+    {
+      "title": "`NewPart` lacks a concrete template-resolution contract",
+      "severity": "high",
+      "category": "api_contract",
+      "location": "Section 3.2",
+      "evidence": "\"Supported templates: `default_mm`, `default_inch`.\"",
+      "problem": "The spec defines symbolic template names but not how they map to actual SolidWorks template files or user settings.",
+      "why_it_matters": "On clean machines or misconfigured profiles, `NewPart` can fail or trigger interactive template dialogs, which would stall the automation path.",
+      "proposed_fix": "Define the exact source of the template path for each symbolic name, startup validation for missing templates, and the precise error returned when resolution fails.",
+      "confidence": 0.91
+    },
+    {
+      "title": "`CloseDocument` does not define behavior for unsaved changes or prompt suppression",
+      "severity": "high",
+      "category": "api_contract",
+      "location": "Section 3.2",
+      "evidence": "\"Closes the named document. Does not save.\"",
+      "problem": "The contract omits what happens when the target document is dirty and SolidWorks would normally show a save/discard prompt.",
+      "why_it_matters": "A modal prompt on the SolidWorks UI blocks the STA queue and can hang the adapter indefinitely.",
+      "proposed_fix": "Specify silent-close behavior explicitly, including the COM flags or settings used to suppress prompts, and define the returned error when a dirty document cannot be closed non-interactively.",
+      "confidence": 0.87
+    }
+  ],
+  "top_3_must_fix": [
+    "Replace the private queue-owned STA thread with dispatch onto the actual SolidWorks apartment, or prove an all-COM-on-owned-STA model against real SolidWorks COM objects.",
+    "Define disconnect behavior for non-preemptible executing commands so the add-in cannot drop/replace a client while COM work is still mutating the model.",
+    "Persist or session-scope ToolCallRegistry state across reconnects so a retried `CallId` cannot replay side-effecting tools after transport loss."
+  ]
+}

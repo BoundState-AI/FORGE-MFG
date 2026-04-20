@@ -1,0 +1,101 @@
+{
+  "oracle_name": "Codex",
+  "role": "implementation-feasibility reviewer",
+  "document_type": "architecture/orchestration contract",
+  "overall_verdict": "major_revision",
+  "findings": [
+    {
+      "title": "SPEC-03 dependency on SPEC-04 is contradicted by the module map",
+      "severity": "high",
+      "category": "contradiction",
+      "location": "Section 1 \"Module Map\"; Section 2 \"Seam C: SPEC-03 \u2192 SPEC-04\"; Section 5 \"Review Order\"",
+      "evidence": "\"SPEC-03 | Tool-Call Lifecycle | ... | Depends On | SPEC-01\" vs \"The lifecycle layer emits a `DhfTurnContext` (defined in SPEC-04)\" and later \"SPEC-03 ... depends on SPEC-01, 02, 04\".",
+      "problem": "The top-level dependency graph is internally inconsistent about whether SPEC-03 consumes SPEC-04.",
+      "why_it_matters": "This breaks build ordering, ownership boundaries, and architecture-test rules before implementation starts.",
+      "proposed_fix": "Make the dependency graph consistent in all sections and list the exact SPEC-04 interfaces/types consumed by SPEC-03.",
+      "confidence": 0.99
+    },
+    {
+      "title": "DHF append trigger contradicts the stated per-turn ledger granularity",
+      "severity": "critical",
+      "category": "contradiction",
+      "location": "Section 2 \"Seam C: SPEC-03 \u2192 SPEC-04\"; Section 3 \"Mandatory vs Stretch\"; Section 6 \"Glossary\"",
+      "evidence": "\"Every terminal lifecycle transition produces a DHF write\"; \"per-turn DHF\"; \"Turns are the DHF-entry granularity\"; \"Turn: ... possibly containing 0+ tool calls.\"",
+      "problem": "If a turn can contain multiple tool calls, writing on every terminal lifecycle transition conflicts with one DHF entry per turn.",
+      "why_it_matters": "This blocks schema design, hash-chain semantics, viewer timeline behavior, and acceptance-test expectations.",
+      "proposed_fix": "Specify whether the ledger appends once per turn or once per tool call; if both are required, define separate record types and their hash-chain relationship.",
+      "confidence": 0.98
+    },
+    {
+      "title": "Timeout/cancel semantics are not implementable as written for synchronous STA COM calls",
+      "severity": "critical",
+      "category": "feasibility",
+      "location": "Section 2 \"Seam B: SPEC-03 \u2192 SPEC-02\"; Section 6 \"Tool-Call Lifecycle State\" and \"Quarantine\"",
+      "evidence": "\"SPEC-02 provides a synchronous method surface; SPEC-03 wraps each call in its own timeout and cancel semantics.\" and terminal states include \"TimedOut\" and \"Cancelled\".",
+      "problem": "Once a synchronous COM call is dispatched on the STA thread, SPEC-03 cannot reliably cancel it; a timed-out call can continue mutating SolidWorks while the orchestration layer treats it as terminal and quarantines late outcomes.",
+      "why_it_matters": "This creates ledger/CAD-state divergence, breaks undo-group guarantees, and makes failure handling non-deterministic.",
+      "proposed_fix": "Define the exact cancellation boundary: pre-dispatch only, cooperative cancellation points inside SPEC-02, or a mandatory post-timeout recovery/lockout flow before subsequent turns.",
+      "confidence": 0.96
+    },
+    {
+      "title": "The DTO ownership rule conflicts with `DhfTurnContext` being defined outside the Protocol module",
+      "severity": "high",
+      "category": "contradiction",
+      "location": "Section 2 \"Seam A: SPEC-01 \u2192 everyone\"; Section 2 \"Seam C: SPEC-03 \u2192 SPEC-04\"",
+      "evidence": "\"Architecture rule: no DTO types exist outside `BSVoiceCAD.Protocol.*` namespaces.\" and \"The lifecycle layer emits a `DhfTurnContext` (defined in SPEC-04)\".",
+      "problem": "The document bans DTOs outside Protocol while simultaneously introducing a cross-module data carrier in SPEC-04.",
+      "why_it_matters": "Architecture tests and module ownership become ambiguous, causing churn over where boundary types belong.",
+      "proposed_fix": "Either move all cross-module contract types into SPEC-01 or narrow the rule to cross-process wire DTOs and explicitly allow internal module-boundary models.",
+      "confidence": 0.95
+    },
+    {
+      "title": "Placing cross-module NetArchTest rules in lower-numbered spec tests inverts the claimed build graph",
+      "severity": "high",
+      "category": "feasibility",
+      "location": "Section 2 intro",
+      "evidence": "\"Violations are detected by `NetArchTest` rules living in the test project of the lower-numbered spec.\"",
+      "problem": "To verify seams against higher-numbered assemblies, lower-numbered test projects must reference modules that are supposed to depend on them, which undermines the stated leaf-module and review-order model.",
+      "why_it_matters": "CI/build isolation becomes circular and lower-numbered specs can no longer be built or reviewed independently.",
+      "proposed_fix": "Move seam-validation rules to a dedicated architecture/integration test project that is allowed to reference all modules.",
+      "confidence": 0.93
+    },
+    {
+      "title": "DHF session termination has no crash/disconnect/restart contract",
+      "severity": "high",
+      "category": "operational_risk",
+      "location": "Section 6 \"DHF Session\"",
+      "evidence": "\"Closes when a different AddinSessionId arrives or on orchestrator shutdown.\"",
+      "problem": "The contract omits what happens when the add-in crashes, the WebSocket disconnects, the orchestrator is killed, or either side restarts without a clean shutdown.",
+      "why_it_matters": "Open sessions can remain dangling indefinitely, and viewer/integrity logic cannot determine whether a session ended cleanly or was abandoned.",
+      "proposed_fix": "Define disconnect detection, heartbeat/timeout rules, restart recovery, and how end reasons are recorded in the ledger.",
+      "confidence": 0.94
+    },
+    {
+      "title": "Day-0 validation includes a stretch dependency that the scope says can be descoped",
+      "severity": "medium",
+      "category": "scope",
+      "location": "Section 3 \"Mandatory vs Stretch\"; Section 7 \"Build-Readiness\"",
+      "evidence": "\"voice ... all stretch\" and later \"Day-0 validation on ... Whisper.net CUDA\".",
+      "problem": "A component listed as stretch is still treated as part of day-0 validation, which makes a descopable feature a practical blocker.",
+      "why_it_matters": "This creates avoidable schedule risk and inconsistent CI/release criteria.",
+      "proposed_fix": "Remove Whisper/CUDA from mandatory day-0 validation or explicitly split mandatory and optional validation tracks.",
+      "confidence": 0.91
+    },
+    {
+      "title": "AddinSessionId generation is underspecified for uniqueness and testability",
+      "severity": "medium",
+      "category": "omission",
+      "location": "Section 6 \"AddinSessionId\"",
+      "evidence": "\"UUID generated fresh on each add-in load, deterministically from (machineGuid, swProcessId, loadTimestamp).\"",
+      "problem": "The UUID version/hash algorithm, timestamp precision, UTC handling, and source/fallback for `machineGuid` are not defined.",
+      "why_it_matters": "Session collisions or environment-specific generation differences would corrupt the DHF session epoch and `StateVersion` reset behavior.",
+      "proposed_fix": "Specify the UUID derivation algorithm, required timestamp precision/timezone normalization, and fallback behavior when `machineGuid` is unavailable.",
+      "confidence": 0.88
+    }
+  ],
+  "top_3_must_fix": [
+    "Resolve the contradiction between per-turn DHF entries and \"every terminal lifecycle transition produces a DHF write.\"",
+    "Define realistic timeout/cancel behavior for synchronous STA COM calls so timed-out operations cannot silently mutate CAD state outside the ledger.",
+    "Make the dependency graph consistent, especially the SPEC-03 \u2194 SPEC-04 relationship, before locking review/build order."
+  ]
+}

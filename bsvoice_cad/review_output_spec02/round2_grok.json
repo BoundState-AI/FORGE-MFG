@@ -1,0 +1,68 @@
+{
+  "oracle_name": "ContrarianOracle",
+  "role": "contrarian_reviewer",
+  "document_type": "Technical Specification",
+  "overall_verdict": "major_revision",
+  "findings": [
+    {
+      "title": "Brittle SynchronizationContext installation in non-WinForms STA host",
+      "severity": "high",
+      "category": "feasibility",
+      "location": "Section 2.2",
+      "evidence": "If no `SynchronizationContext` is installed on that thread, the add-in installs a `WindowsFormsSynchronizationContext` ... before capturing",
+      "problem": "SolidWorks own message pump and potential co-existing add-ins expect native STA behavior; injecting WinForms context can alter modal dialog handling, COM event delivery ordering, or introduce hidden message filters that only surface under load or specific UI actions (e.g. property manager pages).",
+      "why_it_matters": "The entire threading model, reentrancy rule, and cancellation semantics rest on this assumption; opposite assumption (SW thread already owns its context) makes the install path a latent source of deadlocks or lost messages not exercised by StaCommandQueueTests.",
+      "proposed_fix": "Capture existing context without replacement; provide custom SynchronizationContext subclass that only posts to SW's known window handle message queue, removing WinForms dependency.",
+      "confidence": 0.75
+    },
+    {
+      "title": "ToolCallRegistry state machine survives only in-memory process lifetime",
+      "severity": "critical",
+      "category": "operational_risk",
+      "location": "Sections 6.5, 8.2, 9.2 and 9.3",
+      "evidence": "`ToolCallRegistry` is session-scoped ... survives WebSocket reconnects within the same session and is cleared only on session reset (new `AddinSessionId`). On SolidWorks restart, the add-in re-runs `ConnectToSW` and a new `AddinSessionId` is generated.",
+      "problem": "If SolidWorks crashes or is force-terminated, all in-flight Abandoned/Completed state disappears; orchestrator reconnect receives fresh AddinSessionId yet may replay CallIds that the new process treats as new, violating the \"client knows to use a new CallId\" contract and leaving model in inconsistent state without detection.",
+      "why_it_matters": "Assumes perfect process lifetime and no external termination \u2014 exactly the unplanned-disconnect scenario the spec tries to harden against; creates adversarial condition where viewer cannot distinguish crash-induced partial state from intentional changes.",
+      "proposed_fix": "Persist minimal registry (CallId \u2192 terminal state + final StateVersion) to registry or shared JSON under AddinSessionId; load on ConnectToSW and reconcile with orchestrator on handshake.",
+      "confidence": 0.8
+    },
+    {
+      "title": "Complexity inflation in five-state deduplication registry vs simpler SPEC-03 contract",
+      "severity": "high",
+      "category": "complexity_inflation",
+      "location": "Section 6.5 and Section 2.4",
+      "evidence": "Tracker holds one of five states: `Queued`, `Executing`, `Completed`, `Cancelled`, or `Abandoned` ... 60-second retention window ... `IN_FLIGHT_DUPLICATE`, `EXPIRED_CALL_ID`, `TERMINATED_CALL_ID`",
+      "problem": "Introduces combinatorial test matrix (InFlightDeduplicationTests, DisconnectExecutingCommandTests, DisconnectRollbackTests) and multiple error codes that SPEC-03 must now special-case, while the underlying COM non-preemptibility is already documented in 2.4.",
+      "why_it_matters": "If the opposite assumption holds \u2014 that unique CallIds and higher-level lifecycle timeouts suffice \u2014 the entire registry, cache expiry, and abandonment tracking become unnecessary scaffolding likely to cause downstream rework when SPEC-03 integrates.",
+      "proposed_fix": "Remove registry retention and state machine; let ToolDispatcher return `Cancelled` or normal result; require SPEC-03 to enforce unique CallIds and handle timeouts without adapter-level replay.",
+      "confidence": 0.65
+    },
+    {
+      "title": "Screenshot directory convention creates brittle cross-process dependency without hardening",
+      "severity": "high",
+      "category": "operational_risk",
+      "location": "Section 7.4 and 7.3",
+      "evidence": "If the `BSVOICE_SCREENSHOT_DIR` environment variable is set, its value is used instead ... orchestrator validates that this path is readable from its process context by creating and deleting a temporary file. If validation fails, the orchestrator logs a warning and disables screenshot-dependent features",
+      "problem": "Assumes orchestrator and add-in share exact same user context and permissions forever; no handling for ACL mismatches, network share latency, antivirus locking, or path-length limits on generated `{utcTicks}_{callId}.png` under rapid tool calls.",
+      "why_it_matters": "Turns a supposedly transparent file convention into a single point of failure that can silently degrade functionality mid-session; adversarial scenario of orchestrator running under different elevation or containerized breaks the \"no negotiation needed\" claim.",
+      "proposed_fix": "Require both processes to use identical environment-variable contract with mandatory validation at handshake; add fallback in-memory base64 transmission for critical screenshots when directory validation fails.",
+      "confidence": 0.7
+    },
+    {
+      "title": "Omission of SolidWorks multi-instance and safe-mode edge cases",
+      "severity": "medium",
+      "category": "scope",
+      "location": "Section 0, Section 8.1 and Day-0 Validation",
+      "evidence": "SolidWorks target: 2025 SP3+ (COM API backward-compat holds to 2024 SP5 for most methods; Day-0 validation catches any regressions)",
+      "problem": "No mention of behavior when multiple SolidWorks instances run concurrently, when SW is started in safe mode (disables some COM events and templates), or when user has non-default registry hive; AddinSessionIdGenerator reads HKLM MachineGuid but falls back to per-user file without distinguishing SW instances.",
+      "why_it_matters": "The session identity, reconnect handshake, and event suppression logic implicitly assume a single global SolidWorks process; real-world engineering workstations frequently run parallel versions, exposing the design to state leakage across instances.",
+      "proposed_fix": "Extend AddinSessionId inputs with SW process command-line or HWND of main window; add safe-mode detection in Day-0 validation and explicit out-of-scope note if unsupported.",
+      "confidence": 0.6
+    }
+  ],
+  "top_3_must_fix": [
+    "Brittle SynchronizationContext installation in non-WinForms STA host",
+    "ToolCallRegistry state machine survives only in-memory process lifetime",
+    "Complexity inflation in five-state deduplication registry vs simpler SPEC-03 contract"
+  ]
+}

@@ -1,0 +1,68 @@
+{
+  "oracle_name": "GrokContrarian",
+  "role": "Contrarian Reviewer",
+  "document_type": "BSVoice-CAD SPEC Suite (00,01,02,04,06 + Deployment Migration)",
+  "overall_verdict": "major_revision",
+  "findings": [
+    {
+      "title": "Regulatory Framing Invites Misrepresentation Despite Explicit Gaps",
+      "severity": "critical",
+      "category": "governance",
+      "location": "SPEC-00 SDR-TL-006; SPEC-04 \u00a712 gap-analysis table and DHF-014; Deployment doc \u00a70 and DM-3",
+      "evidence": "\"design audit log foundation for future 21 CFR 820.30 / Part 11 alignment\" while admitting DROP TRIGGER privilege, missing signatures, and non-compliant gap table",
+      "problem": "Language frames the system as preparatory for regulated use while the architecture (orchestrator can drop triggers and mutate) makes it unsuitable; customer-facing artifacts risk implying readiness.",
+      "why_it_matters": "Creates legal/compliance exposure for Medtronic pitch and any demo; opposite assumption (customer reads \"foundation\" as partial compliance) leads to audit or regulatory failure.",
+      "proposed_fix": "Remove all \"foundation for\" phrasing; replace with explicit \"experimental prototype unrelated to any compliance pathway\"; require verbatim disclaimer on every deck and README.",
+      "confidence": 0.85
+    },
+    {
+      "title": "v1 Viewer Public URL-as-Capability Violates Stated Threat Model",
+      "severity": "high",
+      "category": "security",
+      "location": "SPEC-00 SDR-TL-012 and Seam F; SPEC-06 SDR-06-007 and \u00a74.0 Tenant Resolution; Deployment doc \u00a74 v1 Contract",
+      "evidence": "\"v1 is NOT defensible for ... trade-secret medical-device designs\" yet viewer at public vcad.boundstate.ai with UUIDv4 session URLs as sole control and no auth middleware",
+      "problem": "Adversarial sharing or brute-force enumeration (even low probability) of session URLs exposes full DHF transcripts and geometry hashes; no technical enforcement of \"not for PHI/PII\" policy.",
+      "why_it_matters": "Breaks the explicit threat-model boundary; if opposite assumption (URL leaks) is true, regulated customer data is exposed without audit of who accessed it.",
+      "proposed_fix": "Require same API-key validation for viewer routes in v1 or defer entire viewer until Clerk integration; add X-BSVoice-Viewer-Warning header on every response.",
+      "confidence": 0.9
+    },
+    {
+      "title": "DHF Append Failure Locking Creates Circular Lifecycle Dependency",
+      "severity": "high",
+      "category": "contradiction",
+      "location": "SPEC-00 Seam C \"DHF append failure locks the session (never descopable)\"; SPEC-04 \u00a77 AppendTurnAsync, DHF-014, and \u00a711; SPEC-03 seam reference",
+      "evidence": "Lifecycle calls AppendTurnAsync; on persistent failure (serialization, RepositoryUnavailableException) the session must be marked locked, but failure occurs inside the call that would record the lock state.",
+      "problem": "No defined LockSessionAsync primitive or in-memory lock-before-append pattern; exception path leaves session in ambiguous state (neither locked nor writable).",
+      "why_it_matters": "Violates never-descopable invariant; downstream rework required in SPEC-03 when real failures surface; brittle under network or DB load.",
+      "proposed_fix": "Add explicit IDhfRepository.LockSessionAsync(Guid sessionId, string reason) that writes a locked flag row; lifecycle must call it in catch block before notifying user.",
+      "confidence": 0.8
+    },
+    {
+      "title": "Brittle External Dependency on SolidWorks STA Threading Model",
+      "severity": "high",
+      "category": "feasibility",
+      "location": "SPEC-02 \u00a72.2 Startup capture, \u00a72.6 StaCommandQueueTests, \u00a711 Day-0 validation item 2",
+      "evidence": "Assumes SynchronizationContext captured from SW UI thread (or installed WindowsFormsSynchronizationContext) will always pump correctly; probe is manual Day-0 step with no fallback.",
+      "problem": "If SolidWorks 2026 changes its internal message pump or removes WinForms compatibility, entire add-in becomes non-functional; no alternative dispatch mechanism is specified.",
+      "why_it_matters": "Single point of failure on external actor (SolidWorks update); hackathon demo blocked if probe fails on demo laptop; complexity of reentrancy guards becomes moot.",
+      "proposed_fix": "Specify exact observed SynchronizationContext type across SW versions; add fallback message-pump thread if probe fails, with documented limitations.",
+      "confidence": 0.75
+    },
+    {
+      "title": "Scope Drift and Test Surface Explosion",
+      "severity": "medium",
+      "category": "scope",
+      "location": "SPEC-00 \u00a73 \"Integration and E2E Test Project\" and ACC table; SPEC-01 \u00a716 (15 build-breaking tests); SPEC-02 \u00a710 (14 tests); SPEC-04 \u00a713 (18 tests); SPEC-06 \u00a711",
+      "evidence": "Every module requires its own tests plus mandatory cross-module smoke tests in BSVoiceCAD.Tests.Integration; 6 specs yield >60 distinct build-breaking tests plus architecture rules.",
+      "problem": "Hackathon deliverable ballooned into production-grade test matrix; many tests overlap (e.g., hash canonicalization appears in SPEC-01, SPEC-04, SPEC-06).",
+      "why_it_matters": "CI time, maintenance burden, and reviewer load explode; opposite assumption (most tests are advisory) would have allowed faster convergence.",
+      "proposed_fix": "Reduce mandatory integration tests to only ACC-01/02/04/12/19/20; mark remaining as advisory with continue-on-error.",
+      "confidence": 0.65
+    }
+  ],
+  "top_3_must_fix": [
+    "Regulatory Framing Invites Misrepresentation Risk",
+    "v1 Viewer Public URL-as-Capability Violates Stated Threat Model",
+    "DHF Append Failure Locking Creates Circular Lifecycle Dependency"
+  ]
+}

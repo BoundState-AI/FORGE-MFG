@@ -1,0 +1,90 @@
+{
+  "oracle_name": "Fran",
+  "role": "adversarial_logic_reviewer",
+  "document_type": "architecture specification bundle",
+  "overall_verdict": "major_revision",
+  "findings": [
+    {
+      "title": "Unauthenticated tenant selection makes session UUIDs non-capabilities",
+      "severity": "critical",
+      "category": "security",
+      "location": "SPEC-06 \u00a74.0, \u00a74.1, \u00a74.2; SPEC-00 SDR-TL-012",
+      "evidence": "SPEC-06 tenant resolver: `if (ctx.Request.Query.TryGetValue(\"tenant\", out var t) ... return t!;` and fallback `return _options.DefaultTenantId;`. SPEC-06 \u00a74.2 exposes `GET /api/dhf/sessions` for the resolved tenant. SPEC-00 SDR-TL-012 claims viewer access control is `knowledge of the session UUID` and that exposure requires `accidentally sharing a URL`.",
+      "problem": "The public viewer can list session IDs for `default` or any caller-supplied `?tenant=` value without knowing a session UUID first. That invalidates the stated URL-as-capability model.",
+      "why_it_matters": "Anyone who can hit the viewer can enumerate session metadata and obtain session IDs, so the UUID is no longer the access secret. This is a direct confidentiality break, not just a documentation issue.",
+      "proposed_fix": "For v1, remove unauthenticated session listing and tenant override from the public surface. Require a session-specific capability token to fetch a single session, or add real auth before exposing `/api/dhf/sessions` and `/` session lists.",
+      "confidence": 0.99
+    },
+    {
+      "title": "Mandatory recovery events have no storage or hash-chain representation",
+      "severity": "critical",
+      "category": "data_model",
+      "location": "SPEC-00 Seam B, Seam C, \u00a76 Glossary; SPEC-04 \u00a73.1, \u00a75, \u00a79.1",
+      "evidence": "SPEC-00 glossary: `Recovery Event: A DHF entry (distinct from a turn entry) ... Appended via DhfLedger.AppendRecoveryEventAsync. Participates in the hash chain.` SPEC-04 exposes `AppendRecoveryEventAsync(...)` in `IDhfRepository`, but `dhf.entries.turn_type` only allows `('execution', 'clarification', 'confirmation', 'ambiguity_resolution')`, and no recovery-event table or row shape is defined.",
+      "problem": "The spec makes recovery-event logging mandatory, but never defines how a recovery event is stored, hashed, sequenced, or read back.",
+      "why_it_matters": "Post-timeout and post-crash recovery is a never-descoped safety mechanism in this bundle. Without a concrete persisted representation, that mechanism cannot be implemented or verified.",
+      "proposed_fix": "Define one authoritative persistence model for recovery events: either add a recovery-compatible entry kind to `dhf.entries` plus hash rules, or add a separate chained `dhf.recovery_events` table and update repository/read contracts accordingly.",
+      "confidence": 0.98
+    },
+    {
+      "title": "Screenshot bytes required by validation and viewer are not stored in the DHF schema",
+      "severity": "critical",
+      "category": "data_model",
+      "location": "SPEC-04 \u00a73.1 schema, \u00a79.2 `EntryDetail`, \u00a710.2; SPEC-06 \u00a75.2",
+      "evidence": "`dhf.entries` stores only `screenshot_before_path`, `screenshot_after_path`, `screenshot_before_sha256`, `screenshot_after_sha256`. SPEC-04 \u00a710.2 says `In v1 deployment, screenshots are stored inline in DHF as screenshot_png bytea`. SPEC-06 \u00a75.2 says entry detail returns inline screenshot `dataUrl` content. SPEC-04 read-side `EntryDetail` contains only screenshot SHA-256 fields, not bytes, URLs, or S3 keys.",
+      "problem": "The schema and read DTOs do not contain the screenshot payload that deep validation and the viewer claim to consume.",
+      "why_it_matters": "Deep hash validation of screenshots and viewer screenshot rendering are impossible from the documented schema. This is an implementation blocker, not a missing detail.",
+      "proposed_fix": "Add explicit screenshot storage to SPEC-04 schema and read contracts (e.g. bytea columns or a separate artifact table with S3 key/bytes metadata), or remove screenshot replay/validation from v1 scope everywhere it is currently promised.",
+      "confidence": 0.99
+    },
+    {
+      "title": "Session lock on DHF append failure is not durable across orchestrator restart",
+      "severity": "high",
+      "category": "operational_risk",
+      "location": "SPEC-00 Seam C; SPEC-04 \u00a711 DHF-014; SPEC-00 changelog/glossary on session survival across orchestrator restart",
+      "evidence": "SPEC-00 Seam C: `Reopening requires manual intervention`. SPEC-04 DHF-014 says `The session is marked locked in memory`. SPEC-00 changelog/glossary explicitly preserves sessions across orchestrator restart.",
+      "problem": "The lock state exists only in process memory, but the session survives process restart. A restart clears the lock and allows the same persisted session to continue without the required manual intervention.",
+      "why_it_matters": "This defeats the safety barrier meant to stop further writes after an audit-path failure. Railway restarts are part of the stated deployment model, so this is not an edge case.",
+      "proposed_fix": "Persist lock state in the database (`locked_at`, `lock_reason`, `locked_by_failure`) and enforce it in `OpenOrResumeSessionAsync` and `AppendTurnAsync`. Do not rely on in-memory state for a persisted-session invariant.",
+      "confidence": 0.97
+    },
+    {
+      "title": "`IReadOnlyDhfRepository.ValidateChainAsync` is side-effectful in deep mode",
+      "severity": "high",
+      "category": "api_contract",
+      "location": "SPEC-04 \u00a79.2, \u00a710.2; SPEC-06 SDR-06-003, \u00a73a",
+      "evidence": "SPEC-06 SDR-06-003: `The viewer never writes to any table. All paths go through IReadOnlyDhfRepository`. SPEC-04 \u00a710.2: `Deep validation writes integrity_event decorations for detected failures via WriteIntegrityEventAsync`.",
+      "problem": "The read-only repository contract is presented as non-writing, but one of its exposed methods performs writes in deep mode.",
+      "why_it_matters": "This breaks the core isolation guarantee for the viewer and makes a GET-style integrity check mutate the audit log. It also invalidates the claim that the viewer has no write paths.",
+      "proposed_fix": "Make `ValidateChainAsync` side-effect-free for `IReadOnlyDhfRepository`. If persistence of integrity findings is required, move it to a separate write-capable service or an explicit admin/orchestrator path.",
+      "confidence": 0.97
+    },
+    {
+      "title": "`explicit_shutdown` closure reason is not implementable from the defined wire contract",
+      "severity": "high",
+      "category": "api_contract",
+      "location": "SPEC-00 \u00a76 Glossary; SPEC-01 \u00a74.2/\u00a75 message definitions",
+      "evidence": "SPEC-00 glossary defines `explicit_shutdown` as `add-in sends a teardown message or the orchestrator detects add-in disconnect`. The same paragraph later says `SPEC-02 must emit an explicit teardown message before process exit` if finer-grained attribution is needed. SPEC-01 defines `IAddinMessage` types as only `tool_result`, `state_update`, `addin_ready`, `undo_group_outcome`, `addin_protocol_error`.",
+      "problem": "No teardown/disconnect message exists in the protocol, and a dropped WebSocket cannot distinguish graceful shutdown from crash/network loss. The closure reason taxonomy overclaims information the system cannot observe.",
+      "why_it_matters": "Audit closure reasons become inaccurate or non-implementable, which undermines the DHF session lifecycle semantics used elsewhere in the bundle.",
+      "proposed_fix": "Either add an explicit add-in teardown message to SPEC-01 with defined send conditions, or remove `explicit_shutdown` from the observable closure reasons until the protocol supports it.",
+      "confidence": 0.98
+    },
+    {
+      "title": "Viewer route contract conflicts between `/` and `/viewer`",
+      "severity": "medium",
+      "category": "contradiction",
+      "location": "DEPLOYMENT_V1_V2_MIGRATION.md \u00a71 deployment matrix; SPEC-06 \u00a73, \u00a74.1",
+      "evidence": "Migration matrix: `Viewer host | Same Railway service, path /viewer`. SPEC-06 \u00a74.1 defines `GET /` as the viewer timeline root, and SPEC-06 \u00a73 says the viewer registers endpoints on the orchestrator `WebApplication` with no separate listener.",
+      "problem": "The canonical public route for the viewer is defined two different ways.",
+      "why_it_matters": "This affects deployment, reverse-proxy rules, links, tests, and the threat model statements about what is publicly accessible. One side of the bundle will be wrong at runtime.",
+      "proposed_fix": "Choose one canonical viewer root (`/` or `/viewer`) and update SPEC-06, SPEC-00 references, and the migration document to match exactly.",
+      "confidence": 0.95
+    }
+  ],
+  "top_3_must_fix": [
+    "Remove unauthenticated tenant/session enumeration from the v1 viewer or the claimed URL-capability security model is false.",
+    "Define a concrete persisted recovery-event model and hash-chain integration; `AppendRecoveryEventAsync` is currently unimplementable.",
+    "Align screenshot storage with the schema and read contracts; deep validation and viewer rendering currently depend on data the DHF does not store."
+  ]
+}

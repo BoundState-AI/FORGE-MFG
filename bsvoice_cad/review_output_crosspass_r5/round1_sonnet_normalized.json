@@ -1,0 +1,276 @@
+{
+  "oracle_name": "Sonnet",
+  "role": "referee",
+  "normalized_issues": [
+    {
+      "issue_id": "R1-ISSUE-001",
+      "title": "PipelineResult \u2194 VocabularyResolutionDecoration recursive self-reference makes successful payloads unserializable",
+      "severity": "critical",
+      "category": "api_contract",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "Successful vocab-resolution payload is recursively self-referential"
+        }
+      ],
+      "core_problem": "PipelineResult contains VocabularyResolutionDecoration? DecorationPayload, and VocabularyResolutionDecoration contains VocabularyPipelineReturn PipelineReturn which is polymorphic over PipelineResult. For any successful resolution, the decoration payload contains a PipelineResult that contains the decoration payload again \u2014 an infinite cycle. No truncation or projection is defined to break it.",
+      "best_evidence": "SPEC-07 \u00a76.4: PipelineResult has `public VocabularyResolutionDecoration? DecorationPayload`. SPEC-07 \u00a78.2: VocabularyResolutionDecoration has `public required VocabularyPipelineReturn PipelineReturn // polymorphic \u2014 PipelineResult | Rejected | Failure`.",
+      "recommended_fix": "Replace VocabularyResolutionDecoration.PipelineReturn with a non-recursive snapshot type (e.g., PipelineResultSnapshot) that explicitly excludes DecorationPayload, or remove DecorationPayload from PipelineResult and return the decoration as a separate out-of-band value from IVocabularyResolver.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-002",
+      "title": "SPEC-05 \u2192 SPEC-04 direct write path contradicts SPEC-00's declared module boundary (SPEC-03 is sole DHF writer; SPEC-05 has no direct SPEC-04 reference)",
+      "severity": "critical",
+      "category": "contradiction",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "SPEC-07's new persistence path violates SPEC-00's declared module boundary"
+        },
+        {
+          "oracle": "Codex",
+          "title": "Critical decoration-persistence behavior was moved to SPEC-05 but its interface is still undefined"
+        }
+      ],
+      "core_problem": "SPEC-00 \u00a71 states SPEC-03 is the sole DHF writer and SPEC-05 has no direct assembly reference to SPEC-04. SPEC-07 v1.1.2 SDR-07-012 now requires SPEC-05 to directly call DhfDecorationWriter and LockSessionAsync after AppendTurnAsync. These are irreconcilable. Additionally, the DhfDecorationPersister contract SPEC-05 must implement is entirely undefined (SPEC-05 \u00a7X TBD).",
+      "best_evidence": "SPEC-00 Seam E: 'SPEC-05 has no direct assembly reference to SPEC-04; the dependency is purely indirect through SPEC-03's aggregation role.' SPEC-07 SDR-07-012: 'SPEC-05 persists the payload via SPEC-04's DhfDecorationWriter after DhfLedger.AppendTurnAsync returns entry_id.' SPEC-07: 'SPEC-05 \u00a7X (TBD \u2014 to be authored in the next spec-authoring pass) will define the DhfDecorationPersister contract in detail.'",
+      "recommended_fix": "Either (A) update SPEC-00 module map, Seam E, and dependency rules to explicitly permit and govern a SPEC-05 \u2192 SPEC-04 write path for decorations, and define the DhfDecorationPersister contract now; or (B) route decoration persistence through SPEC-03 to preserve the existing boundary. Either way, the DhfDecorationPersister interface must be fully specified before implementation.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-003",
+      "title": "Post-append decoration persistence breaks the 'every resolution records its citation durably' guarantee \u2014 committed turn can exist without citation",
+      "severity": "critical",
+      "category": "operational_risk",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "Post-append decoration persistence can leave a committed turn without the required citation"
+        }
+      ],
+      "core_problem": "SPEC-07 \u00a70 and SDR-07-006 claim the pipeline returns success only after the citation is durably written. After v1.1.2, AppendTurnAsync commits the turn entry first, then SPEC-05 attempts the decoration insert. If the decoration insert fails after retry exhaustion, the DHF contains a committed turn with no vocabulary citation. Locking the session afterward does not repair the missing citation for that already-committed turn.",
+      "best_evidence": "SPEC-07 \u00a70: 'The pipeline returns success ONLY after the citation is durably written.' SPEC-07 SDR-07-012: 'SPEC-05 persists this payload via SPEC-04's DhfDecorationWriter after DhfLedger.AppendTurnAsync returns entry_id.' The two-phase commit is non-atomic.",
+      "recommended_fix": "Either (A) make turn append and vocabulary-decoration insert atomic in one DB transaction using a preallocated entry_id passed into AppendTurnAsync; or (B) explicitly downgrade the guarantee in SDR-07-006 and \u00a70, define a compensating marker for uncited turns, and specify a recovery/audit flow for that state.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-004",
+      "title": "StageLatencies in PipelineResult still requires DecorationWriteMs and TotalMs after decoration writes moved to SPEC-05",
+      "severity": "high",
+      "category": "contradiction",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "SPEC-07 still requires DecorationWriteMs in PipelineResult after moving decoration writes out of SPEC-07"
+        },
+        {
+          "oracle": "Fran",
+          "title": "SPEC-07 still requires decoration-write latency fields after moving decoration writes out of SPEC-07"
+        }
+      ],
+      "core_problem": "SPEC-07 \u00a73.2 states 'DecorationWriteMs now lives in SPEC-05's Serilog envelope' and Stage 5 is in-memory only with no I/O. Yet SPEC-07 \u00a76.4 StageLatencies still declares required fields DecorationWriteMs and TotalMs on PipelineResult. SPEC-07 cannot populate these fields for work it no longer performs.",
+      "best_evidence": "SPEC-07 \u00a73.2: 'decoration INSERT is SPEC-05's budget.' SPEC-07 \u00a76.4: 'public sealed record StageLatencies { ... public required int DecorationWriteMs { get; init; } public required int TotalMs { get; init; } }'",
+      "recommended_fix": "Remove DecorationWriteMs and TotalMs from SPEC-07's StageLatencies record. These fields belong in SPEC-05's own telemetry envelope. Update PersistedStageLatencies in \u00a78.2 to confirm it already correctly excludes them, and ensure StageLatencies matches.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-005",
+      "title": "Pre-upgrade HTTP 400/401/429 status codes and Retry-After header are not reliably observable from .NET Framework 4.8 ClientWebSocket",
+      "severity": "high",
+      "category": "feasibility",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "NetFx handshake-failure handling depends on HTTP status and headers that ClientWebSocket does not expose"
+        }
+      ],
+      "core_problem": "SPEC-01 \u00a712.4 and SPEC-02 \u00a76.2 require the add-in to branch on HTTP 400/401/429 and read the Retry-After response header from failed WebSocket upgrade attempts. The add-in targets .NET Framework 4.8 ClientWebSocket, which does not reliably expose pre-upgrade HTTP response status codes or headers from a failed ConnectAsync call.",
+      "best_evidence": "SPEC-02 \u00a76.2: 'HTTP 401 Unauthorized ... Add-in surfaces a UI error'; 'HTTP 429 Too Many Requests ... Add-in backs off per the Retry-After response header.' The add-in runtime is .NET Framework 4.8 per SPEC-00 SDR-TL-001.",
+      "recommended_fix": "Either (A) add a separate HTTPS preflight endpoint (e.g., GET /health or POST /api/auth/probe) that returns machine-readable status and headers the add-in can read before opening the WebSocket; or (B) replace the HTTP-status-based branching with a post-upgrade error protocol the add-in can observe on the established WebSocket connection.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-006",
+      "title": "GetFeatureTree wire contract missing 'compressed' parameter present in adapter interface",
+      "severity": "high",
+      "category": "api_contract",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "GetFeatureTree service contract requires a `compressed` choice that the wire protocol never sends"
+        }
+      ],
+      "core_problem": "SPEC-02 \u00a73.4 ISolidWorksFeatureService.GetFeatureTree takes (bool includeSuppressed, bool compressed). SPEC-01 \u00a77.1 GetFeatureTreeInput only has IncludeSuppressed. The compressed parameter has no wire representation and no normative default, leaving implementers to guess the behavior.",
+      "best_evidence": "SPEC-02 \u00a73.4: 'IReadOnlyList<FeatureNode> GetFeatureTree(bool includeSuppressed, bool compressed)'. SPEC-01 \u00a77.1: 'public record GetFeatureTreeInput : IToolInput { public bool IncludeSuppressed { get; init; } = false; }'",
+      "recommended_fix": "Either add a Compressed field to GetFeatureTreeInput with a documented default and semantics, or remove the compressed parameter from the adapter interface and hard-code one documented behavior (e.g., always compressed for tool calls, always full for direct service calls).",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-007",
+      "title": "Oversize screenshot fallback emits FeatureTreeHash='OVERSIZE' sentinel, contradicting SPEC-01's invariant that hash must reflect the complete tree",
+      "severity": "high",
+      "category": "contradiction",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "Oversize screenshot fallback contradicts the StateSnapshot.FeatureTreeHash invariant"
+        }
+      ],
+      "core_problem": "SPEC-02 \u00a77.5 instructs the add-in to emit FeatureTreeHash='OVERSIZE' in the error path. SPEC-01 \u00a78 states 'The FeatureTreeHash MUST still reflect the hash of the complete (non-truncated) tree so that change detection remains accurate.' These are mutually exclusive for the same message.",
+      "best_evidence": "SPEC-02 \u00a77.5: 'substitutes a placeholder StateAfter ... FeatureTreeHash = \"OVERSIZE\"'. SPEC-01 \u00a78: 'The FeatureTreeHash MUST still reflect the hash of the complete (non-truncated) tree.'",
+      "recommended_fix": "Either keep the real full-tree hash in the oversize error path (computing it before truncation), or formally extend SPEC-01 with an explicit oversize sentinel contract, update validators and hash-chain logic to handle it, and document the audit-trail implications.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-008",
+      "title": "SPEC-02 Day-0 validation step 11 checks DHF session row for closure_reason field that SPEC-00 explicitly removed from the schema",
+      "severity": "high",
+      "category": "contradiction",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "SPEC-02 Day-0 validation checks a DHF closure-reason column that the rest of the bundle explicitly removed"
+        }
+      ],
+      "core_problem": "SPEC-02 \u00a711 item 11 says to 'confirm the orchestrator's DHF session row shows closure reason explicit_shutdown.' SPEC-00 v1.5.1 C3 reconciliation explicitly states closure reason lives in Serilog structured logs, NOT in dhf.sessions. The DHF schema has no closure_reason column.",
+      "best_evidence": "SPEC-02 \u00a711: 'confirm the orchestrator's DHF session row shows closure reason explicit_shutdown.' SPEC-00 changelog v1.5.1 C3: 'Closure REASON ... is recorded in orchestrator structured logs (Serilog session_closed event) per SPEC-02 \u00a79.0.4, NOT in the DHF schema.'",
+      "recommended_fix": "Update SPEC-02 \u00a711 item 11 to validate the Serilog session_closed structured log event instead of a DHF row field. Specify the exact log fields to check (e.g., closure_reason='explicit_shutdown', session_id).",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-009",
+      "title": "AddinTeardownMessage send path is contradictory: \u00a79.0.2 uses direct socket I/O while \u00a79.0.3 and \u00a79.1.1 claim it goes through SwUiThreadCommandQueue",
+      "severity": "high",
+      "category": "contradiction",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "Teardown-send threading model is internally contradictory"
+        }
+      ],
+      "core_problem": "SPEC-02 \u00a79.0.2 TeardownMessageSender pseudocode calls _webSocket.SendAsync directly (no UI thread queue). SPEC-02 \u00a79.0.3 states teardown 'will block behind the COM call on the shared message queue (both go through SwUiThreadCommandQueue).' \u00a79.1.1 step 3 repeats 'The send path goes through SwUiThreadCommandQueue.' These are mutually exclusive execution models for the same operation.",
+      "best_evidence": "SPEC-02 \u00a79.0.2: 'await _webSocket.SendAsync(new ArraySegment<byte>(payload), ...)'. SPEC-02 \u00a79.0.3: 'The send path goes through SwUiThreadCommandQueue and would block behind the stuck COM call.' The justification for the 60-second drain and no-teardown escalation depends on which model is true.",
+      "recommended_fix": "Declare one authoritative execution model for teardown sends. If direct socket I/O (\u00a79.0.2), update \u00a79.0.3 and \u00a79.1.1 to remove the SwUiThreadCommandQueue claim and re-examine whether the 60-second drain rationale still holds. If UI-thread-queued, update \u00a79.0.2 pseudocode accordingly.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-010",
+      "title": "ViewerOptions.VocabRawInputAllowed security gate is defined in prose but absent from the ViewerOptions class and appsettings configuration",
+      "severity": "high",
+      "category": "security",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "Viewer raw-input gating relies on ViewerOptions.VocabRawInputAllowed, but that option is not defined in the config surface"
+        }
+      ],
+      "core_problem": "SPEC-06 SDR-06-008 references ViewerOptions.VocabRawInputAllowed as the security gate controlling raw utterance and ParsedIntent exposure. SPEC-06 \u00a73 ViewerOptions class only contains EnableStretchEndpoints. SPEC-06 \u00a713 configuration only shows enableStretchEndpoints. The security-sensitive switch exists only in prose.",
+      "best_evidence": "SPEC-06 SDR-06-008: 'ViewerOptions.VocabRawInputAllowed'. SPEC-06 \u00a73: 'public sealed class ViewerOptions { public bool EnableStretchEndpoints { get; init; } }'. SPEC-06 \u00a713: only 'enableStretchEndpoints' in config block.",
+      "recommended_fix": "Add VocabRawInputAllowed to the ViewerOptions class, add its config key to \u00a713 appsettings, specify the default value (false), and document the per-tenant override mechanism and who can change it.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-011",
+      "title": "Security-event DHF decoration destination is contradictory within SPEC-07 (\u00a73.3 says write if security_event=true; \u00a714 and changelog say never write for rejections)",
+      "severity": "medium",
+      "category": "contradiction",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "Security-event persistence destination is still contradictory inside SPEC-07"
+        }
+      ],
+      "core_problem": "SPEC-07 \u00a73.3 failure-mode table states 'Decoration Written? Only if security_event=true' for bouncer rejections. SPEC-07 \u00a714 states 'No (security events logged, not DHF'd)'. The v1.1.1 changelog M3/M4 states 'no DHF decoration is written for rejections \u2014 security events route to the restricted audit sink.' Three different answers to the same question.",
+      "best_evidence": "SPEC-07 \u00a73.3: 'Decoration Written? Only if security_event=true'. SPEC-07 \u00a714: 'No (security events logged, not DHF'd)'. SPEC-07 v1.1.1 changelog M3: 'no DHF decoration is written for rejections.'",
+      "recommended_fix": "Adopt the \u00a714/changelog position (no DHF decoration for any rejection, security events go to restricted audit sink only) as the single authoritative answer. Update \u00a73.3 to match. Remove all remaining references to DHF decoration writes for rejected security events.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-012",
+      "title": "NetFx add-in pseudocode uses Guid.CreateVersion7() which requires .NET 9+ or an unspecified polyfill",
+      "severity": "medium",
+      "category": "feasibility",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "NetFx add-in pseudocode uses Guid.CreateVersion7() without specifying the required polyfill/runtime support"
+        }
+      ],
+      "core_problem": "SPEC-02 \u00a79.0.2 TeardownMessageSender pseudocode uses Guid.CreateVersion7().ToString() for MessageId generation. The add-in targets .NET Framework 4.8. SPEC-01 \u00a75 notes Guid.CreateVersion7() is .NET 9+ only and requires 'backport or NuGet implementation on earlier runtimes' \u2014 but no specific library is named.",
+      "best_evidence": "SPEC-02 \u00a79.0.2: 'MessageId = Guid.CreateVersion7().ToString()'. SPEC-01 \u00a75: 'Guid.CreateVersion7() on .NET 9+; backport or NuGet implementation on earlier runtimes.' SPEC-00 SDR-TL-001: add-in is .NET Framework 4.8.",
+      "recommended_fix": "Name the specific UUIDv7 NuGet package or shared utility used by the NetFx add-in for all MessageId generation. Add it to the project shape in SPEC-02 \u00a71 and reference it consistently in all add-in pseudocode.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-013",
+      "title": "Same-workstation stale-session cleanup silently closes sessions from other SolidWorks processes on the same workstation",
+      "severity": "medium",
+      "category": "operational_risk",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "Same-workstation session cleanup silently assumes only one active SolidWorks process per workstation"
+        }
+      ],
+      "core_problem": "SPEC-04 \u00a76.1 OpenOrResumeSessionCore closes all open unlocked sessions for the same tenant+workstation before opening a new one. The spec never declares that a workstation can have only one active SolidWorks process. If two legitimate SolidWorks instances run on one workstation, opening the second session silently force-closes the first.",
+      "best_evidence": "SPEC-04 \u00a76.1: 'UPDATE dhf.sessions SET ended_at = NOW() WHERE ended_at IS NULL AND locked_at IS NULL AND tenant_id = @TenantId AND workstation_id = @WorkstationId'. SPEC-00 \u00a76 glossary only states 'A given SolidWorks process runs exactly one add-in instance' \u2014 does not preclude multiple SW processes.",
+      "recommended_fix": "Either (A) declare and enforce a hard single-SolidWorks-process-per-workstation invariant in SPEC-00 \u00a76 and SPEC-02, or (B) scope stale-session cleanup to a stronger process identity (e.g., include SW process ID in the session row and cleanup predicate).",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-014",
+      "title": "LLM-based bouncer as primary security boundary is architecturally weak; phonetic evasion acknowledged but mitigation is insufficient for a security gate",
+      "severity": "medium",
+      "category": "security",
+      "merged_from": [
+        {
+          "oracle": "Grok",
+          "title": "Critical adversarial input and prompt-injection surface in LLM-based bouncer with insufficient deterministic mitigation"
+        }
+      ],
+      "core_problem": "SPEC-07 \u00a74.5 acknowledges phonetic evasion bypasses the deterministic scan and relies on the bouncer LLM persona as the fallback. The spec's own threat model admits this gap. Using an LLM as a security boundary is architecturally fragile \u2014 the LLM is the weakest link, not the strongest.",
+      "best_evidence": "SPEC-07 \u00a74.5: 'Known gap (v1): phonetic evasion of bouncer rejection patterns (e.g., \"eye gnore previous instructions\") bypasses the deterministic scan. v1 mitigation: bouncer persona prompt instruction + secondary LLM validation on accepts.' The v1.5 fix (phonetic normalization corpus) is deferred.",
+      "recommended_fix": "Promote the deterministic grammar/alias match path as the primary security gate for known injection patterns. Reserve LLM invocation for genuinely ambiguous cases. Add rate limiting on bouncer invocations per session. Document the residual risk explicitly in the threat model rather than treating the LLM persona as a reliable security control.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-015",
+      "title": "SPEC-00 scope creep: integration contract has absorbed detailed behavioral specifications that belong in per-module specs",
+      "severity": "low",
+      "category": "scope",
+      "merged_from": [
+        {
+          "oracle": "Grok",
+          "title": "High scope drift and complexity inflation in SPEC-00 turning an integration contract into 50-page behavioral specification"
+        }
+      ],
+      "core_problem": "SPEC-00 subtitle claims 'interfaces only, no implementation' but the document defines cancellation boundaries, post-timeout recovery strategies, lock recovery procedures, exact closure reason mapping, recovery_context JSONB shape, and 30+ ACC gates. This creates a brittle single point of truth for runtime behavior across all modules.",
+      "best_evidence": "SPEC-00 \u00a70 non-goals: 'state machine details, record field definitions, SQL schemas, build sequence, timeline.' Yet Seam B defines post-timeout recovery strategies, Seam C defines DHF append failure lock behavior, and SDR-TL-013/014 define JSONB column shapes.",
+      "recommended_fix": "Progressively migrate behavioral contracts back to owning module specs. SPEC-00 should contain module map, seam directionality, mandatory/stretch list, and high-level ACC cross-reference. Per-seam detailed state transitions and recovery procedures should live in the specs that own those behaviors.",
+      "conflict_flag": false,
+      "weak_signal": true
+    }
+  ],
+  "dropped_findings": [
+    {
+      "oracle": "Grok",
+      "title": "Critical brittle dependency on SolidWorks STA threading and non-preemptible COM calls with no fallback",
+      "reason": "unsupported \u2014 the spec explicitly documents the STA threading model as a known constraint with documented behavior (queued-cancel vs executing-cancel), not a defect. The 'no fallback' claim overstates the risk; the spec defines recovery paths (session lock, recovery events). The concern about SolidWorks changing its threading model is speculative and not actionable at spec level."
+    }
+  ]
+}

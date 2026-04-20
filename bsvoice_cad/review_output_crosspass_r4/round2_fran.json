@@ -1,0 +1,57 @@
+{
+  "oracle_name": "Fran",
+  "role": "adversarial_logic_reviewer",
+  "document_type": "architecture/specification bundle",
+  "overall_verdict": "major_revision",
+  "findings": [
+    {
+      "title": "Removing `sequence_number` from hashed columns breaks tamper-evidence for entry ordering metadata",
+      "severity": "critical",
+      "category": "data_model",
+      "location": "SPEC-04 Changes (v1.5.1 \u2192 v1.5.2), \u00a74.2 DhfHashColumns change",
+      "evidence": "`\"entry_id\", \"session_id\", \"sequence_number\" removed ... sequence_number ordering is enforced by previous_hash which IS hashed.`",
+      "problem": "`previous_hash` proves link order, not the integrity of the current row's own `sequence_number`. A row can be renumbered, duplicated, or gaps introduced without changing `record_hash` unless chain validation separately enforces contiguous numbering. That validation is not stated here.",
+      "why_it_matters": "The document presents the DHF as an append-only hash-chain audit foundation. If `sequence_number` is mutable outside the hash, ordering metadata can be altered without invalidating the chain, which undermines replay, audit assertions, and any consumer that orders by `sequence_number`.",
+      "proposed_fix": "Either keep `sequence_number` in `DhfHashColumns`, or explicitly define `ValidateChainAsync` as rejecting any non-contiguous, non-unique sequence numbering and add that requirement to ACC-02 and ACC-12.",
+      "confidence": 0.96
+    },
+    {
+      "title": "Cross-workstation conflict enforcement relies on an explicitly untrusted client field",
+      "severity": "high",
+      "category": "security",
+      "location": "Deployment v1 \u2192 v2 Migration \u00a76 AddinSessionId and Workstation Trust; SPEC-04 Changes \u00a76.1 OpenOrResumeSessionCore",
+      "evidence": "Deployment doc: `workstation_id: client-supplied string, not a trust boundary.` SPEC-04 change: `WHERE ... addin_session_id = @AddinSessionId ... AND workstation_id != @WorkstationId` followed by `throw new CrossWorkstationSessionConflictException(...)`.",
+      "problem": "The hard-error collision rule depends on `workstation_id`, but the same document says that value is accepted at face value and is not trustworthy. A client can spoof another workstation name to bypass the conflict check or cause false conflicts.",
+      "why_it_matters": "This makes ACC-19 and the cross-workstation safety invariant non-authoritative. The system is treating an advisory field as an enforcement input.",
+      "proposed_fix": "Do not use `workstation_id` as a hard-enforcement discriminator until it is bound to a server-trusted identity. For v1, either introduce a server-issued/persisted workstation token or downgrade the cross-workstation check to observability-only and remove the hard-error guarantee from the contract.",
+      "confidence": 0.94
+    },
+    {
+      "title": "Permanent-failure path discards the only evidence needed for the mandated post-timeout recovery record",
+      "severity": "high",
+      "category": "operational_risk",
+      "location": "SPEC-02 Changes \u00a79.1.1 step 7; SPEC-00 \u00a72 Seam B; SPEC-00 \u00a76 Glossary `Quarantine`",
+      "evidence": "SPEC-02: `The stuck COM call continues running on the UI thread; it may eventually return (at which point the return is logged and discarded).` SPEC-00 Seam B: `Recovery outcome \u2014 including whether a post-timeout COM completion was detected ... \u2014 is recorded as a DHF recovery event`. Glossary `Quarantine`: late evidence `is referenced by the subsequent mandatory recovery event`.",
+      "problem": "In the exact stuck-call scenario, the late completion is explicitly discarded after the add-in has entered `PermanentlyFailed`. The orchestration contract still requires the later recovery event to state whether post-timeout completion was detected and to preserve continuity to the evidence, but no mechanism is defined to carry that evidence across restart/reconnect.",
+      "why_it_matters": "The recovery/audit contract is not implementable for the scenario this section is defining. The system loses the only direct signal of whether the timed-out COM call eventually mutated the model.",
+      "proposed_fix": "Define a durable handoff for permanent-failure metadata: persist the timed-out `CallId`, tool name, and any eventual late completion status locally, and require the add-in to transmit that payload on next startup so SPEC-03 can append the mandated recovery event with evidence linkage.",
+      "confidence": 0.91
+    },
+    {
+      "title": "Reconnect semantics after `heartbeat_timeout` with the same `AddinSessionId` are undefined",
+      "severity": "high",
+      "category": "ambiguity",
+      "location": "SPEC-00 \u00a76 Glossary `AddinSessionId` and `DHF Session`",
+      "evidence": "`AddinSessionId changes if and only if the add-in is reloaded` and `DHF Session ... Opens on first AddinReadyMessage for a given AddinSessionId. Closes on ... heartbeat_timeout` and `DHF sessions are NOT closed on transient transport loss ... pending reconnect or heartbeat_timeout threshold.`",
+      "problem": "The contract does not state what happens when transport loss exceeds the heartbeat timeout but the add-in process is still running and reconnects with the same `AddinSessionId`. It is unclear whether SPEC-04 must resume, reject, or open a new session with the same epoch, and how `StateVersion` and conflict checks behave in that case.",
+      "why_it_matters": "This is a normal failure mode for an internet WebSocket. If SPEC-03, SPEC-04, and the add-in infer different behavior, reconnects will produce inconsistent session state, duplicate sessions, or false conflicts.",
+      "proposed_fix": "Add an explicit rule for same-`AddinSessionId` reconnect after `heartbeat_timeout`: define whether it opens a new DHF session, is rejected until add-in restart, or reuses the prior session identity; define the required `StateVersion` behavior; add an acceptance test for this path.",
+      "confidence": 0.9
+    }
+  ],
+  "top_3_must_fix": [
+    "Restore or equivalently validate `sequence_number` integrity in the DHF hash-chain contract.",
+    "Remove hard enforcement based on untrusted `workstation_id` or make workstation identity server-trustworthy.",
+    "Define how permanent-failure late completions are durably handed off so mandatory recovery events can be recorded correctly."
+  ]
+}

@@ -1,0 +1,459 @@
+{
+  "oracle_name": "Sonnet",
+  "role": "referee",
+  "normalized_issues": [
+    {
+      "issue_id": "R1-ISSUE-001",
+      "title": "STA queue dispatches to a private thread, not the SolidWorks-owned COM apartment",
+      "severity": "low",
+      "category": "feasibility",
+      "merged_from": [],
+      "core_problem": "R1 raised this as critical. The spec has been substantially revised in v1.1.0 to use SynchronizationContext captured from the SW UI thread itself, not a private STA thread. The core architectural defect is resolved. Residual concerns about WindowsFormsSynchronizationContext injection are captured in R2-ISSUE-001.",
+      "best_evidence": "Section 2.2 now explicitly captures the SW UI thread's SynchronizationContext during ConnectToSW and uses TaskScheduler.FromCurrentSynchronizationContext().",
+      "recommended_fix": "No further action on the original issue. Monitor R2-ISSUE-001 for the residual WinForms context concern.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-002",
+      "title": "STA worker thread has no Windows message pump, risking COM deadlocks",
+      "severity": "low",
+      "category": "feasibility",
+      "merged_from": [],
+      "core_problem": "R1 raised this. The spec now explicitly leverages SolidWorks's own Windows message pump via SynchronizationContext. No dedicated worker thread is owned. Issue is resolved by the v1.1.0 redesign.",
+      "best_evidence": "Section 2.2: 'This approach leverages SolidWorks's own Windows message pump \u2014 no additional pump or dedicated worker thread is required.'",
+      "recommended_fix": "Closed. No action needed.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-003",
+      "title": "5-second shutdown join guarantee is unenforceable given non-preemptible COM calls",
+      "severity": "low",
+      "category": "contradiction",
+      "merged_from": [],
+      "core_problem": "R1 raised this. The spec now explicitly states Stop() is non-blocking and no thread join is required. Issue is resolved.",
+      "best_evidence": "Section 2.5: 'No dedicated thread join is required \u2014 the queue does not own a thread.'",
+      "recommended_fix": "Closed. No action needed.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-004",
+      "title": "SHA256.HashData is not available on .NET Framework 4.8",
+      "severity": "low",
+      "category": "feasibility",
+      "merged_from": [],
+      "core_problem": "R1 raised this. The spec now uses SHA256.Create() / ComputeHash() which is available on .NET Framework 4.8. Issue is resolved.",
+      "best_evidence": "Section 8.1 uses SHA256.Create() and ComputeHash(). Section 11 step 4 validates SHA256.Create() / ComputeHash.",
+      "recommended_fix": "Closed. No action needed.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-005",
+      "title": "Tool-call deduplication registry is cleared on disconnect, allowing CallId replay after reconnect",
+      "severity": "low",
+      "category": "operational_risk",
+      "merged_from": [],
+      "core_problem": "R1 raised this. The spec now explicitly states the registry survives WebSocket reconnects within the same session and is cleared only on session reset. Issue is resolved.",
+      "best_evidence": "Section 6.5: 'The registry survives WebSocket reconnects within the same session and is cleared only on session reset (new AddinSessionId).'",
+      "recommended_fix": "Closed. The in-memory-only persistence concern is now tracked as a separate issue (Grok's finding, see R2-ISSUE-002).",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-006",
+      "title": "Forced client drop can race with non-preemptible executing COM work, producing inconsistent state",
+      "severity": "high",
+      "category": "operational_risk",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "Client handoff closes the old socket before defining where an in-flight tool result goes"
+        }
+      ],
+      "core_problem": "The spec partially addresses this in Section 9.2 (Abandoned state, result cached without delivery) but Section 6.1's single-concurrent-client handoff scenario still leaves a gap: the Close frame is sent to the old client before the executing command finishes, and the new client is not yet upgraded. The eventual ToolResultMessage has no eligible recipient.",
+      "best_evidence": "Section 6.1 bullets 1-3: 'The add-in sends a Close frame to the current client... If a command is currently executing on the UI thread, the add-in holds the new connection in a pending state... until the command completes... Once the executing command completes... the new connection proceeds with the handshake.' The result delivery path for the completing command is unspecified.",
+      "recommended_fix": "Define one explicit rule for the handoff case: either (a) delay sending Close until the executing command result is sent to the old client, then proceed with handoff; (b) mark the call Abandoned and cache the result for replay to the new client after handshake; or (c) reject the new connection with a busy/retry response until the command completes. The chosen rule must be consistent with Section 9.2 Abandoned semantics.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-007",
+      "title": "InFlight calls marked Cancelled on disconnect even though executing commands may still complete and mutate the model",
+      "severity": "low",
+      "category": "contradiction",
+      "merged_from": [],
+      "core_problem": "R1 raised this. The spec now correctly distinguishes Queued\u2192Cancelled from Executing\u2192Abandoned. Issue is resolved.",
+      "best_evidence": "Section 9.2: 'Queued calls \u2192 marked Cancelled... Executing calls \u2192 marked Abandoned. The command continues running on the UI thread to completion.'",
+      "recommended_fix": "Closed. No action needed.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-008",
+      "title": "Undo-group nesting is simultaneously permitted and prohibited",
+      "severity": "low",
+      "category": "contradiction",
+      "merged_from": [],
+      "core_problem": "R1 raised this. The spec now explicitly prohibits nesting: 'Only one undo group may be active at a time. Calling StartUndoGroup while a group is already active throws InvalidUndoStateException.' Issue is resolved.",
+      "best_evidence": "Section 3.6 ISolidWorksUndoService.StartUndoGroup comment.",
+      "recommended_fix": "Closed. No action needed.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-009",
+      "title": "WebSocket fragmentation handling is specified incorrectly",
+      "severity": "high",
+      "category": "api_contract",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "Oversized WebSocket message handling leaves the connection state undefined"
+        }
+      ],
+      "core_problem": "Section 6.2 now correctly specifies buffering frames until EndOfMessage=true. However, the oversized-message handling still has a gap: after detecting the 1 MB limit, the spec says 'the accumulated buffer is discarded' but does not specify whether remaining frames of the oversized message must be drained before resuming normal reads. Leaving unread frames on the socket corrupts all subsequent message framing.",
+      "best_evidence": "Section 6.2: 'messages exceeding this limit are rejected with AddinProtocolErrorMessage(ErrorCode = \"MESSAGE_TOO_LARGE\") and the accumulated buffer is discarded.' No drain-or-close instruction follows.",
+      "recommended_fix": "Specify one of: (a) continue reading and discarding frames until EndOfMessage=true, then resume normal reads; or (b) close the WebSocket with a policy violation close code and reset session state. Option (b) is simpler and safer.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-010",
+      "title": "ArgumentException/ArgumentNullException from handler bugs mapped to InternalError \u2014 resolved",
+      "severity": "low",
+      "category": "api_contract",
+      "merged_from": [],
+      "core_problem": "R1 raised this as a misclassification (ValidationFailed). The spec now maps ArgumentException/ArgumentNullException to InternalError with full stack trace logged. Issue is resolved.",
+      "best_evidence": "Section 4 table: 'ArgumentException / ArgumentNullException \u2192 InternalError. Handler or service bug.'",
+      "recommended_fix": "Closed. No action needed.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-011",
+      "title": "ExecuteAsync reentrancy on the owned STA thread is unspecified, risking self-deadlock",
+      "severity": "low",
+      "category": "feasibility",
+      "merged_from": [],
+      "core_problem": "R1 raised this. The spec now has a full Section 2.3 on reentrancy: when IsOnSwThread is true, ExecuteAsync executes inline. Issue is resolved.",
+      "best_evidence": "Section 2.3: 'When IsOnSwThread is true, ExecuteAsync checks the CancellationToken, then executes the work delegate inline and returns a completed Task<TResult>.'",
+      "recommended_fix": "Closed. No action needed.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-012",
+      "title": "State version ordering between SolidWorks events and tool-result snapshots is undefined",
+      "severity": "low",
+      "category": "operational_risk",
+      "merged_from": [],
+      "core_problem": "R1 raised this. Section 8.3 now defines the ordering guarantee: StateVersionCounter is accessed exclusively from the SW UI thread, and the ToolInProgress coalescing rule prevents duplicate/interleaved version numbers. Issue is resolved.",
+      "best_evidence": "Section 8.3: 'StateVersionCounter is accessed exclusively from the SolidWorks UI thread... This single-threaded access guarantees a total order on version numbers without explicit synchronization.'",
+      "recommended_fix": "Closed. No action needed.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-013",
+      "title": "GetFeatureTree 'user-facing parameter' filtering criteria are undefined",
+      "severity": "low",
+      "category": "ambiguity",
+      "merged_from": [],
+      "core_problem": "R1 raised this. Section 3.4 now defines compressed filtering precisely: excluded feature types by GetTypeName2, and only swParamTypeDouble parameters retained. Issue is resolved.",
+      "best_evidence": "Section 3.4 GetFeatureTree: 'Excluded feature types (by IFeature.GetTypeName2): \"OriginProfileFeature\", \"RefPlane\"... For each included feature, only parameters of type swParamTypeDouble are returned.'",
+      "recommended_fix": "Closed. No action needed.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-014",
+      "title": "Deserializer sync test checks source text presence, not runtime deserialization correctness",
+      "severity": "low",
+      "category": "testability",
+      "merged_from": [],
+      "core_problem": "R1 raised this. Section 5.3 now defines both ProtocolDeserializerSyncTests (reflection-based switch-case existence check) and ProtocolDeserializerRoundTripTests (actual serialization/deserialization correctness). Issue is resolved.",
+      "best_evidence": "Section 5.3: 'ProtocolDeserializerRoundTripTests: For every concrete polymorphic type, constructs a representative instance, serializes it to JSON, and deserializes it through GeneratedMessageDeserializer.'",
+      "recommended_fix": "Closed. No action needed.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-015",
+      "title": "HttpListener requires HTTP.sys URL ACL registration not addressed in deployment prerequisites",
+      "severity": "low",
+      "category": "feasibility",
+      "merged_from": [],
+      "core_problem": "R1 raised this. Section 6.1 now explicitly documents the URL ACL requirement and provides the netsh command. Day-0 validation confirms bind success. Issue is resolved.",
+      "best_evidence": "Section 6.1: 'URL ACL requirement: HttpListener requires HTTP.sys URL ACL registration for non-admin processes. The installer or setup script must run: netsh http add urlacl...'",
+      "recommended_fix": "Closed. No action needed.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-016",
+      "title": "NewPart template resolution contract is undefined, risking interactive dialogs or silent failures",
+      "severity": "high",
+      "category": "api_contract",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "`default_mm` and `default_inch` do not map to distinct template-resolution mechanisms"
+        }
+      ],
+      "core_problem": "The spec now defines template resolution steps (read preference, check file exists, throw TemplateNotFoundException, create, set units). However, both 'default_mm' and 'default_inch' resolve through the same single swDefaultTemplatePart preference path. The only differentiation is a post-creation unit switch. This means the two symbolic names do not represent distinct templates \u2014 they represent the same template file with different unit settings applied after creation. If the template file has embedded unit settings or custom properties that conflict with the post-creation switch, the contract is misleading.",
+      "best_evidence": "Section 3.2: 'Read the default part template path from SolidWorks user preferences (ISldWorks.GetUserPreferenceStringValue(swDefaultTemplatePart))... After creation, set the document unit system: \"default_mm\" \u2192 MMGS, \"default_inch\" \u2192 IPS.'",
+      "recommended_fix": "Either: (a) define separate preference keys or configured paths for mm and inch templates so they can be genuinely distinct files; or (b) rename the parameter to represent requested units (e.g., 'units' enum) and document explicitly that the same default template file is reused with a post-creation unit switch. Option (b) is more honest about the implementation.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-017",
+      "title": "CloseDocument does not specify prompt suppression for dirty documents",
+      "severity": "low",
+      "category": "api_contract",
+      "merged_from": [],
+      "core_problem": "R1 raised this. Section 3.2 now explicitly states: 'The implementation marks the document as not requiring save before closing (suppressing any save-changes modal dialog that would block the UI thread).' Issue is resolved.",
+      "best_evidence": "Section 3.2 CloseDocument comment.",
+      "recommended_fix": "Closed. No action needed.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-018",
+      "title": "Screenshot sharing assumes co-located same-user filesystem context with no fallback",
+      "severity": "high",
+      "category": "operational_risk",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "Screenshot path validation contradicts the stated read-only ownership model"
+        },
+        {
+          "oracle": "Fran",
+          "title": "The screenshot permission model contradicts its own validation procedure"
+        },
+        {
+          "oracle": "Fran",
+          "title": "Client-side screenshot-path validation has no defined mechanism to change add-in behavior"
+        }
+      ],
+      "core_problem": "Three distinct sub-problems remain: (1) The orchestrator is declared read-only in Section 7.2 but Section 7.4 requires it to create and delete a temporary file to validate the path \u2014 this requires write access, directly contradicting the read-only declaration. (2) When path validation fails, the orchestrator 'disables screenshot-dependent features' but no message or negotiated capability is defined to inform the add-in to stop emitting screenshot data. The add-in will continue capturing and writing screenshots that the orchestrator ignores. (3) No fallback for ACL mismatches, antivirus locking, or different elevation contexts.",
+      "best_evidence": "Section 7.2: 'The orchestrator is read-only.' Section 7.4: 'The orchestrator validates that this path is readable from its process context by creating and deleting a temporary file.' Section 7.4: 'If validation fails, the orchestrator logs a warning and disables screenshot-dependent features for the session; screenshot capture is omitted from tool results.' No corresponding add-in notification mechanism defined.",
+      "recommended_fix": "Fix (1): Replace the temp-file probe with a read-only accessibility check (e.g., attempt to open an add-in-written sentinel file), or grant the orchestrator explicit write/delete access and update Section 7.2 accordingly. Fix (2): Add a negotiated capability in the handshake \u2014 either the orchestrator sends a message disabling screenshot emission, or the add-in checks a capability flag before capturing. Fix (3): Document the supported deployment topology constraints explicitly.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-019",
+      "title": "AddinSessionId generation depends on HKLM registry read with no fallback for restricted accounts",
+      "severity": "low",
+      "category": "feasibility",
+      "merged_from": [],
+      "core_problem": "R1 raised this. Section 8.1 now defines a FallbackMachineId() that persists a random GUID to %LOCALAPPDATA%\\BSVoiceCAD\\.machine-id. Day-0 validation step 7 tests both paths. Issue is resolved.",
+      "best_evidence": "Section 8.1 FallbackMachineId() implementation and Section 11 step 7.",
+      "recommended_fix": "Closed. No action needed.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-020",
+      "title": "Hand-maintained deserializer creates ongoing sync fragility post-hackathon",
+      "severity": "low",
+      "category": "testability",
+      "merged_from": [],
+      "core_problem": "R1 raised this. The spec now explicitly acknowledges this as a time-bounded decision with a post-hackathon note to replace with a source generator or shared serializer assembly. The build-breaking sync tests mitigate the risk during the hackathon. Issue is adequately addressed for the current scope.",
+      "best_evidence": "Section 5.2: 'Post-hackathon note: This hand-maintained approach is a time-bounded decision.'",
+      "recommended_fix": "Closed for hackathon scope. Track as technical debt.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-021",
+      "title": "Scope of spec exceeds stated boundaries, creating a god-spec",
+      "severity": "low",
+      "category": "scope",
+      "merged_from": [],
+      "core_problem": "R1 raised this. The spec's scope section is now more precisely bounded with explicit out-of-scope items. The breadth is intentional for the adapter layer. Issue is adequately addressed.",
+      "best_evidence": "Section 0 Out of scope list.",
+      "recommended_fix": "Closed. No action needed.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R2-ISSUE-001",
+      "title": "WindowsFormsSynchronizationContext injection may interfere with SolidWorks's native message handling",
+      "severity": "medium",
+      "category": "feasibility",
+      "merged_from": [
+        {
+          "oracle": "Grok",
+          "title": "Brittle SynchronizationContext installation in non-WinForms STA host"
+        },
+        {
+          "oracle": "Fran",
+          "title": "The UI-thread dispatch bootstrap has no defined product behavior if the injected WindowsFormsSynchronizationContext does not work"
+        }
+      ],
+      "core_problem": "The spec installs a WindowsFormsSynchronizationContext on the SW UI thread if none is present. SolidWorks may already have its own message handling expectations for its UI thread, and injecting a WinForms context could alter modal dialog handling, COM event delivery ordering, or introduce hidden message filters. More critically, the spec only defines a Day-0 validation check but no runtime failure handling or startup gate if the probe fails.",
+      "best_evidence": "Section 2.2: 'If no SynchronizationContext is installed on that thread, the add-in installs a WindowsFormsSynchronizationContext.' Section 11 step 2: 'confirm post/dispatch round-trip works' \u2014 but no failure mode is defined if it doesn't.",
+      "recommended_fix": "Add a mandatory startup gate: if the SynchronizationContext probe fails (post/dispatch round-trip does not complete within a timeout), refuse to start the WebSocket bridge and emit a deterministic error to the log. Additionally, investigate whether SolidWorks already installs a SynchronizationContext on its UI thread in practice (likely it does, given it hosts WinForms dialogs); if so, the install-if-null path may never execute and the concern is moot \u2014 document this finding from Day-0 validation.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R2-ISSUE-002",
+      "title": "ToolCallRegistry is in-memory only; SolidWorks crash loses all state, breaking reconnect guarantees",
+      "severity": "medium",
+      "category": "operational_risk",
+      "merged_from": [
+        {
+          "oracle": "Grok",
+          "title": "ToolCallRegistry state machine survives only in-memory process lifetime"
+        }
+      ],
+      "core_problem": "The registry survives WebSocket reconnects within the same session, but only in memory. If SolidWorks crashes or is force-terminated, the registry is lost. On restart, a new AddinSessionId is generated, so the orchestrator correctly detects a new session. However, the spec's disconnect recovery narrative (Section 9.2, 9.3) implicitly assumes the add-in process survives the disconnect \u2014 the 'Abandoned' state and cached results are only meaningful if the process is still running.",
+      "best_evidence": "Section 9.2 Disclaimer: 'If the add-in is hung or crashed (the likely cause of unplanned disconnect), the rollback attempt may not execute.' The registry is never described as persisted to disk.",
+      "recommended_fix": "The spec already acknowledges the crash case in the disclaimer. For the hackathon scope, this is acceptable. However, the spec should explicitly state that the registry is in-memory only and that crash recovery relies solely on the new-AddinSessionId detection path, not on registry replay. This prevents implementers from assuming persistence is needed.",
+      "conflict_flag": false,
+      "weak_signal": true
+    },
+    {
+      "issue_id": "R2-ISSUE-003",
+      "title": "No concrete cancellation hook defined for queued tool calls at disconnect time",
+      "severity": "high",
+      "category": "feasibility",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "Queued-call cancellation on disconnect is not implementable with the specified interfaces"
+        }
+      ],
+      "core_problem": "Section 9.2 requires that Queued calls be marked Cancelled and their Tasks completed with OperationCanceledException on disconnect. However, the spec does not define how DisconnectHandler or ToolCallRegistry obtains a cancellation handle for already-posted work. ISwCommandQueue.ExecuteAsync accepts a CancellationToken from the caller, but the registry does not define ownership of a per-call CancellationTokenSource that the disconnect path can trigger.",
+      "best_evidence": "Section 9.2: 'Queued calls \u2192 marked Cancelled. Their Tasks are completed with OperationCanceledException.' Section 2.4: 'CancellationToken causes the TaskScheduler to transition the task to Canceled without executing the delegate.' But no per-call CancellationTokenSource ownership is defined in the registry or queue interface.",
+      "recommended_fix": "Define that ToolCallRegistry creates and owns a CancellationTokenSource per tracked call. This token is passed into ISwCommandQueue.ExecuteAsync when the call is enqueued. On disconnect, DisconnectHandler iterates Queued entries and calls Cancel() on their CancellationTokenSources. The TaskScheduler's queued-cancel behavior (Section 2.4) then handles the rest. Add this to the ToolCallTracker data structure definition.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R2-ISSUE-004",
+      "title": "Handshake has no server-side gate preventing pre-handshake tool_call messages from executing",
+      "severity": "high",
+      "category": "operational_risk",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "Handshake ordering depends on client behavior because the server-side gate is unspecified"
+        }
+      ],
+      "core_problem": "Section 6.3 step 6 says 'Client may now send IClientMessages' after the initial StateUpdateMessage, but this is a client-side convention. MessageDispatcher has no defined state that prevents it from dispatching a pipelined tool_call that arrives before the initial state snapshot is sent. A racing tool_call can mutate the model before the baseline StateVersion exists.",
+      "best_evidence": "Section 6.3 step 5-6: 'Add-in captures current SW state and sends StateUpdateMessage(Trigger = InitialState)... Client may now send IClientMessages.' Section 6.4: 'Dispatches incoming messages by polymorphic type.' No handshake-incomplete guard defined.",
+      "recommended_fix": "Define an explicit HandshakeComplete flag in MessageDispatcher. Before this flag is set (after AddinReadyMessage and initial StateUpdateMessage are sent), any incoming IClientMessage is rejected with AddinProtocolErrorMessage(ErrorCode = 'HANDSHAKE_INCOMPLETE'). Set the flag atomically after the initial state snapshot is sent.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R2-ISSUE-005",
+      "title": "AddinSessionId uniqueness guarantee is overstated; rapid reloads or clock rollback can produce collisions",
+      "severity": "medium",
+      "category": "feasibility",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "AddinSessionId uniqueness guarantee is stronger than the implementation provides"
+        },
+        {
+          "oracle": "Fran",
+          "title": "AddinSessionId lifecycle is contradictory for add-in reloads inside one SolidWorks process"
+        }
+      ],
+      "core_problem": "Two related problems: (1) The spec states the ID is 'guaranteed to change on add-in reload' but uses DateTime.UtcNow.Ticks which is not monotonic \u2014 rapid reloads within the same tick resolution or clock rollback can produce the same input tuple and thus the same ID. (2) Section 8.1 says 'guaranteed to change on add-in reload' while Section 8.2 says regenerated 'On SolidWorks restart' \u2014 these conflict when the add-in is unloaded and reloaded within the same SolidWorks process (e.g., via the add-in manager).",
+      "best_evidence": "Section 8.1: 'guaranteed to change on add-in reload' and 'var loadTimestamp = DateTime.UtcNow.Ticks'. Section 8.2: 'Stable for the duration of the SolidWorks session... On SolidWorks restart, the add-in re-runs ConnectToSW and a new AddinSessionId is generated.' No mention of mid-session reload.",
+      "recommended_fix": "Replace DateTime.UtcNow.Ticks with Guid.NewGuid() as the entropy source (or append it to the hash input) to guarantee uniqueness regardless of clock state. Explicitly define add-in reload within the same SolidWorks process as a session boundary (new AddinSessionId generated), and add this case to AddinSessionIdGenerationTests.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R2-ISSUE-006",
+      "title": "CallId used raw in screenshot filenames without validation, enabling path traversal",
+      "severity": "high",
+      "category": "security",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "Raw `CallId` is used in screenshot filenames without a stated server-side validation step"
+        }
+      ],
+      "core_problem": "The screenshot filename incorporates the client-supplied CallId directly as a path component. The spec does not require the adapter to validate or sanitize CallId before using it in filesystem paths. Any local process connecting to the localhost WebSocket can supply a malformed CallId containing path separators or traversal sequences (e.g., '../../../sensitive/file'), potentially writing files outside the intended screenshot directory.",
+      "best_evidence": "Section 7.1: '{screenshotDir}\\{addinSessionId}\\{utcTicks}_{callId}.png'. Section 3.5 CaptureScreenshot signature: 'string callId'. No validation step defined.",
+      "recommended_fix": "Require that any inbound CallId be validated as a strict UUIDv7 format (lowercase hex with hyphens, matching the pattern defined in SPEC-01) before it is accepted into the registry or used in any filesystem path. Reject non-conforming CallIds with AddinProtocolErrorMessage(ErrorCode = 'INVALID_CALL_ID'). Add this validation to ToolDispatcher or MessageDispatcher at message ingestion time.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R2-ISSUE-007",
+      "title": "ToolInProgress flag has no required finally-block cleanup, leaving event capture suppressed after tool exceptions",
+      "severity": "high",
+      "category": "omission",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "`ToolInProgress` cleanup on exception is not required"
+        }
+      ],
+      "core_problem": "Section 2.3 defines the ToolInProgress flag as set by ToolDispatcher 'before and after each tool execution' to suppress re-entrant COM event state capture. However, the spec does not require this flag to be reset in a finally block. If tool execution throws an exception, the flag remains true indefinitely, permanently suppressing all subsequent event-driven state capture for the session.",
+      "best_evidence": "Section 2.3: 'ToolInProgress flag (set by ToolDispatcher before and after each tool execution). While ToolInProgress is true, incoming SW events are noted but state capture is suppressed.' No finally-block requirement stated.",
+      "recommended_fix": "Require ToolDispatcher to manage ToolInProgress in a try/finally block: set to true before invoking the handler, reset to false in the finally block regardless of outcome. Add a build-breaking test to ToolDispatcherTests that verifies ToolInProgress is false after a handler throws an exception.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R2-ISSUE-008",
+      "title": "ModifyParameter featureId and parameterName can disagree with no defined resolution behavior",
+      "severity": "medium",
+      "category": "api_contract",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "`ModifyParameter` does not define how `featureId` interacts with `parameterName`"
+        }
+      ],
+      "core_problem": "The ModifyParameter signature takes both featureId and parameterName, but a concrete SolidWorks parameter identifier (e.g., 'Depth@Boss-Extrude1') already embeds the owning feature name. The spec does not define what happens when featureId and the feature embedded in parameterName disagree \u2014 implementations may ignore featureId, use it as a secondary lookup, or throw on mismatch.",
+      "best_evidence": "Section 3.4: 'void ModifyParameter(string featureId, string parameterName, double newValue)' and 'ParameterName MUST be the concrete SolidWorks parameter identifier (e.g., \"D1@Sketch1\", \"Depth@Boss-Extrude1\").' No conflict resolution defined.",
+      "recommended_fix": "Either: (a) remove featureId from the method signature since parameterName already encodes the feature identity; or (b) define exact validation: if featureId and the feature name embedded in parameterName disagree, throw ArgumentException (mapped to InternalError). Document which takes precedence if featureId is used as a lookup hint.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R2-ISSUE-009",
+      "title": "Five-state deduplication registry complexity may be unnecessary given SPEC-03 lifecycle ownership",
+      "severity": "low",
+      "category": "complexity_inflation",
+      "merged_from": [
+        {
+          "oracle": "Grok",
+          "title": "Complexity inflation in five-state deduplication registry vs simpler SPEC-03 contract"
+        }
+      ],
+      "core_problem": "Grok argues the five-state registry (Queued/Executing/Completed/Cancelled/Abandoned) with 60-second result cache and multiple error codes creates combinatorial test complexity that may be unnecessary if SPEC-03 enforces unique CallIds and handles timeouts at the lifecycle layer.",
+      "best_evidence": "Section 6.5 defines five states, three error codes (IN_FLIGHT_DUPLICATE, EXPIRED_CALL_ID, TERMINATED_CALL_ID), and a 60-second retention window.",
+      "recommended_fix": "This is a design trade-off, not a clear defect. The registry provides idempotency guarantees that are valuable for reconnect scenarios. Flag as a design decision to be validated against SPEC-03 requirements. If SPEC-03 can guarantee unique CallIds and does not need replay, simplification is possible. Do not simplify without SPEC-03 author agreement.",
+      "conflict_flag": false,
+      "weak_signal": true
+    }
+  ],
+  "dropped_findings": [
+    {
+      "oracle": "Grok",
+      "title": "Screenshot directory convention creates brittle cross-process dependency without hardening",
+      "reason": "duplicate \u2014 merged into R1-ISSUE-018 along with Codex and Fran findings on the same topic"
+    },
+    {
+      "oracle": "Grok",
+      "title": "Omission of SolidWorks multi-instance and safe-mode edge cases",
+      "reason": "too_vague \u2014 the multi-instance concern is partially addressed by the AddinSessionId including swProcessId; safe-mode is a valid but low-priority edge case for a hackathon spec with explicit scope boundaries. The AddinSessionId fix in R2-ISSUE-005 (adding Guid entropy) also mitigates the multi-instance collision risk. Not actionable as a standalone issue at this scope."
+    }
+  ]
+}

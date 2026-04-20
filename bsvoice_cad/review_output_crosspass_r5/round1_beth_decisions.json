@@ -1,0 +1,111 @@
+{
+  "oracle_name": "Beth",
+  "role": "coordinator",
+  "revision_decisions": [
+    {
+      "issue_id": "R1-ISSUE-001",
+      "decision": "accepted_defect",
+      "reason": "PipelineResult.DecorationPayload contains VocabularyResolutionDecoration, which contains VocabularyPipelineReturn polymorphic over PipelineResult \u2014 creating an infinite serialization cycle. System.Text.Json will throw or loop. Fixed by adding a serialization cycle-breaking invariant: when PipelineResult is nested inside VocabularyResolutionDecoration.PipelineReturn, DecorationPayload MUST be null."
+    },
+    {
+      "issue_id": "R1-ISSUE-002",
+      "decision": "accepted_defect",
+      "reason": "SPEC-00 Seam E declares SPEC-05 has no direct SPEC-04 assembly reference, but SPEC-07 SDR-07-012 requires SPEC-05 to call DhfDecorationWriter and LockSessionAsync. Fixed by adding Seam E\u2082 and updating Module Map to acknowledge a narrow, governed SPEC-05 \u2192 SPEC-04 dependency for decoration persistence only."
+    },
+    {
+      "issue_id": "R1-ISSUE-003",
+      "decision": "accepted_defect",
+      "reason": "SPEC-07 \u00a70 claims pipeline success ONLY after durable write, but after v1.1.2 the turn commits first and decoration write is separate. A committed turn can exist without its citation if the decoration write fails. Fixed by downgrading the guarantee to best-effort-with-retry with compensating control (session lock prevents further uncited turns)."
+    },
+    {
+      "issue_id": "R1-ISSUE-004",
+      "decision": "accepted_defect",
+      "reason": "StageLatencies in \u00a76.4 declares required DecorationWriteMs and TotalMs fields, but SPEC-07 no longer performs decoration writes (moved to SPEC-05 in v1.1.2). Fixed by removing these fields and adding PayloadAssemblyMs for the in-memory Stage 5."
+    },
+    {
+      "issue_id": "R1-ISSUE-005",
+      "decision": "accepted_defect",
+      "reason": ".NET Framework 4.8 ClientWebSocket does not reliably expose HTTP status codes from failed WebSocket upgrades. The branching on HTTP 400/401/429 in SPEC-02 \u00a76.2 may not be implementable as specified. Fixed by adding NetFx status-code extraction guidance and recommending an optional HTTPS preflight probe."
+    },
+    {
+      "issue_id": "R1-ISSUE-006",
+      "decision": "accepted_defect",
+      "reason": "SPEC-02 ISolidWorksFeatureService.GetFeatureTree takes (bool includeSuppressed, bool compressed) but SPEC-01 GetFeatureTreeInput only has IncludeSuppressed. The compressed parameter has no wire representation. Fixed by adding Compressed field to GetFeatureTreeInput with default true."
+    },
+    {
+      "issue_id": "R1-ISSUE-007",
+      "decision": "accepted_defect",
+      "reason": "SPEC-02 \u00a77.5 emits FeatureTreeHash='OVERSIZE' in the error path, contradicting SPEC-01 \u00a78 invariant that FeatureTreeHash must reflect the complete tree. Fixed by requiring the real hash to be computed before truncation, consistent with the normal truncation path."
+    },
+    {
+      "issue_id": "R1-ISSUE-008",
+      "decision": "accepted_defect",
+      "reason": "SPEC-02 \u00a711 item 11 validates 'the orchestrator's DHF session row shows closure reason explicit_shutdown' but SPEC-00 v1.5.1 C3 explicitly removed closure_reason from DHF schema (lives in Serilog). Fixed by redirecting validation to the structured log event."
+    },
+    {
+      "issue_id": "R1-ISSUE-009",
+      "decision": "accepted_defect",
+      "reason": "\u00a79.0.2 pseudocode uses direct _webSocket.SendAsync (no UI thread queue) but \u00a79.0.3 and \u00a79.1.1 claim teardown sends go through SwUiThreadCommandQueue. Mutually exclusive execution models. Fixed by declaring \u00a79.0.2 direct socket I/O as authoritative, updating \u00a79.0.3 rationale, and changing \u00a79.1.1 to attempt teardown during escalation since the WebSocket write does not require the STA thread."
+    },
+    {
+      "issue_id": "R1-ISSUE-010",
+      "decision": "accepted_defect",
+      "reason": "SDR-06-008 references ViewerOptions.VocabRawInputAllowed as the security gate but the property is absent from the ViewerOptions class and appsettings config. Fixed by adding the property and config entry."
+    },
+    {
+      "issue_id": "R1-ISSUE-011",
+      "decision": "accepted_defect",
+      "reason": "\u00a73.3 says 'Decoration Written? Only if security_event=true' for bouncer rejections; \u00a714 says 'No (security events logged, not DHF'd)'; v1.1.1 M3 says 'no DHF decoration for rejections.' Three contradictory answers. Fixed by adopting the \u00a714/changelog position (no DHF decoration for any rejection) and updating \u00a73.3."
+    },
+    {
+      "issue_id": "R1-ISSUE-012",
+      "decision": "accepted_defect",
+      "reason": "SPEC-02 \u00a79.0.2 pseudocode uses Guid.CreateVersion7() which requires .NET 9+; add-in targets .NET Framework 4.8 per SDR-TL-001. Fixed by adding a UUIDv7 polyfill note naming the required NuGet package and shared helper."
+    },
+    {
+      "issue_id": "R1-ISSUE-013",
+      "decision": "accepted_defect",
+      "reason": "SPEC-04 \u00a76.1 stale-session cleanup closes all open sessions for the same tenant+workstation, but the spec never declares that only one SolidWorks process may be active per workstation. Two legitimate instances would conflict silently. Fixed by documenting the single-process-per-workstation assumption in SPEC-00 \u00a76 glossary."
+    },
+    {
+      "issue_id": "R1-ISSUE-014",
+      "decision": "preference_only",
+      "reason": "The spec already uses the deterministic regex scan as the primary security gate (\u00a74.5 pre-cache injection scan runs before cache lookup and LLM invocation). The LLM bouncer is a secondary gate. The phonetic evasion gap is explicitly documented as a known limitation with a v1.5 fix path. The recommendation to add rate limiting is reasonable but is a v1.5 enhancement, not a defect in the current architecture."
+    },
+    {
+      "issue_id": "R1-ISSUE-015",
+      "decision": "preference_only",
+      "reason": "SPEC-00's behavioral detail at seam boundaries is an intentional design choice. Seam contracts necessarily include behavioral specifications for what happens at module boundaries. The current centralized approach prevents drift that distributed ownership could introduce. This is a document-organization preference, not a defect."
+    }
+  ],
+  "architectural_risks_remaining": [
+    "Non-atomic citation persistence: after R1-ISSUE-003 fix, a narrow window exists where a committed turn lacks its vocabulary-resolution decoration. The compensating control (session lock on circuit-breaker open) bounds blast radius to one uncited turn per failure episode, but the atomicity guarantee from SPEC-07 \u00a70 is downgraded.",
+    "SPEC-05 contract undefined: the DhfDecorationPersister that SPEC-05 must implement (SDR-07-012) is still TBD. SPEC-05 has not been authored yet. The Seam E\u2082 addition documents the dependency direction but the implementation contract remains a gap until SPEC-05 is written.",
+    "NetFx HTTP status observability: the R1-ISSUE-005 fix provides workaround guidance but does not eliminate the fundamental limitation. Day-0 validation must confirm the chosen extraction approach works on the target runtime."
+  ],
+  "revised_sections": [
+    "SPEC-00 \u00a71 Module Map (SPEC-05 depends-on updated)",
+    "SPEC-00 Seam E (split into E and E\u2082 for decoration persistence)",
+    "SPEC-00 \u00a76 Glossary (single-process-per-workstation assumption added)",
+    "SPEC-01 \u00a77.1 GetFeatureTreeInput (Compressed field added)",
+    "SPEC-02 \u00a76.2 (NetFx status-code observability note)",
+    "SPEC-02 \u00a77.5 (OVERSIZE sentinel replaced with real hash)",
+    "SPEC-02 \u00a79.0.2 (UUIDv7 polyfill note)",
+    "SPEC-02 \u00a79.0.3 (threading model corrected)",
+    "SPEC-02 \u00a79.1.1 (escalation teardown attempt enabled)",
+    "SPEC-02 \u00a711 item 11 (DHF row check \u2192 Serilog log check)",
+    "SPEC-06 \u00a73 ViewerOptions (VocabRawInputAllowed added)",
+    "SPEC-06 \u00a713 Configuration (vocabRawInputAllowed added)",
+    "SPEC-07 \u00a70 (atomicity claim downgraded)",
+    "SPEC-07 SDR-07-006 (durability claim corrected)",
+    "SPEC-07 \u00a73.3 (security-event decoration column fixed)",
+    "SPEC-07 \u00a76.4 StageLatencies (DecorationWriteMs/TotalMs removed)",
+    "SPEC-07 \u00a78.2 (cycle-breaking invariant added, PersistedStageLatencies updated)"
+  ],
+  "open_questions": [
+    "Should SPEC-05's DhfDecorationPersister contract be authored before implementation begins, or can it be deferred until the SPEC-05 authoring pass? The Seam E\u2082 addition documents the boundary but the implementation contract is still TBD.",
+    "Should the non-atomic citation persistence be elevated to a formal acceptance criterion (e.g., ACC-31: 'A turn committed without its vocabulary decoration triggers session lock within one retry cycle'), or is the SDR-07-012 compensating-control description sufficient?",
+    "The NetFx preflight probe to GET /health is recommended but optional. Should it be mandatory for v1 to provide reliable auth-failure differentiation?"
+  ],
+  "revised_draft": null
+}

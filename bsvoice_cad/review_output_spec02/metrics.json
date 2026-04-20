@@ -1,0 +1,13 @@
+{
+  "accepted_critical_count": 0,
+  "accepted_high_count": 8,
+  "total_accepted_defects": 31,
+  "total_rejected_claims": 17,
+  "total_preference_only": 3,
+  "novel_issue_count": 30,
+  "duplicate_rate": 0.0,
+  "unsupported_claim_rate": 0.0,
+  "rounds_to_stability": 2,
+  "valid_rounds": 2,
+  "converged": false
+}

@@ -1,0 +1,380 @@
+{
+  "oracle_name": "Sonnet",
+  "role": "referee",
+  "normalized_issues": [
+    {
+      "issue_id": "R1-ISSUE-001",
+      "title": "STA queue dispatches to a private thread, not the SolidWorks-owned COM apartment",
+      "severity": "critical",
+      "category": "feasibility",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "Queue dispatches to a new STA thread, not the SolidWorks-owned apartment"
+        },
+        {
+          "oracle": "Codex",
+          "title": "Queue targets a private STA thread instead of the SolidWorks UI apartment"
+        }
+      ],
+      "core_problem": "The spec correctly identifies that SolidWorks COM calls must occur on the SolidWorks UI thread/apartment, but then implements a separate queue-owned STA thread. A different STA thread is not the same COM apartment as the SolidWorks main thread. Cross-apartment COM access can still produce RPC_E_WRONG_THREAD or marshaling stalls even though the target thread is STA.",
+      "best_evidence": "Section 2.1: 'A call ... from anything other than the SolidWorks UI thread produces COMException 0x8001010E'; Section 2.2: 'It holds a dedicated STA thread ... Every SW COM call in the codebase enters through ISwCommandQueue.ExecuteAsync(...)'. These two statements are in direct tension.",
+      "recommended_fix": "Dispatch onto the actual SolidWorks UI thread/apartment captured at add-in startup (e.g., via SolidWorks's own callback/timer mechanism), or explicitly document and validate with real integration tests that all SolidWorks COM object acquisition and use occurs exclusively on the queue-owned STA and that SolidWorks supports this model.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-002",
+      "title": "STA worker thread has no Windows message pump, risking COM deadlocks",
+      "severity": "high",
+      "category": "feasibility",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "The STA worker has no defined Windows message pump"
+        }
+      ],
+      "core_problem": "The spec describes the STA thread as pumping a BlockingCollection, which is not a COM/Win32 message pump. COM STA marshaling and event reentrancy require a GetMessage/DispatchMessage loop. Without it, COM callbacks and cross-apartment calls can deadlock.",
+      "best_evidence": "Section 2.2: 'The thread pumps a BlockingCollection<SwCommand> FIFO queue.' \u2014 no mention of Application.DoEvents, a message loop, or equivalent reentrancy handling.",
+      "recommended_fix": "Use the existing SolidWorks UI thread and its message loop, or specify and implement a real Windows message loop around queued execution and validate with COM integration tests.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-003",
+      "title": "5-second shutdown join guarantee is unenforceable given non-preemptible COM calls",
+      "severity": "high",
+      "category": "contradiction",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "Shutdown contract contradicts non-preemptible COM execution"
+        }
+      ],
+      "core_problem": "Section 2.3 states COM calls cannot be interrupted and run to completion. Section 2.4 promises a 5-second grace timeout for Stop/join. Section 2.5 encodes this as a build-breaking test. If the executing COM call takes longer than 5 seconds or hangs, the test encodes a guarantee the implementation cannot satisfy.",
+      "best_evidence": "Section 2.3: 'COM calls cannot be interrupted. The worker runs the command to completion.' Section 2.4: 'joins the STA thread with a 5-second grace timeout.' Section 2.5: 'Asserts Stop drains and joins within 5 seconds.'",
+      "recommended_fix": "Redefine shutdown semantics: cancel only queued (not-yet-started) work, mark an executing command as indeterminate if stop is requested, and specify the unload fallback when the active COM call does not return within the grace period. Remove the 5-second join assertion from the build-breaking test.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-004",
+      "title": "SHA256.HashData is not available on .NET Framework 4.8",
+      "severity": "critical",
+      "category": "feasibility",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "`SHA256.HashData` is not available on the declared target framework"
+        },
+        {
+          "oracle": "Codex",
+          "title": "The spec uses `SHA256.HashData`, which is unavailable on .NET Framework 4.8"
+        }
+      ],
+      "core_problem": "SHA256.HashData is a .NET 5+ static convenience method and does not exist in .NET Framework 4.8. The spec uses it in Section 8.1 (AddinSessionIdGenerator) and references it in Section 11 Day-0 validation. The code will not compile on the stated target.",
+      "best_evidence": "Section 8.1: 'var hash = SHA256.HashData(Encoding.UTF8.GetBytes(input));' \u2014 target is '.NET Framework 4.8' per the header and Section 0.",
+      "recommended_fix": "Replace all SHA256.HashData usages with the .NET Framework 4.8-compatible pattern: 'using var sha = SHA256.Create(); var hash = sha.ComputeHash(bytes);'",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-005",
+      "title": "Tool-call deduplication registry is cleared on disconnect, allowing CallId replay after reconnect",
+      "severity": "high",
+      "category": "operational_risk",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "Tool-call deduplication is lost across reconnects"
+        },
+        {
+          "oracle": "Codex",
+          "title": "Deduplication state is lost on reconnect, allowing the same CallId to re-execute side effects"
+        }
+      ],
+      "core_problem": "ToolCallRegistry is scoped per-connection and explicitly cleared on both planned and unplanned disconnect. A client that retries after transport loss sends the same CallId, which is treated as a new tool call and can re-execute mutating operations (sketch, extrude, etc.) against an already-modified model.",
+      "best_evidence": "Section 6.4: 'A per-connection Dictionary<string, ToolCallTracker>'; Sections 9.1 and 9.2 both state 'Clears ToolCallRegistry' on disconnect.",
+      "recommended_fix": "Scope deduplication to AddinSessionId rather than the socket connection, retaining InFlight/Completed records across reconnects until TTL expiry or explicit session reset. Alternatively, explicitly declare the protocol as at-least-once and require all tools to be idempotent.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-006",
+      "title": "Forced client drop can race with non-preemptible executing COM work, producing inconsistent state",
+      "severity": "critical",
+      "category": "operational_risk",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "Forced disconnect can leave non-preemptible COM work mutating the model after the client is dropped"
+        }
+      ],
+      "core_problem": "Section 6.1 allows dropping the current client when a new connection arrives. Section 9.1 waits up to 60 seconds then forces the drop. Section 2.3 states executing COM calls run to completion. A replacement client can connect and receive an initial state snapshot while the previous command is still mutating the model, causing the snapshot to be stale and dedup/rollback cleanup to race with ongoing mutations.",
+      "best_evidence": "Section 2.3: 'COM calls cannot be interrupted... The worker runs the command to completion'; Section 9.1: 'forced drop otherwise'; Section 6.1: 'the current client is dropped'.",
+      "recommended_fix": "Do not accept a replacement client or clear session state while a command is still executing. Block reconnect until the COM call finishes, or require add-in/process restart when a command exceeds the disconnect grace period.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-007",
+      "title": "InFlight calls marked Cancelled on disconnect even though executing commands may still complete and mutate the model",
+      "severity": "high",
+      "category": "contradiction",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "Unplanned disconnect marks executing calls as `Cancelled` even though they may still complete"
+        }
+      ],
+      "core_problem": "Section 2.3 states that once a command starts executing, it runs to completion and the result is returned normally. Section 9.2 marks all InFlight calls as Cancelled on unplanned disconnect. InFlight includes commands already executing, so labeling them Cancelled is incorrect \u2014 the model may have been mutated.",
+      "best_evidence": "Section 2.3: 'The worker runs the command to completion'; Section 9.2 step 1: 'Marks all InFlight calls as Cancelled locally'.",
+      "recommended_fix": "Split InFlight into at least two states: queued-not-started and executing. Mark queued-not-started as Cancelled; mark executing-on-disconnect as Abandoned or UnknownOutcome. Update reconnect and audit logic accordingly.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-008",
+      "title": "Undo-group nesting is simultaneously permitted and prohibited",
+      "severity": "high",
+      "category": "contradiction",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "Undo-group nesting is simultaneously allowed and disallowed"
+        },
+        {
+          "oracle": "Codex",
+          "title": "Undo-group nesting is contradicted by the rest of the contract"
+        }
+      ],
+      "core_problem": "Section 3.6 states 'Multiple calls with different group IDs nest' but immediately adds 'tests restrict this to at most one active group at a time.' GetActiveUndoGroupId() returns a single string. Reconnect cleanup in Section 9.3 only checks for one active group. The spec does not define which rule governs implementation.",
+      "best_evidence": "Section 3.6: 'Multiple calls with different group IDs nest; tests restrict this to at most one active group at a time.'",
+      "recommended_fix": "Choose one model. Either forbid nesting in the contract (reject StartUndoGroup when one is already active, enforce in tests) or define full nested-stack semantics including GetActiveUndoGroups, cleanup order, and reconnect unwinding.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-009",
+      "title": "WebSocket fragmentation handling is specified incorrectly",
+      "severity": "high",
+      "category": "api_contract",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "WebSocket fragmentation handling is specified incorrectly"
+        }
+      ],
+      "core_problem": "Section 6.1 states 'System.Net.WebSockets reassembles fragmented frames before the application sees them.' This is false. System.Net.WebSockets does not automatically reassemble multi-frame messages; callers must loop on ReceiveAsync accumulating buffers until EndOfMessage is true.",
+      "best_evidence": "Section 6.1: 'System.Net.WebSockets reassembles fragmented frames before the application sees them.'",
+      "recommended_fix": "Specify an explicit receive loop that buffers frames until EndOfMessage, enforces a maximum message size, and only then deserializes one JSON document.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-010",
+      "title": "ArgumentException/ArgumentNullException from handler bugs mapped to ValidationFailed, misclassifying server defects as client errors",
+      "severity": "high",
+      "category": "api_contract",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "Internal handler bugs are mapped as client validation failures"
+        }
+      ],
+      "core_problem": "The COM exception mapping table maps ArgumentException/ArgumentNullException to ValidationFailed with the note 'Indicates handler bug.' This tells the client its request was invalid when the actual cause is a server-side defect, hiding bugs and potentially triggering wrong retry/recovery logic upstream.",
+      "best_evidence": "Section 4 table row: 'ArgumentException / ArgumentNullException \u2192 ValidationFailed \u2014 Indicates handler bug; validator should have caught it upstream.'",
+      "recommended_fix": "Map only exceptions explicitly thrown by the validation layer to ValidationFailed. Treat unexpected ArgumentException/ArgumentNullException from handlers or services as InternalError unless the source is unambiguously user-input validation.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-011",
+      "title": "ExecuteAsync reentrancy on the owned STA thread is unspecified, risking self-deadlock",
+      "severity": "high",
+      "category": "feasibility",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "`ExecuteAsync` reentrancy on the owned STA thread is unspecified"
+        }
+      ],
+      "core_problem": "If code already running on the STA thread calls ExecuteAsync and awaits the returned Task, the queue will deadlock (the task can never complete because the STA thread is blocked waiting for itself). The spec provides IsOnStaThread but explicitly forbids using it for flow control, leaving implementers with no safe reentrancy rule.",
+      "best_evidence": "Section 2.2: IsOnStaThread 'must not be used for flow control'; no behavior defined for ExecuteAsync when called from the queue's own STA thread.",
+      "recommended_fix": "Define one explicit behavior: either execute inline when already on the owner thread (with a note about reentrancy implications), or reject nested ExecuteAsync calls with a deterministic exception and add a test for this case.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-012",
+      "title": "State version ordering between SolidWorks events and tool-result snapshots is undefined",
+      "severity": "high",
+      "category": "operational_risk",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "State versioning has no ordering contract between SolidWorks events and tool-result snapshots"
+        }
+      ],
+      "core_problem": "EventRelay.cs fires StateUpdateMessages from SolidWorks events. Tool calls produce StateAfter snapshots via the command queue. The spec never defines how these two sources of state updates are serialized relative to each other, creating the possibility of out-of-order or duplicate version numbers.",
+      "best_evidence": "Project shape: 'EventRelay.cs # SW events \u2192 StateUpdateMessage'; Section 8.3: StateVersionCounter 'Increments monotonically on every StateUpdateMessage and ToolResultMessage.StateAfter' \u2014 no ordering rule between the two sources.",
+      "recommended_fix": "Route all event-originated state capture through the same command queue and a single version allocator. Define ordering and coalescing rules between event updates and ToolResultMessage.StateAfter.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-013",
+      "title": "GetFeatureTree 'user-facing parameter' filtering criteria are undefined",
+      "severity": "high",
+      "category": "ambiguity",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "`GetFeatureTree` filtering criteria are undefined"
+        }
+      ],
+      "core_problem": "The compressed=true filtering rule is described as 'named user-facing parameters only (excludes SolidWorks-internal bookkeeping parameters)' without defining what constitutes a user-facing vs. bookkeeping parameter. The agent relies on this output to resolve concrete parameter identifiers, making the contract untestable and likely to drift across SolidWorks versions.",
+      "best_evidence": "Section 3.4: 'feature parameter lists are filtered to named user-facing parameters only (excludes SolidWorks-internal bookkeeping parameters)'",
+      "recommended_fix": "Define exact inclusion/exclusion criteria (e.g., parameters whose names match a specific pattern, or a whitelist per feature type), including version-stability expectations. Alternatively, return the full parameter list and move filtering to a higher layer.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-014",
+      "title": "Deserializer sync test checks source text presence, not runtime deserialization correctness",
+      "severity": "medium",
+      "category": "testability",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "Deserializer sync test checks source text, not runtime behavior"
+        }
+      ],
+      "core_problem": "ProtocolDeserializerSyncTests asserts that a switch case exists in the source file, but does not verify discriminator values, target types, nested union routing, or actual deserialization success. The test can pass while the runtime deserializer routes a message to the wrong type or fails on real payloads.",
+      "best_evidence": "Section 5.3: 'asserts that the corresponding switch case exists in GeneratedMessageDeserializer.cs'",
+      "recommended_fix": "Add runtime round-trip tests for every concrete polymorphic type using real serialized payloads, asserting successful deserialization to the expected concrete type. Keep the source-text check as a secondary guard, not the primary correctness signal.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-015",
+      "title": "HttpListener requires HTTP.sys URL ACL registration not addressed in deployment prerequisites",
+      "severity": "high",
+      "category": "feasibility",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "`HttpListener` deployment prerequisites are omitted"
+        }
+      ],
+      "core_problem": "HttpListener on Windows requires HTTP.sys URL ACL registration for non-admin processes. The spec defines no installer or provisioning step for this, meaning the add-in may silently fail to bind its WebSocket bridge on standard-user machines.",
+      "best_evidence": "Section 6.1: 'Uses System.Net.HttpListener' binding 'ws://127.0.0.1:7878/bsvoice-cad'; Day-0 validation only says the sample server 'binds' with no mention of URL ACL.",
+      "recommended_fix": "Add a deployment requirement that reserves the URL prefix during installation (netsh http add urlacl), or switch to a raw TcpListener-based WebSocket implementation that does not depend on HTTP.sys URL ACLs.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-016",
+      "title": "NewPart template resolution contract is undefined, risking interactive dialogs or silent failures",
+      "severity": "high",
+      "category": "api_contract",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "`NewPart` lacks a concrete template-resolution contract"
+        }
+      ],
+      "core_problem": "The spec defines symbolic template names ('default_mm', 'default_inch') but not how they map to actual SolidWorks template file paths or user settings. On clean machines or misconfigured profiles, NewPart can fail or trigger interactive template dialogs that block the STA queue.",
+      "best_evidence": "Section 3.2: 'Supported templates: \"default_mm\", \"default_inch\".' \u2014 no path resolution, no startup validation, no error contract for missing templates.",
+      "recommended_fix": "Define the exact source of the template path for each symbolic name (e.g., SolidWorks default template settings, a config file, or a bundled template), add startup validation for missing templates, and specify the ToolError returned when resolution fails.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-017",
+      "title": "CloseDocument does not specify prompt suppression for dirty documents",
+      "severity": "high",
+      "category": "api_contract",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "`CloseDocument` does not define behavior for unsaved changes or prompt suppression"
+        }
+      ],
+      "core_problem": "CloseDocument says 'Does not save' but omits what happens when the target document is dirty and SolidWorks would normally show a save/discard prompt. A modal prompt on the SolidWorks UI blocks the STA queue and can hang the adapter indefinitely.",
+      "best_evidence": "Section 3.2: 'Closes the named document. Does not save.' \u2014 no mention of COM flags, silent-close settings, or error behavior for dirty documents.",
+      "recommended_fix": "Specify silent-close behavior explicitly, including the COM flags or SolidWorks settings used to suppress prompts, and define the ToolError returned when a dirty document cannot be closed non-interactively.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-018",
+      "title": "Screenshot sharing assumes co-located same-user filesystem context with no fallback",
+      "severity": "high",
+      "category": "operational_risk",
+      "merged_from": [
+        {
+          "oracle": "Grok",
+          "title": "Screenshot sharing assumes perfect same-user filesystem context"
+        }
+      ],
+      "core_problem": "The screenshot mechanism assumes the add-in and orchestrator share the same %LOCALAPPDATA% path. This breaks under UAC elevation, containerized orchestrators, remote desktop sessions, or antivirus locking LocalAppData. The only failure handling is a logged warning and omission from context.",
+      "best_evidence": "Section 7: 'the add-in (which runs in the same local user context as the orchestrator)' and path using %LOCALAPPDATA%\\BSVoiceCAD\\screenshots\\{addinSessionId}.",
+      "recommended_fix": "Require an explicit shared directory via config/environment variable with handshake confirmation. Add a memory-only or in-message transfer option for non-co-located processes.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-019",
+      "title": "AddinSessionId generation depends on HKLM registry read with no fallback for restricted accounts",
+      "severity": "medium",
+      "category": "feasibility",
+      "merged_from": [
+        {
+          "oracle": "Grok",
+          "title": "AddinSessionId generation depends on registry read that may be unavailable"
+        }
+      ],
+      "core_problem": "ReadMachineGuidFromRegistry reads HKLM\\SOFTWARE\\Microsoft\\Cryptography\\MachineGuid. This can fail under restricted user accounts, AppLocker policies, or non-Windows CI. No fallback or error behavior is specified, which would break the reconnect handshake and screenshot paths.",
+      "best_evidence": "Section 8.1: 'ReadMachineGuidFromRegistry() // HKLM\\SOFTWARE\\Microsoft\\Cryptography\\MachineGuid' \u2014 no fallback defined.",
+      "recommended_fix": "Document a fallback (e.g., random GUID persisted in a user-writable location) and test under a least-privilege account. Day-0 validation should include a restricted-account test.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-020",
+      "title": "Hand-maintained deserializer creates ongoing sync fragility post-hackathon",
+      "severity": "medium",
+      "category": "testability",
+      "merged_from": [
+        {
+          "oracle": "Grok",
+          "title": "Hand-maintained deserializer creates permanent sync fragility"
+        }
+      ],
+      "core_problem": "The rationale for hand-maintaining GeneratedMessageDeserializer.cs is explicitly scoped to hackathon conditions ('protocol changes are rare during the hackathon'). The spec does not address post-hackathon evolution, where the reflection-based sync test becomes a recurring source of build breaks.",
+      "best_evidence": "Section 5.2: 'Rationale for check-in over codegen: protocol changes are rare during the hackathon (the types freeze on Day 1).'",
+      "recommended_fix": "Accept the current approach as a time-bounded decision but add a TODO/ADR noting that a source generator or shared serializer assembly should replace this before the protocol stabilizes for production. The alternative of System.Text.Json 8+ via a NuGet shim for NetFx should be evaluated.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-021",
+      "title": "Scope of spec exceeds stated boundaries, creating a god-spec",
+      "severity": "medium",
+      "category": "scope",
+      "merged_from": [
+        {
+          "oracle": "Grok",
+          "title": "Scope creep violates stated boundaries"
+        }
+      ],
+      "core_problem": "Section 0 claims narrow focus on 'STA command queue, six service contracts, COM exception mapping, screenshot directory convention, disconnect recovery.' The actual document specifies full add-in architecture including tool dispatch, state capture, event relay, session management, undo, and bridge protocol \u2014 concerns that belong to SPEC-03/04/05.",
+      "best_evidence": "Section 0 scope statement vs. the full project tree including Tools/, State/, Events/, Lifecycle/, Bridge/ with detailed behavioral contracts.",
+      "recommended_fix": "Either update the scope statement to accurately reflect what is specified, or split the document: keep adapter plumbing (queue, services, COM mapping) here and move tool dispatch, state, lifecycle, and bridge details to their consuming specs.",
+      "conflict_flag": false,
+      "weak_signal": true
+    }
+  ],
+  "dropped_findings": []
+}

@@ -1,0 +1,123 @@
+{
+  "oracle_name": "Codex",
+  "role": "implementation-feasibility reviewer",
+  "document_type": "technical_specification",
+  "overall_verdict": "major_revision",
+  "findings": [
+    {
+      "title": "Async decoration writes have no durability or ordering contract",
+      "severity": "critical",
+      "category": "operational_risk",
+      "location": "\u00a73.2 Latency Budget; \u00a72 SDR-07-006; \u00a78.2 Decoration Payload Shape; \u00a712 ACC-21/ACC-22",
+      "evidence": "\"Decoration write (async) | \u2014 | \u2014 | Fire-and-forget; not in critical path\"; \"Every resolution records its citation in a decoration payload\"; ACC-21/22 require \"DHF records ... citation\".",
+      "problem": "The spec requires DHF citation recording but makes the write fire-and-forget with no retry, idempotency, or sequencing definition relative to the tool-call/entry lifecycle.",
+      "why_it_matters": "The audit trail can be silently lost or written out of order while the tool call still executes, which breaks a core requirement and is hard to detect or recover from.",
+      "proposed_fix": "Define a durable write path: either await the decoration write before reporting success, or use an outbox/queue with retries, idempotency keys, and an explicit failure state that prevents claiming the resolution was recorded when it was not.",
+      "confidence": 0.96
+    },
+    {
+      "title": "Resolution cardinality is internally inconsistent for multi-domain utterances",
+      "severity": "high",
+      "category": "contradiction",
+      "location": "\u00a73.1 Four-Stage Flow; \u00a75.1 Role; \u00a76.2 System Prompt; \u00a76.4 Output Contract",
+      "evidence": "Stage 4 shows \"resolved_terms: [ResolvedTerm, ...]\" and \"citations: [Citation, ...]\"; \u00a75.1 says one utterance may hit \"threads, manufacturing, and materials domains simultaneously\"; \u00a76.2 says \"select the ONE row\"; \u00a76.4 defines only a single `ResolvedTerm` result type.",
+      "problem": "The spec alternates between a multi-term pipeline result and a single-row resolution model without defining which contract is authoritative.",
+      "why_it_matters": "Implementation cannot know whether one call resolves one term or several, so planner/synthesis/tool-call integration and decoration payload shape will churn.",
+      "proposed_fix": "Choose one model and make all sections match: either restrict the service to one resolved term per call, or define an explicit multi-term result schema with per-term confidence, citation, and ambiguity behavior.",
+      "confidence": 0.95
+    },
+    {
+      "title": "IVocabRepository cannot enforce the required single repeatable-read snapshot per utterance",
+      "severity": "high",
+      "category": "api_contract",
+      "location": "\u00a73.1 Four-Stage Flow; \u00a79.1 IVocabRepository; \u00a79.2 Implementation Notes",
+      "evidence": "\"Policy: all queries within single read transaction; repeatable read isolation\"; `IVocabRepository` exposes only independent per-method calls and no batch/session/transaction API.",
+      "problem": "The pipeline has no specified interface for executing multiple planner queries on one connection inside one repeatable-read transaction.",
+      "why_it_matters": "The stated consistency guarantee is not implementable without leaking transaction management out of the repository or changing the interface later.",
+      "proposed_fix": "Add a repository batch/read-session contract, e.g. `ExecuteAsync(IReadOnlyList<VocabQuery>)` or an explicit read-only unit-of-work that owns the transaction scope.",
+      "confidence": 0.96
+    },
+    {
+      "title": "Manufacturing is in scope but has no grammar, schema, or repository contract",
+      "severity": "high",
+      "category": "omission",
+      "location": "\u00a71 Scope; \u00a74.2 Persona; \u00a75.1 Role; \u00a7\u00a75.2\u20135.7; \u00a79.1 IVocabRepository",
+      "evidence": "Scope and bouncer domains include `manufacturing`; \u00a75.1 example says one utterance hits \"threads, manufacturing, and materials\"; there is no manufacturing grammar section and no `ManufacturingRow` or manufacturing repository method in \u00a79.1.",
+      "problem": "A declared domain can be emitted by the bouncer/planner but cannot be resolved by any specified downstream contract.",
+      "why_it_matters": "This creates an implementation hole and test gap in a closed-set domain list the LLM is instructed to use.",
+      "proposed_fix": "Either remove `manufacturing` from the v1 closed domain set, or add its tables/DTOs, grammar rules, repository methods, synthesis behavior, and required tests.",
+      "confidence": 0.97
+    },
+    {
+      "title": "Material grammar depends on lookups that IVocabRepository does not expose",
+      "severity": "high",
+      "category": "api_contract",
+      "location": "\u00a75.3 Material Callout Grammar; \u00a79.1 IVocabRepository",
+      "evidence": "\"UNS <letter><5 digits>\" maps to `vocab.materials.uns_number`; \"ASTM ...\" and \"AMS ...\" map to `vocab.canonical_terms.standard_source`; `IVocabRepository` only exposes `FindMaterialsByGradeNameAsync` and `GetMaterialAsync` for materials.",
+      "problem": "The documented UNS/ASTM/AMS planner paths cannot be implemented through the repository interface without adding raw SQL elsewhere or changing the contract.",
+      "why_it_matters": "This violates SDR-07-004 and guarantees downstream interface churn when material resolution is implemented.",
+      "proposed_fix": "Add explicit repository methods for UNS and standard-source lookups, or define a typed generic material lookup API that covers every selector documented in \u00a75.3.",
+      "confidence": 0.94
+    },
+    {
+      "title": "Persisted decoration payload lacks an explicit JSON schema for polymorphic Resolution",
+      "severity": "high",
+      "category": "data_model",
+      "location": "\u00a76.4 Output Contract; \u00a78.2 Decoration Payload Shape",
+      "evidence": "`public abstract record VocabularyResolution;` and `public required VocabularyResolution Resolution { get; init; }` are said to be serialized to the `payload` JSON column.",
+      "problem": "The stored payload depends on CLR polymorphic serialization details, but the spec does not define a stable discriminator, field set, or version for consumers.",
+      "why_it_matters": "SPEC-04 persistence and SPEC-06 rendering can break when serializer settings or subtypes change, and old rows may become unreadable.",
+      "proposed_fix": "Specify a concrete versioned JSON schema for each resolution variant with an explicit discriminator, and persist that schema instead of relying on default abstract-record serialization.",
+      "confidence": 0.95
+    },
+    {
+      "title": "Build-breaking latency tests depend on external LLM and network conditions",
+      "severity": "high",
+      "category": "testability",
+      "location": "\u00a711.1 BouncerLatencyTests; \u00a711.5 PipelineLatencyTests",
+      "evidence": "\"bouncer p95 latency under 600ms on test harness; fails the build if exceeded on CI\" and \"full pipeline p95 under 1.2s\".",
+      "problem": "These tests require stable Anthropic/Railway/network timing that CI does not control.",
+      "why_it_matters": "The build will flap for environmental reasons unrelated to code changes, making the requirement unmaintainable.",
+      "proposed_fix": "Move latency verification to a dedicated performance environment with controlled baselines; keep CI on mocked or recorded timing contracts.",
+      "confidence": 0.98
+    },
+    {
+      "title": "Build-breaking semantic tests assume stable live-model outputs",
+      "severity": "high",
+      "category": "testability",
+      "location": "\u00a711.1 Bouncer Tests; \u00a711.4 Synthesis Tests",
+      "evidence": "Tests require seeded utterances to match expected bouncer classifications/domains and synthesis outcomes, while both stages are defined as Sonnet 4.6 calls.",
+      "problem": "The spec does not define a frozen test double or captured-response harness, so model nondeterminism and vendor updates can break tests with no code change.",
+      "why_it_matters": "These requirements are not reproducibly verifiable in CI and will create constant false failures or pressure to weaken tests.",
+      "proposed_fix": "Define deterministic CI tests against mocked/captured model responses, and run live-model evaluations separately as non-blocking acceptance suites.",
+      "confidence": 0.97
+    },
+    {
+      "title": "Process-lifetime repository cache has no invalidation path for corpus hot-fixes",
+      "severity": "medium",
+      "category": "performance",
+      "location": "\u00a77 Caching; \u00a79.2 Implementation Notes",
+      "evidence": "\"Entries are effectively immutable ... TTL is the process lifetime\"; \u00a79.2 says repeatable-read exists in case \"a hot-fix migration runs\".",
+      "problem": "The cache can continue serving stale canonical rows after a vocabulary hot-fix until the process restarts.",
+      "why_it_matters": "Returned parameters/citations can diverge from the database, and the spec's consistency story breaks during live corpus updates.",
+      "proposed_fix": "Add cache invalidation keyed to corpus/migration version, a database notification mechanism, or a bounded TTL shorter than expected hot-fix intervals.",
+      "confidence": 0.93
+    },
+    {
+      "title": "Security-event logging stores full rejected utterances without redaction",
+      "severity": "high",
+      "category": "security",
+      "location": "\u00a74.5 Adversarial Input Handling",
+      "evidence": "\"logged at LogLevel.Warning with the full utterance text\"; candidate domains include `medical` in \u00a74.2.",
+      "problem": "Rejected transcripts may contain PHI, proprietary design details, or attacker-supplied secrets, yet the spec routes full text into monitoring logs.",
+      "why_it_matters": "This creates unnecessary data-exposure and compliance risk in a system that explicitly touches medical vocabulary.",
+      "proposed_fix": "Redact or hash utterance text by default, or route full text only to a restricted security log sink with explicit retention and access controls.",
+      "confidence": 0.88
+    }
+  ],
+  "top_3_must_fix": [
+    "Replace fire-and-forget decoration writes with a durable, ordered, idempotent DHF write contract.",
+    "Resolve the single-term vs multi-term contradiction in the VocabularyResolution contract before implementation starts.",
+    "Add a repository batch/read-session API that actually supports one repeatable-read snapshot for all queries in an utterance."
+  ]
+}

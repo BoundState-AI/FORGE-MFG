@@ -1,0 +1,112 @@
+{
+  "oracle_name": "Fran",
+  "role": "adversarial logic reviewer",
+  "document_type": "cross-spec architecture/specification bundle",
+  "overall_verdict": "major_revision",
+  "findings": [
+    {
+      "title": "Successful vocab-resolution payload is recursively self-referential",
+      "severity": "critical",
+      "category": "api_contract",
+      "location": "SPEC-07 \u00a76.4 `PipelineResult`; SPEC-07 \u00a78.2 `VocabularyResolutionDecoration`",
+      "evidence": "`PipelineResult` includes `public VocabularyResolutionDecoration? DecorationPayload { get; init; }`; `VocabularyResolutionDecoration` includes `public required VocabularyPipelineReturn PipelineReturn { get; init; }  // polymorphic \u2014 PipelineResult | Rejected | Failure`.",
+      "problem": "For any successful case where `PipelineReturn` is a `PipelineResult`, the decoration payload contains a pipeline result that contains the decoration payload again. The spec does not define any truncation or projection to break that cycle.",
+      "why_it_matters": "This contract is not serializable as written. Implementers will either recurse indefinitely, null fields ad hoc, or invent a private projection, producing incompatible payloads.",
+      "proposed_fix": "Replace `VocabularyResolutionDecoration.PipelineReturn` with a non-recursive snapshot type that explicitly excludes `DecorationPayload`, or remove `DecorationPayload` from `PipelineResult` and carry the decoration as a separate out-of-band return value.",
+      "confidence": 0.99
+    },
+    {
+      "title": "SPEC-07's new persistence path violates SPEC-00's declared module boundary",
+      "severity": "critical",
+      "category": "contradiction",
+      "location": "SPEC-00 \u00a71 Module Map; SPEC-00 Seam E; SPEC-07 v1.1.2 changelog C1; SPEC-07 SDR-07-012",
+      "evidence": "SPEC-00 says `SPEC-05 has no direct assembly reference to SPEC-04; the dependency is purely indirect through SPEC-03's aggregation role` and `SPEC-03 is the sole DHF writer.` SPEC-07 v1.1.2 says `SPEC-05 persists the payload via SPEC-04's DhfDecorationWriter after AppendTurnAsync returns entry_id` and `SPEC-05 now owns awaited INSERT, retry, circuit breaker`.",
+      "problem": "The architecture currently says both that SPEC-05 cannot reference SPEC-04 and that SPEC-05 must directly write to SPEC-04.",
+      "why_it_matters": "This breaks compile-time dependency rules, ownership boundaries, and test placement. Different teams can implement opposite seam assumptions and both think they are compliant.",
+      "proposed_fix": "Pick one architecture: either move decoration persistence back behind SPEC-03, or update SPEC-00's module map, seams, and dependency rules to explicitly allow and govern a SPEC-05 \u2192 SPEC-04 write path.",
+      "confidence": 0.99
+    },
+    {
+      "title": "Post-append decoration persistence can leave a committed turn without the required citation",
+      "severity": "critical",
+      "category": "operational_risk",
+      "location": "SPEC-07 \u00a70 final paragraph; SPEC-07 SDR-07-006; SPEC-07 SDR-07-012 v1.1.2",
+      "evidence": "SPEC-07 claims `Every resolution records its citation in the DHF` and `The pipeline returns success ONLY after the citation is durably written.` After the v1.1.2 change, `SPEC-05 persists this payload ... after DhfLedger.AppendTurnAsync returns entry_id` and handles retry/circuit-breaker afterward.",
+      "problem": "If `AppendTurnAsync` succeeds and the later decoration insert fails after retry exhaustion, the DHF already contains a turn entry with no vocabulary citation. Locking the session afterward does not repair the missing citation for that turn.",
+      "why_it_matters": "This breaks the core audit guarantee in exactly the failure path where the guarantee matters. The document currently sounds stronger than the mechanism actually is.",
+      "proposed_fix": "Make turn append and vocabulary-decoration insert atomic in one DB transaction keyed by a preallocated entry ID, or explicitly downgrade the guarantee and define a compensating marker/recovery flow for uncited turns.",
+      "confidence": 0.98
+    },
+    {
+      "title": "Same-workstation session cleanup silently assumes only one active SolidWorks process per workstation",
+      "severity": "high",
+      "category": "operational_risk",
+      "location": "SPEC-04 \u00a76.1 `OpenOrResumeSessionCore` stale-session cleanup query; SPEC-00 \u00a76 `AddinSessionId` glossary",
+      "evidence": "Before opening a new session, SPEC-04 executes `UPDATE dhf.sessions SET ended_at = NOW() WHERE ended_at IS NULL AND locked_at IS NULL AND tenant_id = @TenantId AND workstation_id = @WorkstationId`. The glossary only states `A given SolidWorks process runs exactly one add-in instance`.",
+      "problem": "The spec never states that a workstation can have only one active SolidWorks process. If two legitimate SolidWorks instances run on one workstation, opening the second session will forcibly close the first.",
+      "why_it_matters": "That creates silent session corruption in a plausible real workflow, and the failure is data-level, not cosmetic.",
+      "proposed_fix": "Either declare and enforce a hard single-SolidWorks-process-per-workstation invariant, or scope stale-session cleanup to a stronger process/add-in-instance identity than `workstation_id`.",
+      "confidence": 0.94
+    },
+    {
+      "title": "Teardown-send threading model is internally contradictory",
+      "severity": "high",
+      "category": "contradiction",
+      "location": "SPEC-02 \u00a79.0.2 pseudocode; SPEC-02 \u00a79.0.3 disconnect rationale; SPEC-02 \u00a79.1.1 step 3",
+      "evidence": "\u00a79.0.2 sends teardown via direct `_webSocket.SendAsync(...)`. \u00a79.0.3 says teardown `will block behind the COM call on the shared message queue (both go through SwUiThreadCommandQueue)`. \u00a79.1.1 step 3 repeats `The send path goes through SwUiThreadCommandQueue`.",
+      "problem": "The spec defines two incompatible mechanisms for the same send path. One uses direct socket I/O; the other requires UI-thread queueing and is the basis for the 60-second drain and no-teardown escalation logic.",
+      "why_it_matters": "Graceful shutdown behavior, closure attribution, and the justification for killing the host process all depend on which mechanism is actually true.",
+      "proposed_fix": "State one teardown-send execution model consistently and update the drain/escalation rules and tests to match it.",
+      "confidence": 0.97
+    },
+    {
+      "title": "SPEC-02 Day-0 validation checks a DHF closure-reason column that the rest of the bundle explicitly removed",
+      "severity": "high",
+      "category": "testability",
+      "location": "SPEC-02 \u00a711 item 11; SPEC-00 changelog v1.5.1 C3; SPEC-00 Seam C; SPEC-00 \u00a76 `DHF Session` glossary",
+      "evidence": "SPEC-02 says `confirm the orchestrator's DHF session row shows closure reason explicit_shutdown`. SPEC-00 says closure reason `is recorded in orchestrator structured logs ... NOT in the DHF schema`.",
+      "problem": "The validation procedure targets a field that the integrated contract says does not exist.",
+      "why_it_matters": "A core shutdown-path validation is currently un-runnable as specified, so teams will either skip it or test the wrong thing.",
+      "proposed_fix": "Change the validation target to the structured `session_closed` log event, or reintroduce a DHF-stored closure reason if row-level queryability is actually required.",
+      "confidence": 0.98
+    },
+    {
+      "title": "SPEC-07 still requires decoration-write latency fields after moving decoration writes out of SPEC-07",
+      "severity": "high",
+      "category": "api_contract",
+      "location": "SPEC-07 \u00a73.2 latency budget; SPEC-07 \u00a76.4 `StageLatencies`",
+      "evidence": "\u00a73.2 says `DecorationWriteMs now lives in SPEC-05's Serilog envelope` and Stage 5 is `In-memory DTO construction; no I/O`. \u00a76.4 still defines `StageLatencies` with required `DecorationWriteMs` and `TotalMs` fields on `PipelineResult`.",
+      "problem": "After the v1.1.2 ownership change, SPEC-07 no longer has the information needed to populate those required fields.",
+      "why_it_matters": "The runtime contract is underspecified: either SPEC-07 emits incomplete data or SPEC-05 mutates another module's DTO post hoc.",
+      "proposed_fix": "Remove `DecorationWriteMs` and `TotalMs` from SPEC-07's `StageLatencies`, or define a separate post-persistence DTO owned by SPEC-05.",
+      "confidence": 0.96
+    },
+    {
+      "title": "Security-event persistence destination is still contradictory inside SPEC-07",
+      "severity": "medium",
+      "category": "contradiction",
+      "location": "SPEC-07 \u00a73.3 failure-mode table; SPEC-07 \u00a714 failure taxonomy; SPEC-07 v1.1.1 changelog M3/M4",
+      "evidence": "\u00a73.3 says bouncer rejection has `Decoration Written? Only if security_event=true`. \u00a714 says security-event rejection writes `No (security events logged, not DHF'd)`. The v1.1.1 changelog says `no DHF decoration is written for rejections \u2014 security events route to the restricted audit sink`.",
+      "problem": "The spec still gives two different answers to whether a rejected security event creates a DHF artifact.",
+      "why_it_matters": "This changes where operators must look during incident response and whether the append-only ledger is expected to contain security telemetry.",
+      "proposed_fix": "Make \u00a73.3 match the final policy and remove all remaining references to DHF decoration writes for rejected security events.",
+      "confidence": 0.95
+    },
+    {
+      "title": "NetFx add-in pseudocode uses `Guid.CreateVersion7()` without specifying the required polyfill/runtime support",
+      "severity": "medium",
+      "category": "feasibility",
+      "location": "SPEC-02 project target in header and \u00a71; SPEC-02 \u00a79.0.2 pseudocode; SPEC-01 \u00a75 UUIDv7 note",
+      "evidence": "SPEC-02 targets `.NET Framework 4.8`. \u00a79.0.2 sets `MessageId = Guid.CreateVersion7().ToString()`. SPEC-01 notes `Guid.CreateVersion7()` exists on `.NET 9+; backport or NuGet implementation on earlier runtimes`.",
+      "problem": "The add-in-side teardown sender uses an API unavailable on its target runtime, and the spec never names the required shared UUIDv7 generator for NetFx.",
+      "why_it_matters": "Message generation for a mandatory graceful-shutdown path is impossible as written on the declared runtime.",
+      "proposed_fix": "Specify the UUIDv7 polyfill/shared library used by the NetFx add-in and require it for all add-in-generated `MessageId` values.",
+      "confidence": 0.93
+    }
+  ],
+  "top_3_must_fix": [
+    "Resolve the SPEC-05/SPEC-04 write-path contradiction by updating SPEC-00 seams or moving vocabulary-decoration persistence behind SPEC-03.",
+    "Remove the recursive `PipelineResult` \u2194 `VocabularyResolutionDecoration` contract so successful payloads are serializable.",
+    "Fix the non-atomic citation guarantee: a turn must not be committed without its required vocabulary citation, or the guarantee must be explicitly weakened."
+  ]
+}

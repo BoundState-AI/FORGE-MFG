@@ -1,0 +1,79 @@
+{
+  "oracle_name": "Codex",
+  "role": "implementation-feasibility reviewer",
+  "document_type": "cross-spec orchestration and deployment specification bundle",
+  "overall_verdict": "revise",
+  "findings": [
+    {
+      "title": "Recovery event append target is undefined after session-closing reconciliation",
+      "severity": "high",
+      "category": "api_contract",
+      "location": "SPEC-00 \u00a72 Seam C, paragraph beginning \"**Incomplete turns (crash, disconnect, kill mid-turn):**\"",
+      "evidence": "\"On the next session start, SPEC-03 must perform state reconciliation ... If the reconciliation detects model state that diverges from the DHF record, SPEC-03 records a reconciliation event via `DhfLedger.AppendRecoveryEventAsync`.\"",
+      "problem": "The contract does not specify which `session_id` receives that recovery event when the prior session has already been closed due to `heartbeat_timeout` or `superseded_session`.",
+      "why_it_matters": "`AppendRecoveryEventAsync` cannot be implemented consistently: appending to the closed session conflicts with the closure invariant, while appending to the new session breaks causal traceability unless a cross-session link is defined.",
+      "proposed_fix": "Define, per trigger, whether the recovery event is appended to the existing session, the newly opened session, or a separate recovery container; if it can land in a new session, add explicit linkage fields such as `source_session_id` and `source_entry_id`.",
+      "confidence": 0.93
+    },
+    {
+      "title": "Decoration persistence seam uses raw `JsonElement` instead of a canonical cross-module contract",
+      "severity": "high",
+      "category": "api_contract",
+      "location": "SPEC-00 \u00a72 Seam G/H; SPEC-07 \u00a76.4 `PipelineResult`; SPEC-04 \u00a75.1 `PendingDecoration`",
+      "evidence": "SPEC-00 says the pipeline assembles a \"`VocabularyResolutionDecoration` payload\"; SPEC-07 defines `public JsonElement? DecorationPayload { get; init; }`; SPEC-04 defines `public required JsonElement Payload { get; init; }`.",
+      "problem": "The prose names a specific decoration type, but the actual seam contract is untyped JSON with no shared schema, required fields list, or validation owner defined at the boundary.",
+      "why_it_matters": "SPEC-07, SPEC-05, SPEC-04, and SPEC-06 can drift independently; malformed or version-skewed decorations can be persisted without deterministic rejection, creating integration churn and weak test coverage.",
+      "proposed_fix": "Define a shared DTO or formal JSON schema for `VocabularyResolutionDecoration` (including `schemaVersion` and required fields) and specify which module validates it before `AppendTurnAsync` persists it.",
+      "confidence": 0.95
+    },
+    {
+      "title": "Auth-mode detection relies on an unspecified `/health` negotiation contract",
+      "severity": "high",
+      "category": "omission",
+      "location": "DEPLOYMENT v1\u2192v2 \u00a72, \"Migration Mechanism\"",
+      "evidence": "\"Add-in detects which mode the orchestrator is running by inspecting the WWW-Authenticate header on the initial HTTPS probe to `/health`\"",
+      "problem": "No response contract is defined for `/health`: method, status codes, header values, auth requirements, and proxy/header-stripping behavior are all unspecified.",
+      "why_it_matters": "The add-in cannot implement or test v1/v2 auth-mode negotiation deterministically, so deployment-mode switching will depend on out-of-band assumptions.",
+      "proposed_fix": "Define the exact unauthenticated discovery endpoint contract with example responses and fallback behavior, or replace probing with an explicit configured auth mode.",
+      "confidence": 0.92
+    },
+    {
+      "title": "Permanent add-in failure is misreported as `MalformedEnvelope`",
+      "severity": "high",
+      "category": "api_contract",
+      "location": "SPEC-02 Changes v1.4.0 \u2192 v1.4.1, \u00a79.1.1 step 7",
+      "evidence": "\"The `MessageDispatcher` rejects all incoming messages with `AddinProtocolErrorMessage(ErrorCode = MalformedEnvelope, ErrorText = \\\"Add-in permanently failed; restart SolidWorks.\\\")`.\"",
+      "problem": "`MalformedEnvelope` describes bad wire framing, not an internal terminal host failure.",
+      "why_it_matters": "The orchestrator cannot distinguish protocol corruption from a permanently failed add-in, so retry, quarantine, telemetry, and user-remediation behavior will be wrong.",
+      "proposed_fix": "Introduce a dedicated error code/message for terminal add-in failure and define orchestrator handling for that condition.",
+      "confidence": 0.96
+    },
+    {
+      "title": "Session closure reasons expire after 7 days because they are only logged, not durably stored",
+      "severity": "medium",
+      "category": "operational_risk",
+      "location": "SPEC-00 \u00a76 \"DHF Session\"; DEPLOYMENT v1\u2192v2 \u00a77 v1 Contract",
+      "evidence": "SPEC-00: \"Closure reasons ... are recorded in the orchestrator's structured logs ... NOT in the DHF schema.\" DEPLOYMENT \u00a77: \"Retention: Railway default (7 days)\"",
+      "problem": "The only authoritative source for closure attribution is an ephemeral log sink with short retention.",
+      "why_it_matters": "Operators will be unable to investigate older sessions or explain why a session ended once the Railway log window expires.",
+      "proposed_fix": "Require durable export/retention for session-closure events or persist a clearly non-audit-chain closure-reason record outside the DHF hash chain.",
+      "confidence": 0.94
+    },
+    {
+      "title": "`sequence_number` was removed from hash inputs without a replacement integrity rule",
+      "severity": "medium",
+      "category": "data_model",
+      "location": "SPEC-04 Changes v1.5.1 \u2192 v1.5.2, \u00a74.2 `DhfHashColumns`",
+      "evidence": "The change removes `\"sequence_number\"` from `HashedColumns` with the rationale that \"sequence_number ordering is enforced by previous_hash which IS hashed.\"",
+      "problem": "The spec no longer integrity-protects the persisted order field, and it does not define a validator contract that derives authoritative order solely from `previous_hash`.",
+      "why_it_matters": "Sequence/order metadata can be altered without changing `record_hash`, which can produce inconsistent replay, viewer ordering, and audit interpretation.",
+      "proposed_fix": "Either restore `sequence_number` to the hashed material or explicitly redefine validation and query ordering to use a chain walk from `previous_hash` plus supporting DB constraints.",
+      "confidence": 0.81
+    }
+  ],
+  "top_3_must_fix": [
+    "Recovery event append target is undefined after session-closing reconciliation",
+    "Decoration persistence seam uses raw `JsonElement` instead of a canonical cross-module contract",
+    "Permanent add-in failure is misreported as `MalformedEnvelope`"
+  ]
+}

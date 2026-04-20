@@ -1,0 +1,104 @@
+{
+  "oracle_name": "Beth",
+  "role": "coordinator",
+  "revision_decisions": [
+    {
+      "issue_id": "R1-ISSUE-002",
+      "decision": "accepted_defect",
+      "reason": "Previously accepted in Round 1 but text revision was not applied (revised_draft was null). The contradiction between SPEC-00 Seam E ('SPEC-05 has no direct assembly reference to SPEC-04') and SPEC-07 SDR-07-012 (SPEC-05 must call DhfDecorationWriter) remains in the canonical text. Applying the prescribed fix now: add Seam E\u2082, update Module Map, update Seam H."
+    },
+    {
+      "issue_id": "R1-ISSUE-003",
+      "decision": "accepted_defect",
+      "reason": "Previously accepted in Round 1 but text revision was not applied. SPEC-07 \u00a70 and SDR-07-006 still claim pipeline success waits for durable write, contradicting the v1.1.2 C1 ownership shift. Applying fix now: downgrade to best-effort-with-retry, compensating control via session lock."
+    },
+    {
+      "issue_id": "R1-ISSUE-004",
+      "decision": "accepted_defect",
+      "reason": "Previously accepted in Round 1 but text revision was not applied. StageLatencies still declares required DecorationWriteMs and TotalMs that SPEC-07 cannot populate. Applying fix now: remove those fields, add PayloadAssemblyMs."
+    },
+    {
+      "issue_id": "R1-ISSUE-006",
+      "decision": "accepted_defect",
+      "reason": "Previously accepted in Round 1 but text revision was not applied. GetFeatureTreeInput still lacks the Compressed parameter that SPEC-02's adapter interface requires. Applying fix now: add Compressed field with default true."
+    },
+    {
+      "issue_id": "R1-ISSUE-007",
+      "decision": "accepted_defect",
+      "reason": "Previously accepted in Round 1 but text revision was not applied. SPEC-02 \u00a77.5 still emits FeatureTreeHash='OVERSIZE' which violates SPEC-01 \u00a78 hash invariant. Applying fix now: require real hash computed before truncation."
+    },
+    {
+      "issue_id": "R1-ISSUE-009",
+      "decision": "accepted_defect",
+      "reason": "Previously accepted in Round 1 but text revision was not applied. \u00a79.0.2 direct socket I/O contradicts \u00a79.0.3 and \u00a79.1.1 claims about SwUiThreadCommandQueue. Applying fix now: declare \u00a79.0.2 authoritative, update \u00a79.0.3 rationale, enable teardown attempt during escalation."
+    },
+    {
+      "issue_id": "R1-ISSUE-008",
+      "decision": "accepted_defect",
+      "reason": "Previously accepted in Round 1 but text revision was not applied. Day-0 validation step 11 still checks DHF session row for closure_reason that SPEC-00 v1.5.1 C3 removed from the schema. Applying fix now: redirect to Serilog structured log check."
+    },
+    {
+      "issue_id": "R1-ISSUE-010",
+      "decision": "accepted_defect",
+      "reason": "Previously accepted in Round 1 but text revision was not applied. SDR-06-008 references ViewerOptions.VocabRawInputAllowed but the property is absent from ViewerOptions class and appsettings. Applying fix now: add the property and config entry."
+    },
+    {
+      "issue_id": "R1-ISSUE-011",
+      "decision": "accepted_defect",
+      "reason": "Previously accepted in Round 1 but text revision was not applied. \u00a73.3 table still says 'Only if security_event=true' for bouncer rejection decorations, contradicting \u00a714 which says 'No (security events logged, not DHF'd).' Applying fix now: set all rejection rows to 'No'."
+    },
+    {
+      "issue_id": "R1-ISSUE-005",
+      "decision": "accepted_defect",
+      "reason": "Previously accepted in Round 1 but text revision was not applied. SPEC-02 \u00a76.2 still specifies HTTP 401/400/429 branching without addressing .NET Framework 4.8 ClientWebSocket observability limitations. Applying fix now: add NetFx status-code extraction guidance and preflight probe recommendation."
+    },
+    {
+      "issue_id": "R2-ISSUE-001",
+      "decision": "preference_only",
+      "reason": "The spec already positions the deterministic regex scan (\u00a74.5 pre-cache injection scan) as the primary security gate, running BEFORE both cache lookup and the LLM bouncer. The LLM bouncer is a secondary gate, not the primary boundary. All critical injection-pattern rejection cases are covered by the deterministic scan. The recommendation to make some bouncer tests build-blocking is a valid enhancement but not an architectural defect \u2014 the mocked-test + canary approach is a documented and accepted trade-off for hackathon scope. Phonetic evasion is explicitly acknowledged as a known gap with a v1.5 fix path."
+    },
+    {
+      "issue_id": "R2-ISSUE-002",
+      "decision": "preference_only",
+      "reason": "SPEC-07 \u00a710.1 mandatory scope explicitly specifies '300-row demo seed corpus (from CAD_VOCAB_CORPUS.md \u00a74)' \u2014 the 22-row materials demo slice, not the full 19k catalog. The full catalog is Phase 3 (CAD_VOCAB_CORPUS.md \u00a76) with explicit licensing review noted in \u00a77. This is project-management scoping documented in the corpus manifest, not an architecture defect. The v1.0 Medtronic work is explicitly Tier 2, post-hackathon."
+    },
+    {
+      "issue_id": "R1-ISSUE-012",
+      "decision": "accepted_defect",
+      "reason": "Previously accepted in Round 1 but text revision was not applied. SPEC-02 \u00a79.0.2 pseudocode uses Guid.CreateVersion7() which requires .NET 9+; add-in targets .NET Framework 4.8. Applying fix now: add UUIDv7 polyfill note."
+    }
+  ],
+  "architectural_risks_remaining": [
+    "Non-atomic citation persistence: a committed turn can exist without its vocabulary-resolution decoration if the decoration write fails. The compensating control (session lock on circuit-breaker open) bounds blast radius to one uncited turn per failure episode.",
+    "SPEC-05 contract undefined: the DhfDecorationPersister that SPEC-05 must implement (SDR-07-012, Seam E\u2082) is still TBD. The seam is documented but the implementation contract remains a gap until SPEC-05 is authored.",
+    "NetFx HTTP status observability: the fix provides workaround guidance but does not eliminate the fundamental limitation of .NET Framework 4.8 ClientWebSocket. Day-0 validation must confirm the chosen extraction approach.",
+    "LLM bouncer stochasticity: the bouncer is an LLM call subject to model updates and prompt drift. The deterministic pre-cache scan is the primary gate; the bouncer is secondary. Build-breaking tests use recorded responses only."
+  ],
+  "revised_sections": [
+    "SPEC-00 \u00a71 Module Map (SPEC-05 depends-on updated to include SPEC-04 decoration scope)",
+    "SPEC-00 \u00a72 Seam E (updated to note Seam E\u2082 exception)",
+    "SPEC-00 \u00a72 Seam E\u2082 (NEW \u2014 SPEC-05 \u2192 SPEC-04 decoration persistence)",
+    "SPEC-00 \u00a72 Seam H (updated for SPEC-05 persistence mediation)",
+    "SPEC-00 \u00a76 Glossary (single-process-per-workstation assumption added to AddinSessionId)",
+    "SPEC-01 \u00a77.1 GetFeatureTreeInput (Compressed field added)",
+    "SPEC-02 \u00a76.2 (NetFx status-code extraction guidance added)",
+    "SPEC-02 \u00a77.5 (OVERSIZE sentinel replaced with real hash requirement)",
+    "SPEC-02 \u00a79.0.2 (threading model clarified as direct socket I/O; UUIDv7 polyfill note added)",
+    "SPEC-02 \u00a79.0.3 (drain rationale corrected \u2014 not queue blocking)",
+    "SPEC-02 \u00a79.1.1 (teardown attempt enabled during escalation)",
+    "SPEC-02 \u00a711 item 11 (DHF row check \u2192 Serilog structured log check)",
+    "SPEC-06 \u00a73 ViewerOptions (VocabRawInputAllowed property added)",
+    "SPEC-06 \u00a713 Configuration (vocabRawInputAllowed config entry added)",
+    "SPEC-07 \u00a70 (atomicity claim downgraded to best-effort-with-retry)",
+    "SPEC-07 SDR-07-006 (durability claim corrected \u2014 payload assembly, not persistence)",
+    "SPEC-07 \u00a73.3 (security-event decoration column set to 'No' for all rejections)",
+    "SPEC-07 \u00a76.4 StageLatencies (DecorationWriteMs/TotalMs removed; PayloadAssemblyMs added)",
+    "SPEC-07 \u00a78.2 (cycle-breaking invariant added; PersistedStageLatencies updated)"
+  ],
+  "open_questions": [
+    "Should SPEC-05's DhfDecorationPersister contract be authored before implementation begins, or can it be deferred until the SPEC-05 authoring pass?",
+    "Should the non-atomic citation persistence be elevated to a formal acceptance criterion (e.g., ACC-31), or is the SDR-07-012 compensating-control description sufficient?",
+    "The NetFx preflight probe to GET /health is recommended but optional. Should it be mandatory for v1?"
+  ],
+  "revised_draft": null
+}

@@ -1,0 +1,29 @@
+{
+  "session_id": "20260418-124659",
+  "document_path": "D:\\BoundState\\specs\\bsvoice_cad\\SPEC-06_VIEWER.md",
+  "total_rounds": 2,
+  "converged": false,
+  "convergence_reason": "",
+  "total_findings_by_round": [
+    {
+      "round": 1,
+      "reviewer_findings": {
+        "Grok": 4,
+        "Codex": 8,
+        "Fran": 8
+      },
+      "normalized_issues": 13,
+      "accepted_defects": 11
+    },
+    {
+      "round": 2,
+      "reviewer_findings": {
+        "Grok": 4,
+        "Codex": 7,
+        "Fran": 6
+      },
+      "normalized_issues": 15,
+      "accepted_defects": 10
+    }
+  ]
+}

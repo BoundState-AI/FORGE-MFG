@@ -1,0 +1,57 @@
+{
+  "oracle_name": "GrokContrarian",
+  "role": "Contrarian Reviewer",
+  "document_type": "Wire Protocol Specification",
+  "overall_verdict": "major_revision",
+  "findings": [
+    {
+      "title": "Scope contradiction on 'pure data definitions'",
+      "severity": "high",
+      "category": "scope",
+      "location": "Section 0 and Sections 9, 10, 12, 14",
+      "evidence": "\"This spec has zero state transitions \u2014 it is pure data definitions.\" vs \"Epoch rules (enforced by consumers...)\", handshake rule with exact string match and WS close, per-tool timeout table, FluentValidation cross-field rules",
+      "problem": "Document explicitly disclaims behavioral content then embeds rejection rules, lifecycle semantics, timeout values, and validation split that dictate consumer state machines.",
+      "why_it_matters": "Creates immediate overlap with SPEC-03/SPEC-04 that this document claims to be independent of; downstream specs will duplicate or contradict rules, causing integration failures.",
+      "proposed_fix": "Remove all behavioral rules, enforcement logic, timeout table and validation policy to a dedicated state or orchestration spec; restrict this document to type shapes and JSON contract only.",
+      "confidence": 0.85
+    },
+    {
+      "title": "Brittle co-location assumption for ScreenshotResult",
+      "severity": "high",
+      "category": "feasibility",
+      "location": "Section 7.1 ScreenshotResult and note \"Screenshot bytes do NOT travel over the wire. The add-in writes the PNG to a shared directory\"",
+      "evidence": "ScreenshotResult contains \"FilePath\" and \"Sha256Hash\"; \"See SPEC-02 for the shared-directory convention\"",
+      "problem": "Wire protocol is defined over WebSocket (which supports remote endpoints) yet result type assumes shared filesystem between add-in and orchestrator.",
+      "why_it_matters": "Breaks if orchestrator runs on different machine, container, or cloud function; forces unstated deployment constraint that contradicts process-boundary premise of the entire spec family.",
+      "proposed_fix": "Either transmit image bytes (base64 or binary WS message) inside wire contract or explicitly mark remote-filesystem co-location as a hard architectural invariant in Section 0.",
+      "confidence": 0.9
+    },
+    {
+      "title": "Unspecified fragmentation protocol for >4 MiB messages",
+      "severity": "high",
+      "category": "ambiguity",
+      "location": "Section 3 \"Wire Framing\"",
+      "evidence": "\"Maximum single-message size: 4 MiB. Above this, the sender breaks the payload (e.g., large feature tree) into streamed smaller messages.\"",
+      "problem": "No definition of chunk wrapper type, sequencing, correlation to original polymorphic message, completion signal, or error handling; contradicts earlier statement that WS frame reassembly by System.Net.WebSockets is sufficient.",
+      "why_it_matters": "StateSnapshot and GetFeatureTreeResult easily exceed limit under realistic CAD models; implementations will invent incompatible chunking schemes, breaking the \"all other specs reference types defined here and add nothing\" guarantee.",
+      "proposed_fix": "Define explicit ChunkedPayload or ContinuationMessage type in polymorphic families or raise limit and rely exclusively on transport-level fragmentation with clear max size enforcement rules.",
+      "confidence": 0.8
+    },
+    {
+      "title": "Complexity inflation via reflection-based completeness tests",
+      "severity": "medium",
+      "category": "testability",
+      "location": "Sections 4.3, 11 and 15 (JsonDerivedTypeRegistrationCompletenessTests, ToolRegistryCompletenessTests, ToolRegistry static constructor)",
+      "evidence": "\"reflects all concrete implementations of each polymorphic interface in the Protocol assembly and fails the build if any concrete type lacks a [JsonDerivedType] attribute\"",
+      "problem": "Protocol correctness now depends on runtime assembly scanning, attribute presence, and 11 build-breaking tests including FsCheck on 1000 random trees.",
+      "why_it_matters": "Any rename, split, or addition of a tool outside the exact reflection contract breaks CI; opposite of \"pure data definitions\"; creates fragile dependency on perfect test environment and .NET reflection semantics.",
+      "proposed_fix": "Replace with explicit static registration list or Roslyn source generator that produces the derived-type attributes and registry from a single source of truth.",
+      "confidence": 0.75
+    }
+  ],
+  "top_3_must_fix": [
+    "Scope contradiction on 'pure data definitions'",
+    "Brittle co-location assumption for ScreenshotResult",
+    "Unspecified fragmentation protocol for >4 MiB messages"
+  ]
+}

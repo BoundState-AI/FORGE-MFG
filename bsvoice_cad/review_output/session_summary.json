@@ -1,0 +1,29 @@
+{
+  "session_id": "20260418-122821",
+  "document_path": "D:\\BoundState\\specs\\bsvoice_cad\\SPEC-00_ORCHESTRATION_CONTRACT.md",
+  "total_rounds": 2,
+  "converged": false,
+  "convergence_reason": "",
+  "total_findings_by_round": [
+    {
+      "round": 1,
+      "reviewer_findings": {
+        "Grok": 4,
+        "Codex": 8,
+        "Fran": 8
+      },
+      "normalized_issues": 14,
+      "accepted_defects": 13
+    },
+    {
+      "round": 2,
+      "reviewer_findings": {
+        "Grok": 4,
+        "Fran": 7,
+        "Codex": 7
+      },
+      "normalized_issues": 12,
+      "accepted_defects": 10
+    }
+  ]
+}

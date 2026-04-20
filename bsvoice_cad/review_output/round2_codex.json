@@ -1,0 +1,90 @@
+{
+  "oracle_name": "Codex",
+  "role": "implementation-feasibility reviewer",
+  "document_type": "specification",
+  "overall_verdict": "major_revision",
+  "findings": [
+    {
+      "title": "Cross-module acceptance tests have no explicit executable home",
+      "severity": "high",
+      "category": "testability",
+      "location": "Section 2 intro under 'Seams'; Section 3 'Acceptance Test Cross-Reference'",
+      "evidence": "\"Per-module test projects test only their own module's internal invariants.\" / \"The following ACC IDs are referenced as never-descopable scope gates.\"",
+      "problem": "The document forbids per-module tests from spanning modules but does not define any integration/E2E test project or harness that owns ACC-01/02/03/04/08/10/12.",
+      "why_it_matters": "The mandatory scope gates cannot be built into CI or verified consistently because they require multiple modules and external dependencies (SolidWorks, WebSocket transport, DB, model client).",
+      "proposed_fix": "Add a dedicated integration/E2E test project suite, state which ACC IDs it owns, and define its allowed references and runtime dependencies.",
+      "confidence": 0.97
+    },
+    {
+      "title": "Timeout recovery is mandatory in Seam B but descopable in Section 3",
+      "severity": "critical",
+      "category": "contradiction",
+      "location": "Section 2 'Seam B'; Section 3 'Descope priority (LIFO)'",
+      "evidence": "\"SPEC-03 defines a mandatory post-timeout recovery flow (state refresh or undo-group rollback) before subsequent turns may proceed.\" / \"Descope priority (LIFO): ... error recovery ... all stretch.\"",
+      "problem": "The same recovery capability is required for safe continuation after timed-out COM calls and also declared stretch/descopeable.",
+      "why_it_matters": "If recovery is omitted, later turns may run against mutated but unacknowledged SolidWorks state after a timeout, which breaks correctness and makes lifecycle outcomes untrustworthy.",
+      "proposed_fix": "Remove timeout recovery from the stretch list or narrow \"error recovery\" to non-timeout scenarios and explicitly state the mandatory minimum recovery behavior.",
+      "confidence": 0.99
+    },
+    {
+      "title": "Grounding tools are simultaneously mandatory and stretch",
+      "severity": "high",
+      "category": "contradiction",
+      "location": "Section 3 'Mandatory vs Stretch (Top-Level)'; Section 3 'Acceptance Test Cross-Reference'",
+      "evidence": "Mandatory scope includes \"`screenshot`, `get_feature_tree`\" and ACC-08 is \"Screenshot and feature-tree grounding return valid data\"; descope says \"grounding tools ... all stretch.\"",
+      "problem": "The document marks the same functionality as both never-descopable and stretch.",
+      "why_it_matters": "Scope planning, module specs, and acceptance gating will diverge because implementers cannot tell whether screenshot/feature-tree capabilities are required for the first shippable build.",
+      "proposed_fix": "Remove screenshot/get_feature_tree from the stretch bucket or redefine \"grounding tools\" to exclude the ACC-08 capabilities.",
+      "confidence": 0.99
+    },
+    {
+      "title": "SPEC-01 tests cannot enforce DHF JSONB serialization policy without violating module boundaries",
+      "severity": "high",
+      "category": "feasibility",
+      "location": "Section 4 'SDR-TL-007'",
+      "evidence": "\"All wire formats and DHF JSONB payloads use camelCase property names... Both rules are enforced build-breaking in SPEC-01 tests.\"",
+      "problem": "SPEC-01 is defined as the protocol module, but the statement assigns enforcement of SPEC-04 DHF payload serialization to SPEC-01 tests.",
+      "why_it_matters": "Either SPEC-01 tests gain an undeclared dependency on SPEC-04, breaking the architecture, or the DHF serialization policy is not actually enforced where it is produced.",
+      "proposed_fix": "Split enforcement by ownership: keep wire-format serialization tests in SPEC-01 and move DHF JSONB serialization tests to SPEC-04 or a shared contract-test suite with explicit cross-module scope.",
+      "confidence": 0.95
+    },
+    {
+      "title": "Module boundaries are not concrete enough to implement the promised NetArchTest rules",
+      "severity": "high",
+      "category": "feasibility",
+      "location": "Section 1 'Module Map'; Section 2 intro under 'Seams'",
+      "evidence": "Module map uses \"Lives In\" values such as \"`BSVoiceCAD.Addin`\" and \"`BSVoiceCAD.Orchestrator.Lifecycle` + `BSVoiceCAD.Addin.Bridge`\"; Section 2 says arch rules live in \"`BSVoiceCAD.Tests.Architecture`\" and reference \"all module assemblies.\"",
+      "problem": "The document mixes namespace-like labels with assembly-level enforcement language and does not specify which projects/assemblies actually constitute each module.",
+      "why_it_matters": "NetArchTest rules cannot be written deterministically until the module-to-assembly mapping is explicit, especially for SPEC-03 which is split across orchestrator and add-in bridge namespaces.",
+      "proposed_fix": "List the exact project/assembly names for each spec, or explicitly define the namespace sets and assembly boundaries that ArchTests must enforce.",
+      "confidence": 0.91
+    },
+    {
+      "title": "No top-level contract exists for turns that never reach completion",
+      "severity": "high",
+      "category": "operational_risk",
+      "location": "Section 2 'Seam C'; Section 6 glossary entry 'Turn'",
+      "evidence": "\"produces one DHF write per completed turn\" / \"one DHF entry per completed turn.\"",
+      "problem": "The document defines DHF behavior only for completed turns and does not state what happens to abandoned/in-flight turns during crash, disconnect, kill, or shutdown scenarios.",
+      "why_it_matters": "SPEC-03 and SPEC-04 can implement incompatible recovery behavior, and replay/integrity checks will be ambiguous when failures occur mid-turn.",
+      "proposed_fix": "Define the failure-path contract for incomplete turns: whether to append an aborted-turn record, emit a separate session event, or guarantee no record and how that is reconciled on restart/reconnect.",
+      "confidence": 0.88
+    },
+    {
+      "title": "LLM ownership is inconsistent after the SDR-TL-008 change",
+      "severity": "medium",
+      "category": "ambiguity",
+      "location": "Section 4 'SDR-TL-003'; Section 4 'SDR-TL-008'",
+      "evidence": "\"Opus 4.7 primary, Sonnet 4.6 for decoration extraction.\" / \"Opus 4.7 plays two roles, not three. Vision interpreter ... and tool-calling agent.\"",
+      "problem": "The top-level contract no longer makes clear whether Sonnet 4.6 is still part of the runtime system, and \"decoration extraction\" is undefined here.",
+      "why_it_matters": "Implementers cannot determine whether there is one model client path or multiple, which affects dependency injection, secrets/config, testing, and failure handling.",
+      "proposed_fix": "State explicitly whether Sonnet 4.6 remains in scope, which module owns it, and whether it is mandatory, stretch, or removed.",
+      "confidence": 0.9
+    }
+  ],
+  "top_3_must_fix": [
+    "Resolve the mandatory-vs-stretch contradiction for post-timeout recovery.",
+    "Resolve the mandatory-vs-stretch contradiction for screenshot/get_feature_tree grounding capabilities.",
+    "Define the integration/E2E test suite that owns the ACC scope gates."
+  ]
+}

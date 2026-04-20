@@ -1,0 +1,46 @@
+{
+  "oracle_name": "GrokContrarianOracle",
+  "role": "Contrarian Reviewer",
+  "document_type": "Multi-Spec Architecture and Implementation Contract",
+  "overall_verdict": "major_revision",
+  "findings": [
+    {
+      "title": "Critical brittle dependency on SolidWorks STA threading and non-preemptible COM calls with no fallback",
+      "severity": "critical",
+      "category": "feasibility",
+      "location": "SPEC-02 \u00a72 Threading Model (entire section including 2.2, 2.3, 2.4, 2.6 tests)",
+      "evidence": "SwUiThreadCommandQueue.ExecuteAsync posts to SolidWorks UI thread SynchronizationContext; executing-cancel is cooperative-only; COM call in flight runs to completion even after orchestrator timeout; reentrancy guard and startup probe assume WindowsFormsSynchronizationContext; no alternative path if SolidWorks changes UI pump in 2026 SPx.",
+      "problem": "Entire add-in (and therefore all tool calls) dies if SolidWorks alters threading model, installs incompatible context, or runs multiple instances; edge case of add-in reload mid-COM call or crash leaves model in unknown state with no recovery except new AddinSessionId.",
+      "why_it_matters": "System assumes perfect external actor (SolidWorks COM) that never changes; opposite assumption (COM threading evolves or becomes unreliable) makes the architecture unimplementable without rewrite.",
+      "proposed_fix": "Add explicit fallback to non-UI thread proxy or documented double-STA pattern; make COM-call timeout behavior observable and recoverable without locking entire session; remove assumption that SynchronizationContext probe always succeeds.",
+      "confidence": 0.9
+    },
+    {
+      "title": "Critical adversarial input and prompt-injection surface in LLM-based bouncer with insufficient deterministic mitigation",
+      "severity": "critical",
+      "category": "security",
+      "location": "SPEC-07 \u00a74.5 Adversarial Input Handling and \u00a74.2 bouncer system prompt",
+      "evidence": "Pre-cache deterministic scan is regex/substring based; phonetic evasion (\"eye gnore previous instructions\") bypasses both scan and persona prompt; cache policy replays parsed_intent without context of prior turns; security events route to restricted sink but still allow LLM to be used as classifier for malicious input.",
+      "problem": "Assumes LLM persona is reliable security boundary; opposite is true \u2014 LLM is the weakest link; no rate limiting, no sandbox, no deterministic fallback for known injection patterns beyond regex that can be evaded with unicode or phonetic variants.",
+      "why_it_matters": "Adversarial user (or compromised add-in) can inject into agent loop, trigger tool calls that mutate model arbitrarily, or exfiltrate via crafted utterances; violates \"bouncer fails closed\" claim in SDR-07-003.",
+      "proposed_fix": "Make bouncer deterministic-first (grammar + exact alias match) with LLM only for ambiguous cases; add phonetic normalization corpus before scan; remove cache for any result with security_event flag; add hard circuit-breaker on repeated injection attempts that locks session.",
+      "confidence": 0.85
+    },
+    {
+      "title": "High scope drift and complexity inflation in SPEC-00 turning an integration contract into 50-page behavioral specification",
+      "severity": "high",
+      "category": "scope",
+      "location": "SPEC-00 entire document (especially \u00a72 Seams with 8 detailed seams, \u00a74 with 14 SDR-TL entries, \u00a76 Glossary with 15 terms, multiple changelog reconciliations, ACC renumbering, and DEPLOYMENT_V1_V2_MIGRATION.md cross-references)",
+      "evidence": "Subtitle claims \"interfaces only, no implementation\" yet defines cancellation boundaries, post-timeout recovery strategies, lock recovery as close-and-new only, exact closure reason mapping to logs vs DHF, recovery_context JSONB shape, and 30+ ACC gates; changelog entries reference R3/R4 Oracle findings that were folded into this document instead of per-module specs.",
+      "problem": "Document has become the single source of truth for runtime behavior, state machines, error semantics, and deployment evolution; violates its own non-goals and creates brittle dependency on perfect cross-spec editorial reconciliation.",
+      "why_it_matters": "Any change in one seam (e.g., heartbeat timeout handling) now requires updates in SPEC-00, SPEC-01, SPEC-02, SPEC-03, SPEC-04, and the migration doc; opposite assumption (modules should own their invariants) would reduce this to a true integration contract with far less surface area.",
+      "proposed_fix": "Move behavioral contracts back to owning module specs; SPEC-00 should contain only module map, seam directionality, mandatory/stretch list, and high-level ACC cross-reference; eliminate per-seam detailed state transitions and recovery procedures.",
+      "confidence": 0.8
+    }
+  ],
+  "top_3_must_fix": [
+    "Critical brittle dependency on SolidWorks STA threading and non-preemptible COM calls with no fallback (SPEC-02 \u00a72)",
+    "Critical adversarial input and prompt-injection surface in LLM-based bouncer with insufficient deterministic mitigation (SPEC-07 \u00a74.5)",
+    "High scope drift and complexity inflation in SPEC-00 turning an integration contract into 50-page behavioral specification (SPEC-00 entire document)"
+  ]
+}

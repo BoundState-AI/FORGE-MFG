@@ -1,0 +1,112 @@
+{
+  "oracle_name": "Fran",
+  "role": "adversarial logic reviewer",
+  "document_type": "multi-spec architecture and interface draft (SPEC-00/01/02/04)",
+  "overall_verdict": "major_revision",
+  "findings": [
+    {
+      "title": "Application role can disable the DB immutability triggers",
+      "severity": "critical",
+      "category": "governance",
+      "location": "SPEC-04 \u00a73.2 Enforcement Gap",
+      "evidence": "\"The orchestrator has `DROP TRIGGER` privilege.\"",
+      "problem": "The same runtime principal that appends DHF records can remove the trigger-based protections that enforce session immutability.",
+      "why_it_matters": "This makes the append-only/audit-integrity guarantee dependent on application goodwill rather than database policy. A compromised app or bad deployment can rewrite history.",
+      "proposed_fix": "Run the orchestrator under a DML-only role with no DDL, `DROP TRIGGER`, or `ALTER TABLE` privileges. Reserve migrations and trigger changes for a separate admin role and restate the trust boundary accordingly.",
+      "confidence": 0.98
+    },
+    {
+      "title": "API secret is sent in the WebSocket subprotocol header",
+      "severity": "high",
+      "category": "security",
+      "location": "SPEC-01 \u00a712.3 Handshake Sequence",
+      "evidence": "`Sec-WebSocket-Protocol: bsvoice-cad-v1, apikey-{keyId}.{secret}`",
+      "problem": "The full credential is placed in a standard upgrade header that reverse proxies, edge platforms, APM tooling, and diagnostics commonly log. Suppressing the echoed response does not prevent request-side leakage.",
+      "why_it_matters": "A leaked header exposes a long-lived tenant credential and allows unauthorized orchestrator access.",
+      "proposed_fix": "Move the credential to an `Authorization` or custom header on the upgrade request. If that is impossible, issue a short-lived one-time token over HTTPS and use that in the upgrade instead; also define mandatory request-header redaction.",
+      "confidence": 0.96
+    },
+    {
+      "title": "Same-epoch reconnect behavior conflicts with immutable session metadata",
+      "severity": "high",
+      "category": "contradiction",
+      "location": "SPEC-01 \u00a79 Collision handling; SPEC-04 SDR-04-010",
+      "evidence": "SPEC-01: same `AddinSessionId` reconnect must \"accept the updated capability fields (`AddinVersion`, `SwVersion`, `SwBuild`, `ScreenshotRootPath`)\". SPEC-04: \"All columns in `dhf.sessions` except `ended_at`, `locked_at`, and `lock_reason` are immutable once inserted.\"",
+      "problem": "The contract says reconnects may change capability metadata, but the persistence contract forbids updating the session row, and some named fields are not shown as mutable persisted fields anywhere.",
+      "why_it_matters": "Implementers have no valid place to put the accepted updates. Either reconnects fail against the immutability trigger or the updated data is silently discarded.",
+      "proposed_fix": "Choose one contract: either reject same-epoch reconnects when capability fields differ, or add a separate mutable reconnect-metadata store outside the immutable session row and reference it consistently.",
+      "confidence": 0.94
+    },
+    {
+      "title": "RecoveryEventContext is not persisted as structured recovery data",
+      "severity": "high",
+      "category": "data_model",
+      "location": "SPEC-04 \u00a75 RecoveryEventContext; SPEC-04 \u00a77.2 AppendRecoveryEventAsync",
+      "evidence": "`RecoveryEventContext` defines `Trigger`, `Strategy`, `Success`, `FailureReason`, and `ModelStateDivergenceDescription`, but \u00a77.2 converts them into `var description = \"Recovery event: trigger=...\"` and writes that into `RawTranscript` via `DhfTurnContext`.",
+      "problem": "The recovery event contract defines structured fields, but the append path collapses them into free text instead of storing them in structured form.",
+      "why_it_matters": "Viewer logic, validation, reporting, and audit queries cannot reliably consume or filter recovery outcomes from an ad-hoc string.",
+      "proposed_fix": "Add recovery-specific persisted fields or a hashed JSONB payload on `dhf.entries`, include them in hash coverage, and expose them in read DTOs. `AppendRecoveryEventAsync` should write the structured fields directly, not stringify them.",
+      "confidence": 0.97
+    },
+    {
+      "title": "Recovery screenshot bytes are defined but never written",
+      "severity": "high",
+      "category": "omission",
+      "location": "SPEC-04 changelog; SPEC-04 \u00a75 RecoveryEventContext; SPEC-04 \u00a77.2 AppendRecoveryEventAsync",
+      "evidence": "Migration 008 adds `screenshot_before_png`/`screenshot_after_png`; `RecoveryEventContext` includes `byte[]? ScreenshotBeforePng`/`ScreenshotAfterPng`; \u00a77.2 builds a `DhfTurnContext` with `ScreenshotBeforePath = null` and `ScreenshotAfterPath = null` and never passes the PNG byte arrays.",
+      "problem": "The append path discards the new recovery screenshot payloads.",
+      "why_it_matters": "The stated R1 fix is incomplete: deep validation and viewer rendering still cannot rely on recovery-event screenshots being present.",
+      "proposed_fix": "Extend the append contract so recovery events write `ScreenshotBeforePng` and `ScreenshotAfterPng` into `dhf.entries`, or use a dedicated recovery insert path that persists both hashes and bytes.",
+      "confidence": 0.96
+    },
+    {
+      "title": "Heartbeat closure uses an invalid WebSocket close code",
+      "severity": "high",
+      "category": "api_contract",
+      "location": "SPEC-01 \u00a712.7 Connection Lifecycle",
+      "evidence": "\"Missed pong \u2192 close with 1006 (\\\"abnormal closure\\\") after 2 missed intervals.\"",
+      "problem": "Close code 1006 is reserved for local observation and must not be sent in a WebSocket close frame.",
+      "why_it_matters": "Clients and libraries may reject or misreport the shutdown, and test expectations based on a sent 1006 are invalid.",
+      "proposed_fix": "Either terminate the connection without sending a close frame and classify it locally as 1006, or send a valid close code with documented semantics.",
+      "confidence": 0.99
+    },
+    {
+      "title": "Unknown message-type handling is internally inconsistent",
+      "severity": "high",
+      "category": "contradiction",
+      "location": "SPEC-01 \u00a73 Malformed JSON handling; SPEC-02 \u00a76.5 MessageDispatcher",
+      "evidence": "SPEC-01 \u00a73 says an \"unrecognized\" polymorphic discriminator MUST produce `MalformedEnvelope`. SPEC-02 \u00a76.5 says unknown `IClientMessage` subtypes produce `AddinProtocolErrorMessage(ErrorCode = UnknownMessageType)`.",
+      "problem": "The specs assign two different wire-level outcomes to the same condition.",
+      "why_it_matters": "Interop tests, retry logic, and diagnostics cannot be implemented deterministically because the receiver behavior depends on which section an implementer followed.",
+      "proposed_fix": "Define one mapping for each case: e.g. missing/invalid envelope -> `MalformedEnvelope`; well-formed envelope with unsupported `type` -> `UnknownMessageType`. Update all sections and required tests to match.",
+      "confidence": 0.95
+    },
+    {
+      "title": "Message-size control has no defined failure path when reduction still does not fit",
+      "severity": "high",
+      "category": "feasibility",
+      "location": "SPEC-01 \u00a77.1 Screenshot transport; SPEC-02 \u00a77.2 Dimension Reduction Strategy",
+      "evidence": "SPEC-01 requires the add-in to reduce screenshot dimensions until the 2 MiB cap fits. SPEC-02 limits this to \"Iterative halving up to 4 iterations. Abandon after iteration 4.\"",
+      "problem": "The contract does not define what message is sent if the screenshot is still too large after four reductions, and it never requires checking the size of the fully serialized `ToolResultMessage` after adding `StateAfter`.",
+      "why_it_matters": "Oversize screenshot turns can dead-end with no valid wire outcome or still exceed the 4 MiB envelope even after image reduction.",
+      "proposed_fix": "Define an explicit terminal behavior after max reductions and require a final full-message-size check that can trigger feature-tree truncation or a deterministic failure before send.",
+      "confidence": 0.92
+    },
+    {
+      "title": "Planned disconnect leaves behavior undefined after the 60-second escalation timeout",
+      "severity": "high",
+      "category": "operational_risk",
+      "location": "SPEC-02 \u00a79.1 Planned Disconnect",
+      "evidence": "\"Waits for any currently-executing tool call to complete on the UI thread (60-second escalation timeout).\"",
+      "problem": "The spec never states what the add-in does when the currently executing COM call is still running at 60 seconds, even though earlier sections state executing COM cannot be preempted.",
+      "why_it_matters": "Shutdown and DHF-session-closure behavior diverge precisely in the hard case this timeout is supposed to govern: some implementations will hang, some will force close, and session semantics will differ.",
+      "proposed_fix": "Specify the exact post-timeout action and resulting DHF/session semantics: continue waiting, skip teardown and leave session open, force process exit, or another single mandated behavior.",
+      "confidence": 0.94
+    }
+  ],
+  "top_3_must_fix": [
+    "Remove DDL/trigger-modification privileges from the runtime DHF role.",
+    "Stop sending API secrets in `Sec-WebSocket-Protocol` and use a non-loggable auth mechanism for the WebSocket upgrade.",
+    "Make recovery events persist structured fields and screenshot bytes instead of flattening/discarding them."
+  ]
+}

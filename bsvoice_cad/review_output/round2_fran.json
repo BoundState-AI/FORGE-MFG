@@ -1,0 +1,90 @@
+{
+  "oracle_name": "Fran",
+  "role": "adversarial logic reviewer",
+  "document_type": "orchestration contract spec",
+  "overall_verdict": "major_revision",
+  "findings": [
+    {
+      "title": "Quarantine rule can erase evidence of real model mutations",
+      "severity": "critical",
+      "category": "operational_risk",
+      "location": "Section 2, Seam B; Section 6, Glossary \u2014 Quarantine",
+      "evidence": "Seam B: \"A call whose orchestrator-side timeout expires while COM execution is in progress is recorded as `TimedOut`, but the COM operation may still complete and mutate the model.\" Glossary: \"A late message received after a terminal lifecycle state is logged and discarded; it never updates session state, never contributes to DHF...\"",
+      "problem": "If a timed-out COM call later succeeds, the spec allows a real model mutation to occur while the late completion is discarded and excluded from DHF.",
+      "why_it_matters": "The audit trail can claim a timeout while omitting the mutation that actually happened, breaking replayability, recovery reasoning, and the stated regulatory-traceability framing.",
+      "proposed_fix": "Require post-timeout completions that may imply model mutation to be captured in DHF as a recovery/out-of-band event, or require the recovery step to record the resulting observed state delta before the next turn can proceed.",
+      "confidence": 0.98
+    },
+    {
+      "title": "Termination reason attribution is stronger than the stated detection mechanism",
+      "severity": "high",
+      "category": "operational_risk",
+      "location": "Section 6, Glossary \u2014 DHF Session",
+      "evidence": "\"Ungraceful termination (add-in crash, SolidWorks exit, orchestrator kill, WebSocket disconnect) is detected via heartbeat absence; the resulting session closure records the termination reason.\"",
+      "problem": "Heartbeat absence can show liveness loss, but it cannot by itself distinguish add-in crash vs SolidWorks exit vs orchestrator kill vs network/WebSocket failure.",
+      "why_it_matters": "The system will record cause codes it cannot actually observe, producing false audit data and misleading operational diagnostics.",
+      "proposed_fix": "Reduce closure reasons to observable categories such as explicit shutdown, superseded session, and heartbeat-timeout/unknown disconnect, or specify the extra signals required to distinguish the listed causes.",
+      "confidence": 0.97
+    },
+    {
+      "title": "SPEC-04 has an unstated semantic dependency on SPEC-02",
+      "severity": "high",
+      "category": "contradiction",
+      "location": "Section 1, Module Map; Section 6, Glossary \u2014 AddinSessionId and DHF Session; Section 7, Build-Readiness",
+      "evidence": "Module Map: \"SPEC-04 ... Depends On `SPEC-01 (message shapes only)`\". Glossary: \"AddinSessionId ... Derivation algorithm ... is specified in SPEC-02.\" Also: \"DHF Session... Opens on first AddinReadyMessage for a given AddinSessionId. Closes when a different AddinSessionId arrives...\" Section 7: \"SPEC-02 + SPEC-04 converge in parallel (they don't touch each other)\".",
+      "problem": "SPEC-04 session epoching, StateVersion reset behavior, and reconciliation semantics depend on how SPEC-02 generates and rotates AddinSessionId, so the stated dependency map is incomplete.",
+      "why_it_matters": "The claimed review order and isolation are unsound; SPEC-04 can drift from the identifier semantics it relies on.",
+      "proposed_fix": "Move the AddinSessionId semantic contract into SPEC-00 or SPEC-01, or explicitly declare SPEC-04 depends on SPEC-02 and update the dependency/review order text.",
+      "confidence": 0.98
+    },
+    {
+      "title": "Top-level descope policy conflicts with mandatory timeout recovery",
+      "severity": "high",
+      "category": "contradiction",
+      "location": "Section 3, Mandatory vs Stretch; Section 2, Seam B",
+      "evidence": "Section 3: \"Descope priority (LIFO): ... error recovery ... all stretch.\" Seam B: \"SPEC-03 defines a mandatory post-timeout recovery flow ... before subsequent turns may proceed.\"",
+      "problem": "The document marks error recovery as stretch, then requires recovery as a mandatory safety gate after timeouts.",
+      "why_it_matters": "A team following the descope list can remove behavior that the lifecycle contract requires to avoid corrupted or unknown model state.",
+      "proposed_fix": "Split recovery into mandatory safety-critical recovery and optional UX recovery, and mark the mandatory post-timeout path as never-descopable.",
+      "confidence": 0.99
+    },
+    {
+      "title": "Post-timeout recovery flow lacks deterministic selection and success criteria",
+      "severity": "high",
+      "category": "omission",
+      "location": "Section 2, Seam B",
+      "evidence": "\"mandatory post-timeout recovery flow (state refresh or undo-group rollback) before subsequent turns may proceed. Details in SPEC-03.\"",
+      "problem": "The contract names two recovery strategies but does not define when to use each one, who decides, or what observable condition proves recovery succeeded.",
+      "why_it_matters": "Different implementations can make incompatible choices and still claim compliance, leaving state divergence unresolved in the highest-risk path.",
+      "proposed_fix": "Add seam-level rules for recovery strategy selection and completion, including required checks before accepting the next turn.",
+      "confidence": 0.94
+    },
+    {
+      "title": "Architecture-test enforcement claim ignores runtime seam failures",
+      "severity": "medium",
+      "category": "testability",
+      "location": "Section 2 intro; Section 2, Seam A",
+      "evidence": "\"Each seam is one-directional. Violations are detected by `NetArchTest` rules...\" and \"The full transport contract \u2014 including connection lifecycle, error semantics, reconnect behavior, and threading guarantees \u2014 is defined in SPEC-01.\"",
+      "problem": "NetArchTest can enforce compile-time reference boundaries, but it cannot detect runtime WebSocket behavior, cross-runtime serialization mismatches, reconnect semantics, or threading violations.",
+      "why_it_matters": "The document overclaims how seam compliance will be verified and leaves the riskiest integration behaviors without an explicit test mechanism.",
+      "proposed_fix": "Limit NetArchTest to compile-time dependency enforcement and add required contract/integration tests for transport, serialization, reconnect, and threading behavior.",
+      "confidence": 0.95
+    },
+    {
+      "title": "Turn completion boundary is undefined when a timeout triggers recovery",
+      "severity": "medium",
+      "category": "ambiguity",
+      "location": "Section 2, Seam C; Section 2, Seam B; Section 6, Glossary \u2014 Turn",
+      "evidence": "Seam C: \"one DHF write per completed turn.\" Seam B: \"mandatory post-timeout recovery flow ... before subsequent turns may proceed.\" Glossary: \"one DHF entry per completed turn.\"",
+      "problem": "The contract does not define whether a timed-out execution turn is considered complete at timeout, after late-message quarantine, or only after recovery/rollback finishes.",
+      "why_it_matters": "DHF entry contents, hash-chain ordering, and replay semantics become implementation-defined in a core failure case.",
+      "proposed_fix": "Define the exact close point for timeout cases and whether recovery outcome is stored in the same turn entry, a follow-up entry, or a separate recovery event.",
+      "confidence": 0.93
+    }
+  ],
+  "top_3_must_fix": [
+    "Quarantine rule can erase evidence of real model mutations",
+    "SPEC-04 has an unstated semantic dependency on SPEC-02",
+    "Top-level descope policy conflicts with mandatory timeout recovery"
+  ]
+}

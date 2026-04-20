@@ -1,0 +1,101 @@
+{
+  "oracle_name": "Fran",
+  "role": "adversarial logic reviewer",
+  "document_type": "technical wire protocol specification",
+  "overall_verdict": "major_revision",
+  "findings": [
+    {
+      "title": "Malformed add-in envelopes cannot be reported with any valid client-side error code",
+      "severity": "critical",
+      "category": "api_contract",
+      "location": "Section 5, \"ToolResultMessage envelope invariant\"; Section 6.3, `ClientProtocolErrorCode` / `AddinProtocolErrorCode`",
+      "evidence": "\"Receivers MUST reject invalid envelopes with `AddinProtocolErrorCode.MalformedEnvelope`.\" `ToolResultMessage` is defined under `IAddinMessage` (Add-in \u2192 Orchestrator), while `ClientProtocolErrorCode` only contains `VersionMismatch`, `MessageTooLarge`, `UnknownMessageType`.",
+      "problem": "The receiver of `ToolResultMessage` is the orchestrator, but the only outbound error envelope it can send is `ClientProtocolErrorMessage`, whose enum has no `MalformedEnvelope` value. The mandated rejection cannot be encoded on the wire.",
+      "why_it_matters": "Malformed result handling is undefined at the protocol level; implementations will either silently drop bad messages or invent non-spec behavior.",
+      "proposed_fix": "Either add `MalformedEnvelope` to `ClientProtocolErrorCode`, or replace the split client/add-in protocol-error model with one bidirectional protocol-error envelope/code set.",
+      "confidence": 0.98
+    },
+    {
+      "title": "Pre-epoch error responses require `AddinSessionId` when no epoch exists",
+      "severity": "critical",
+      "category": "api_contract",
+      "location": "Section 4.1 `IClientMessage`; Section 9, \"Initial connection\"; Section 10, \"Handshake rule\"",
+      "evidence": "`IClientMessage` requires `string AddinSessionId { get; }`. Section 9 says, \"Before the first `AddinReadyMessage` is received, no epoch exists.\" Section 10 says on version mismatch the orchestrator \"sends `ClientProtocolErrorMessage(ErrorCode: VersionMismatch)`\".",
+      "problem": "The orchestrator is required to send `ClientProtocolErrorMessage` before any epoch is established, but the message schema requires `AddinSessionId` and the spec defines no valid value for pre-handshake failures.",
+      "why_it_matters": "A conformant implementation cannot construct handshake-failure responses without violating either the message schema or the epoch rules.",
+      "proposed_fix": "Define a pre-epoch exception explicitly: make `AddinSessionId` optional on pre-handshake protocol errors, or state that the orchestrator echoes the `AddinReadyMessage.AddinSessionId` even when the epoch is not accepted.",
+      "confidence": 0.96
+    },
+    {
+      "title": "Oversize-message handling is underspecified before `EndOfMessage` and can desynchronize the socket",
+      "severity": "high",
+      "category": "operational_risk",
+      "location": "Section 3, \"Wire Framing\"",
+      "evidence": "\"Receivers MUST accumulate frames until `EndOfMessage = true` before deserializing.\" \"Messages exceeding this limit MUST be rejected... and discards the payload.\"",
+      "problem": "The spec does not define what the receiver must do when the payload crosses 4 MiB before `EndOfMessage`. Stopping immediately leaves unread frames on the socket; continuing to buffer violates the size cap.",
+      "why_it_matters": "Implementations can corrupt message boundaries, leak memory, or deadlock the connection under oversized input.",
+      "proposed_fix": "Specify one required behavior on limit breach: either read-and-drop remaining frames until `EndOfMessage` without buffering, or close/abort the WebSocket immediately.",
+      "confidence": 0.95
+    },
+    {
+      "title": "The 4 MiB cap conflicts with mandatory `StateSnapshot.FeatureTree` payloads and no truncation contract exists",
+      "severity": "critical",
+      "category": "feasibility",
+      "location": "Section 3, \"Wire Framing\"; Section 5, `ToolResultMessage`; Section 8, `StateSnapshot`",
+      "evidence": "Section 3: \"If a payload (e.g., a large feature tree) approaches 4 MiB, producers MUST reduce it at the application layer...\" Section 5: `ToolResultMessage` requires `StateAfter`. Section 8: `StateSnapshot` requires `IReadOnlyList<FeatureNode> FeatureTree` and `FeatureTreeHash`.",
+      "problem": "Core messages always carry a `StateSnapshot`, but the spec gives no wire-level way to mark `FeatureTree` as partial, paged, truncated, or omitted. Large models are either unsendable or silently reduced with no contract telling consumers what they received.",
+      "why_it_matters": "This breaks protocol feasibility on large documents and makes `FeatureTreeHash`/state consumers ambiguous if producers trim the tree to stay under 4 MiB.",
+      "proposed_fix": "Define explicit `StateSnapshot` completeness semantics: add truncation/pagination metadata and retrieval flow, or make `FeatureTree` optional/on-demand in mandatory envelopes.",
+      "confidence": 0.97
+    },
+    {
+      "title": "Placeholder stretch tools are registered as real tools with no availability gate",
+      "severity": "high",
+      "category": "scope",
+      "location": "Section 0, Scope; Section 7.2, \"Stretch Tools\"; Section 11, `ToolRegistry`",
+      "evidence": "Section 0: \"Stretch tool field definitions are deferred; their records exist as empty placeholders with polymorphic registrations to maintain registry completeness.\" Section 7.2: \"These are empty placeholder records... `[ToolName]` attributes are present from day one.\" Section 11: `ToolRegistry.All` reflects every type with `[ToolName]`.",
+      "problem": "The spec registers unimplemented stretch tools in the same registry used as the single source of truth for discriminator values, timeouts, and Anthropic schema names, but defines no status flag to exclude them from callable tool surfaces.",
+      "why_it_matters": "Consumers can advertise or invoke tools that have no defined fields or implementation, causing guaranteed runtime failure and invalid agent plans.",
+      "proposed_fix": "Add an explicit implementation-status/availability field to `ToolMetadata` and require schema generation/tool exposure to exclude unavailable tools, or remove placeholders from `ToolRegistry` until implemented.",
+      "confidence": 0.94
+    },
+    {
+      "title": "Hash canonicalization contradicts itself on whether array order is normalized",
+      "severity": "high",
+      "category": "contradiction",
+      "location": "Section 13, \"Hash Canonicalization\"",
+      "evidence": "\"Arrays are hashed in their serialized order. Producers MUST emit arrays in canonical order...\" later: \"`HashCanonicalization_PropertyTests` ... assert that logical equality (including reordered-but-equivalent arrays) implies hash equality.\"",
+      "problem": "These statements cannot both be true unless the canonicalizer reorders arrays internally, which the earlier rule denies.",
+      "why_it_matters": "Implementers cannot know whether hash stability depends on producer-side ordering or canonicalizer-side normalization, which makes cross-component hash comparisons unreliable.",
+      "proposed_fix": "Choose one model and state it unambiguously: either canonicalizer sorts these arrays before hashing, or reorder-invariance must be removed from the test requirement.",
+      "confidence": 0.98
+    },
+    {
+      "title": "Null-document snapshots can still carry stale document-scoped fields",
+      "severity": "high",
+      "category": "data_model",
+      "location": "Section 8, \"Null-document rules\"; Section 14, `StateSnapshotValidator`",
+      "evidence": "When `IsNullDocumentState` is true, the rules only constrain `Units`, `DocumentId`, `FeatureTree`, `FeatureTreeHash`, and `IsSketchActive`. `DocumentName`, `DocumentType`, `ActiveSketchId`, and `ActiveSelection` are not constrained.",
+      "problem": "A snapshot can declare \"no document\" while still containing document metadata, an active sketch ID, or a non-empty selection inherited from prior state.",
+      "why_it_matters": "Downstream consumers cannot treat `IsNullDocumentState` as a reliable sentinel; stale metadata can leak into UI, reasoning, and any state-hash or audit path that consumes snapshots.",
+      "proposed_fix": "Define null-document values for all document-scoped fields and add validator/tests for them (`DocumentName = null`, `DocumentType = null`, `ActiveSketchId = null`, `ActiveSelection = empty`, etc.).",
+      "confidence": 0.93
+    },
+    {
+      "title": "Live-document snapshot invariants are underdefined and validator coverage appears incomplete",
+      "severity": "high",
+      "category": "data_model",
+      "location": "Section 8, `StateSnapshot`; Section 14, `StateSnapshotValidator`",
+      "evidence": "Section 8 only states: \"When `IsNullDocumentState` is `false`, `Units` MUST be non-null.\" Section 14 describes `StateSnapshotValidator` only for the `IsNullDocumentState == true` branch.",
+      "problem": "The normal case does not require `DocumentId`, `DocumentName`, or `DocumentType`, and the validator description omits even the stated `Units != null` rule for live documents.",
+      "why_it_matters": "Consumers cannot rely on essential live-document identity being present, and CI may not catch invalid snapshots in the most common state.",
+      "proposed_fix": "Define required fields for `IsNullDocumentState == false` and add explicit validator/test coverage for those invariants.",
+      "confidence": 0.92
+    }
+  ],
+  "top_3_must_fix": [
+    "Define a valid, symmetric protocol-error path for add-in\u2192orchestrator violations and pre-epoch failures; current error codes/messages cannot represent required rejections.",
+    "Resolve the `StateSnapshot.FeatureTree` vs 4 MiB conflict by adding explicit truncation/pagination/completeness semantics or removing mandatory full trees from core messages.",
+    "Do not register empty stretch placeholders as callable tools without an explicit availability gate; otherwise schema/registry consumers will expose unimplemented tools."
+  ]
+}

@@ -1,0 +1,57 @@
+{
+  "oracle_name": "Contrarian_Grok",
+  "role": "contrarian reviewer",
+  "document_type": "Orchestration Contract",
+  "overall_verdict": "major_revision",
+  "findings": [
+    {
+      "title": "COM Cancellation Boundary Admits Unrecoverable Model Mutation",
+      "severity": "critical",
+      "category": "operational_risk",
+      "location": "Seam B: SPEC-03 \u2192 SPEC-02, 'Cancellation boundary' paragraph (changed section)",
+      "evidence": "Once a synchronous COM call is in flight, it runs to completion; the STA thread cannot be safely interrupted. A call whose orchestrator-side timeout expires while COM execution is in progress is recorded as `TimedOut`, but the COM operation may still complete and mutate the model. SPEC-03 defines a mandatory post-timeout recovery flow",
+      "problem": "The contract concedes partial geometry mutations can occur after timeout but defers the recovery mechanism entirely to SPEC-03 without defining invariants, rollback guarantees, or SolidWorks-specific undo semantics at this orchestration level.",
+      "why_it_matters": "CAD model corruption on timeout is an existential reliability failure; the 'what if COM cannot be cleanly recovered' case is ignored, creating brittle dependency on perfect STA behavior and downstream rework when real SolidWorks edge cases appear.",
+      "proposed_fix": "Elevate the exact recovery contract (state refresh vs undo-group rollback vs full model reload from last DHF checkpoint) into this SPEC-00 seam definition with mandatory ACC test coverage before module isolation proceeds.",
+      "confidence": 0.9
+    },
+    {
+      "title": "Regulatory Framing Invites Compliance Misuse Despite Disclaimer",
+      "severity": "high",
+      "category": "governance",
+      "location": "SDR-TL-006: DHF regulatory framing (unchanged core claim, referenced in changed Section 6)",
+      "evidence": "Positioned as \"design audit log foundation for future 21 CFR 820.30 / Part 11 alignment.\" NOT marketed as compliant. Gap-analysis table lives in SPEC-04.",
+      "problem": "The document simultaneously markets DHF for Medtronic partnership pitch while disclaiming compliance; no ownership or sign-off is assigned for the gap-analysis or legal review.",
+      "why_it_matters": "If opposite assumption holds (customers treat the audit log as Part 11 ready because of the 'foundation' language), legal exposure is created; scope drift from hackathon demo into regulated medical device tooling is unaddressed.",
+      "proposed_fix": "Either excise all 21 CFR / Part 11 references from top-level SDRs or add explicit governance owner and binding non-compliance language that survives per-module decomposition.",
+      "confidence": 0.75
+    },
+    {
+      "title": "Brittle Single-Model Assumption for Vision and Ambiguity Events",
+      "severity": "high",
+      "category": "feasibility",
+      "location": "SDR-TL-008 (changed: consensus claim removed), Section 6 Glossary 'Vision Context' and 'Ambiguity Event' definitions (changed), Seam D",
+      "evidence": "Opus 4.7 plays two roles, not three... No multi-vendor consensus layer at runtime. The system relies on single-model inference with extended thinking enabled; the DHF provides external traceability including ambiguity events. Vision Context: Structured observations extracted by Opus 4.7",
+      "problem": "Architecture assumes an unreleased 2026 model will reliably produce structured vision observations and ambiguity_resolution turns; removal of consensus layer plus deferred details to SPEC-05 creates untestable dependency on perfect model output.",
+      "why_it_matters": "Adversarial scenarios (model behavior shift, rate limiting, deprecation, or vision misinterpretation) break the turn-type taxonomy and hash-chain integrity; the 'eligibility-neutral build work' claim is false if core seams depend on specific Anthropic implementation details.",
+      "proposed_fix": "Introduce abstract ModelContract interface in SPEC-01 (wire protocol) with explicit failure modes, fallback paths, and synthetic test doubles required by this orchestration contract.",
+      "confidence": 0.85
+    },
+    {
+      "title": "DHF Session Reconciliation Rules Insufficiently Specified for Adversarial Disconnects",
+      "severity": "medium",
+      "category": "operational_risk",
+      "location": "Section 6 Glossary 'DHF Session' (changed: ungraceful termination added), Seam C",
+      "evidence": "Ungraceful termination (add-in crash, SolidWorks exit, orchestrator kill, WebSocket disconnect) is detected via heartbeat absence; the resulting session closure records the termination reason. Reconnect and dangling-session reconciliation rules are defined in SPEC-04.",
+      "problem": "Reconciliation is deferred to SPEC-04 while this contract claims per-turn DHF with hash chain as never-descopable; no top-level guarantee is given for concurrent reconnect races or malicious add-in instances creating duplicate AddinSessionIds.",
+      "why_it_matters": "Hash chain integrity (ACC-02, ACC-12) collapses if session epoch logic is ambiguous under real-world network or process faults; complexity inflation by pushing all failure modes downward.",
+      "proposed_fix": "Define minimal reconciliation invariants and at least one adversarial scenario (dual add-in instances, forced disconnect during COM call) that must be satisfied in SPEC-04 before this document can close.",
+      "confidence": 0.7
+    }
+  ],
+  "top_3_must_fix": [
+    "COM Cancellation Boundary Admits Unrecoverable Model Mutation",
+    "Regulatory Framing Invites Compliance Misuse Despite Disclaimer",
+    "Brittle Single-Model Assumption for Vision and Ambiguity Events"
+  ]
+}

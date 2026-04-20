@@ -1,0 +1,79 @@
+{
+  "oracle_name": "Fran",
+  "role": "adversarial logic reviewer",
+  "document_type": "multi-spec architecture/specification bundle",
+  "overall_verdict": "major_revision",
+  "findings": [
+    {
+      "title": "Vocabulary decoration write requires an entry_id before the turn entry exists",
+      "severity": "critical",
+      "category": "contradiction",
+      "location": "SPEC-00 \u00a72 Seam G and Seam C; SPEC-07 \u00a73.1 Stage 5; SPEC-07 \u00a78.2",
+      "evidence": "SPEC-00: \"The agent loop calls `IVocabularyResolver` ... BEFORE constructing tool calls.\" and \"Upon turn completion ... hands it to `DhfLedger.AppendTurnAsync`.\" SPEC-07: \"Stage 5: Durable Decoration Persistence ... Awaits SPEC-04 `DhfDecorationWriter` INSERT\" and \"The decoration is linked to the agent-turn entry (via `entry_id`)\".",
+      "problem": "The spec requires SPEC-07 to persist a DHF decoration before returning vocabulary success, but the referenced DHF turn entry is only created later at turn completion. No mechanism is defined for obtaining or reserving the `entry_id` at vocabulary-resolution time.",
+      "why_it_matters": "This is an impossible contract as written. Implementation will either block on an undefined preallocation path or invent hidden coupling between SPEC-05/03/04 that the document never declares.",
+      "proposed_fix": "Choose one explicit mechanism: (a) make SPEC-07 return decoration payload only and persist it after `AppendTurnAsync` returns an `entry_id`, or (b) define a preallocated turn/entry identifier created before vocabulary resolution and carried through the turn lifecycle and DHF append.",
+      "confidence": 0.99
+    },
+    {
+      "title": "Entry-detail API breaks the session-capability access model",
+      "severity": "high",
+      "category": "security",
+      "location": "SPEC-06 \u00a75.1; SPEC-06 \u00a75.2",
+      "evidence": "The route is `GET /api/dhf/entries/{entryId}` with no `sessionId` requirement, while \u00a75.1 says \"the entry ID alone does not grant access; the session sidebar hides entries from other sessions.\"",
+      "problem": "The spec defines no access-control check tying entry-detail reads to a presented session capability. Hiding links in the sidebar is not authorization.",
+      "why_it_matters": "Anyone who obtains an `entryId` can fetch entry content directly, which defeats the stated URL-as-capability boundary based on `sessionId`.",
+      "proposed_fix": "Require a valid `sessionId` capability on every entry-detail request and verify the requested `entryId` belongs to that session/tenant before returning data. If you want entry-only URLs, sign them with session-scoped capability data instead of relying on obscurity.",
+      "confidence": 0.96
+    },
+    {
+      "title": "Acceptance-test IDs ACC-25/26/27 are assigned to different meanings in SPEC-00 and SPEC-07",
+      "severity": "high",
+      "category": "governance",
+      "location": "SPEC-00 \u00a73 \"Acceptance Test Cross-Reference\"; SPEC-07 \u00a712 \"Acceptance Tests\"",
+      "evidence": "SPEC-00 defines ACC-25/26/27 as durable session lock, recovery-context persistence, and neutral landing page. SPEC-07 redefines ACC-25/26/27 as multi-domain resolution, decoration durability/circuit-breaker, and bouncer-cache raw-utterance isolation.",
+      "problem": "The global acceptance-test namespace is no longer unique.",
+      "why_it_matters": "Cross-spec traceability and never-descopable gate enforcement become ambiguous. Test reports and review comments cannot reliably refer to ACC-25/26/27 anymore.",
+      "proposed_fix": "Renumber the SPEC-07 additions to unused ACC IDs and update every cross-reference, including the SPEC-00 master table and any gate lists.",
+      "confidence": 0.99
+    },
+    {
+      "title": "SPEC-04 defines incompatible hash inputs in adjacent sections",
+      "severity": "high",
+      "category": "contradiction",
+      "location": "SPEC-04 \u00a74.2; SPEC-04 \u00a74.2a",
+      "evidence": "\u00a74.2 `DhfHashColumns` includes `\"entry_id\", \"session_id\", \"sequence_number\"`, while \u00a74.2a lists those same columns under \"columns NOT included in `DhfHashColumns`\".",
+      "problem": "The hash contract has two conflicting definitions of what is hashed.",
+      "why_it_matters": "Different implementations of append and validation can compute different `record_hash` values from the same row, which breaks deterministic chain verification.",
+      "proposed_fix": "Make one hashed-column list authoritative and remove the contradictory exclusions. Add a build-breaking doc/code sync test that compares the documented exclusion table against the actual `DhfHashColumns` set.",
+      "confidence": 0.98
+    },
+    {
+      "title": "Locked same-AddinSessionId sessions on other workstations are ignored during session open",
+      "severity": "high",
+      "category": "operational_risk",
+      "location": "SPEC-04 \u00a76.1 `OpenOrResumeSessionCore`",
+      "evidence": "The first lookup only considers rows with `ended_at IS NULL AND locked_at IS NULL`. The second lookup for locked rows adds `AND workstation_id = @WorkstationId`.",
+      "problem": "A locked open session with the same tenant+`addin_session_id` on a different workstation matches neither branch, so a new session can be inserted with the same AddinSessionId.",
+      "why_it_matters": "This bypasses SDR-04-008's hard-error rule for cross-workstation collisions and allows duplicate epochs for the same tenant to coexist.",
+      "proposed_fix": "Before inserting, query for any open row with the same tenant+AddinSessionId regardless of lock state. If workstation differs, throw `CrossWorkstationSessionConflictException`; if workstation matches and the row is locked, throw `SessionLockedException`.",
+      "confidence": 0.94
+    },
+    {
+      "title": "Planned disconnect escalation can terminate SolidWorks and lose unrelated unsaved work",
+      "severity": "critical",
+      "category": "operational_risk",
+      "location": "SPEC-02 \u00a79.1.1 step 7; SPEC-02 editorial M4",
+      "evidence": "`Environment.Exit(1)` is specified, and the document states this \"terminates the SolidWorks process\" and that \"unsaved work in other open documents may be lost.\"",
+      "problem": "A stuck add-in call during disconnect escalates to killing the host CAD process, not just failing the add-in session.",
+      "why_it_matters": "This turns an add-in fault into host-wide data loss and makes a routine disconnect/shutdown path unsafe.",
+      "proposed_fix": "Remove `Environment.Exit(1)` from in-process add-in paths. Leave the add-in in a failed state, surface a hard error requiring manual SolidWorks shutdown, or move any forced termination behavior into an external watchdog process that is not the CAD host.",
+      "confidence": 0.97
+    }
+  ],
+  "top_3_must_fix": [
+    "Define a valid mechanism for associating vocabulary-resolution decorations with a DHF entry before persistence, or move decoration persistence until after the turn entry exists.",
+    "Resolve the SPEC-04 hash-contract contradiction so append and validation use the same hashed-column set.",
+    "Remove `Environment.Exit(1)` from the add-in disconnect escalation path to avoid host-process termination and data loss."
+  ]
+}

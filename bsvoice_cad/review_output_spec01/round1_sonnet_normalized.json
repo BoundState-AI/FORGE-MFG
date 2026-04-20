@@ -1,0 +1,295 @@
+{
+  "oracle_name": "Sonnet",
+  "role": "referee",
+  "normalized_issues": [
+    {
+      "issue_id": "R1-ISSUE-001",
+      "title": "WebSocket framing contract conflates frames with messages",
+      "severity": "high",
+      "category": "api_contract",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "Wire framing text conflates WebSocket frames with messages"
+        },
+        {
+          "oracle": "Codex",
+          "title": "WebSocket framing contract is incorrect for .NET receivers"
+        }
+      ],
+      "core_problem": "Section 3 states 'WebSocket frame boundaries define message boundaries' then immediately contradicts itself by noting that System.Net.WebSockets reassembles fragmented messages. These are mutually exclusive: if frames define boundaries, fragmentation cannot exist; if fragmentation is reassembled, frame boundaries are irrelevant to the application layer. Implementers following the first sentence will deserialize partial payloads.",
+      "best_evidence": "\"WebSocket frame boundaries define message boundaries.\" vs. \"Large messages that fragment at the WebSocket layer are reassembled by System.Net.WebSockets before deserialization.\"",
+      "recommended_fix": "State unambiguously that one JSON document maps to one WebSocket message (not frame), that receivers must accumulate frames until EndOfMessage=true before deserializing, and that the 4 MiB limit applies to the fully reassembled message.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-002",
+      "title": "Oversize-message (>4 MiB) streaming/chunking protocol is undefined",
+      "severity": "critical",
+      "category": "api_contract",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "Large-message streaming is required but not specified"
+        },
+        {
+          "oracle": "Codex",
+          "title": "Oversize-message streaming is undefined"
+        },
+        {
+          "oracle": "Grok",
+          "title": "Unspecified fragmentation protocol for >4 MiB messages"
+        }
+      ],
+      "core_problem": "The spec mandates chunking for payloads exceeding 4 MiB but defines no chunk message types, correlation fields, sequence numbers, completion markers, reassembly rules, integrity checks, or error handling. Feature trees and StateSnapshots can easily exceed this limit under realistic CAD models. This directly contradicts the spec's claim to define all cross-process wire types.",
+      "best_evidence": "\"Maximum single-message size: 4 MiB. Above this, the sender breaks the payload (e.g., large feature tree) into streamed smaller messages.\" \u2014 no further definition provided.",
+      "recommended_fix": "Either (a) define explicit chunked-transfer wire types with correlation, sequencing, and completion semantics in this spec, or (b) remove streaming from v1 scope, enforce hard rejection of messages exceeding 4 MiB with a defined error code, and address large payloads via pagination or compression in the result types themselves.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-003",
+      "title": "Stretch tool wire types registered but field definitions deferred",
+      "severity": "high",
+      "category": "scope",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "Stretch tool wire types are included in the protocol without field definitions"
+        },
+        {
+          "oracle": "Codex",
+          "title": "Stretch tools are included in the protocol before their wire shapes exist"
+        }
+      ],
+      "core_problem": "Section 0 claims this spec defines every type that crosses a process boundary, but Section 7.2 explicitly defers field definitions for all stretch tools to future implementation while keeping their polymorphic registrations active. Consumers cannot generate schemas, validators, or serializers for undefined types, and any later field addition constitutes an unstated wire-contract change.",
+      "best_evidence": "\"This spec defines every type that crosses a process boundary\" vs. \"Full field definitions are deferred to stretch implementation ... // TODO: STRETCH markers so the polymorphic registrations are complete from day one.\"",
+      "recommended_fix": "Either fully specify every registered stretch tool record now, or remove stretch tool registrations from the protocol until their fields are defined. The claim of completeness must match reality.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-004",
+      "title": "Epoch stale-rejection rule blocks the AddinReadyMessage that establishes a new epoch",
+      "severity": "high",
+      "category": "contradiction",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "Epoch rollover rule would reject the AddinReady message that announces the new epoch"
+        }
+      ],
+      "core_problem": "Section 9 states that any message with an AddinSessionId other than the current epoch is rejected with STALE_EPOCH, and that the epoch changes only when AddinReadyMessage arrives with a new AddinSessionId. These rules are mutually exclusive: the AddinReadyMessage carrying the new epoch would itself be rejected before the epoch can be updated. Reconnects and add-in restarts are logically impossible without an unstated special case.",
+      "best_evidence": "\"A message with an AddinSessionId other than the current epoch is rejected with AddinProtocolErrorMessage(ErrorCode: 'STALE_EPOCH').\" and \"The epoch changes only when AddinReadyMessage arrives with a new AddinSessionId.\"",
+      "recommended_fix": "Explicitly define AddinReadyMessage as the sole message type exempt from epoch validation, specify how the current epoch is initialized on first connection (e.g., no epoch exists yet), and define the atomic transition from old epoch to new epoch upon receipt of a valid AddinReadyMessage.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-005",
+      "title": "StateSnapshot requires Units when no document is active",
+      "severity": "high",
+      "category": "data_model",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "StateSnapshot requires Units even when there is no active document"
+        }
+      ],
+      "core_problem": "StateSnapshot.Units is required (non-nullable) but DocumentId, DocumentType, and other document-dependent fields are nullable, and IsNullDocumentState explicitly signals the no-document case. There is no defined unit value when no document exists, forcing implementations to either invent a fake value or violate the contract.",
+      "best_evidence": "\"public required UnitSystem Units { get; init; }\" alongside nullable DocumentId, DocumentType?, and \"required bool IsNullDocumentState\".",
+      "recommended_fix": "Make Units nullable (UnitSystem?) in StateSnapshot, or add a sentinel enum member (e.g., UnitSystem.Unknown) and specify it must be used when IsNullDocumentState is true.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-006",
+      "title": "ToolResultMessage success/result/error invariants are comment-only and untested",
+      "severity": "high",
+      "category": "testability",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "ToolResultMessage success/result/error invariants are not enforced anywhere"
+        }
+      ],
+      "core_problem": "The mutually exclusive relationship between Success, Result, and Error in ToolResultMessage is documented only in comments. The validation section covers IToolInput only. Invalid states (Success=true with Error populated, both null, etc.) are wire-valid and leave receiver behavior undefined.",
+      "best_evidence": "\"Result { get; init; } // Null when Success = false\", \"Error { get; init; } // Null when Success = true\" \u2014 no validator or test enforces this.",
+      "recommended_fix": "Add explicit validators and build-breaking tests for ToolResultMessage enforcing: (Success && Result != null && Error == null) || (!Success && Result == null && Error != null). Extend Section 14 and Section 15 to cover message-envelope invariants, not just tool inputs.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-007",
+      "title": "Tool name has two unsynchronized sources of truth (discriminator vs. ToolNameAttribute)",
+      "severity": "high",
+      "category": "api_contract",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "Tool naming has two unsynchronized sources of truth"
+        }
+      ],
+      "core_problem": "The wire discriminator value for IToolInput/IToolResult is the tool's snake_case name (from [JsonDerivedType] attributes on the polymorphic base), while the registry uses [ToolName] attributes on the concrete types. The spec defines no single authoritative source and no test that these two names match. A mismatch creates tools that serialize under one name but register/schema-generate under another.",
+      "best_evidence": "\"IToolInput and IToolResult: discriminator property 'tool' with value equal to the tool name\" (Section 2.4) vs. \"ToolRegistry.All reflects the Protocol assembly ... finding every type with [ToolName] attributes\" (Section 11).",
+      "recommended_fix": "Define one authoritative source for tool names (e.g., [ToolName] attribute, with [JsonDerivedType] value derived from it via source generator or test). Add a build-breaking test asserting that discriminator value, ToolNameAttribute value, timeout table key, and schema name are identical for every tool.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-008",
+      "title": "StateSnapshot.ActiveSelection cannot represent transient sketch entity selections",
+      "severity": "high",
+      "category": "data_model",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "StateSnapshot cannot represent transient sketch selections"
+        }
+      ],
+      "core_problem": "SketchEntityId is defined as transient (valid only within an active sketch session), but StateSnapshot.ActiveSelection is typed as IReadOnlyList<EntityRef> (persistent references only). During an active sketch, selected entities are SketchEntityIds, making faithful snapshot transmission impossible without lossy conversion or hidden out-of-band state.",
+      "best_evidence": "\"SketchEntityId\" is \"Transient, valid only within the active sketch session\" while \"StateSnapshot.ActiveSelection\" is \"IReadOnlyList<EntityRef>\".",
+      "recommended_fix": "Change ActiveSelection to a discriminated union type (e.g., SelectionRef with 'kind': 'persistent'|'sketch') that can carry both EntityRef and SketchEntityId, and register/test that union.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-009",
+      "title": "GetFeatureTreeInput.Compressed flag has no defined wire effect",
+      "severity": "high",
+      "category": "contradiction",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "GetFeatureTreeInput.Compressed has no defined wire effect"
+        }
+      ],
+      "core_problem": "GetFeatureTreeInput exposes a Compressed flag (defaulting to true), but GetFeatureTreeResult only contains IReadOnlyList<FeatureNode> Tree and string TreeHash \u2014 no compressed payload field, encoding indicator, or alternate response shape. Callers cannot know what behavior to expect; implementers will either ignore the flag or invent incompatible behavior.",
+      "best_evidence": "\"public bool Compressed { get; init; } = true;\" in GetFeatureTreeInput vs. GetFeatureTreeResult containing only Tree and TreeHash.",
+      "recommended_fix": "Remove Compressed from v1 scope, or define an explicit compressed response contract specifying the encoding algorithm, content field, and how the receiver signals support.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-010",
+      "title": "Closed-vocabulary message fields modeled as unconstrained strings",
+      "severity": "high",
+      "category": "api_contract",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "Closed wire vocabularies are modeled as unconstrained strings"
+        }
+      ],
+      "core_problem": "Several message fields have finite allowed token sets documented only in comments (e.g., CancelToolCallMessage.Reason: \"user_abort\"|\"timeout\"|\"agent_abort\"; RollbackUndoGroupMessage.Reason: \"timeout\"|\"user_cancel\"|\"error\"; ClientProtocolErrorMessage.ErrorCode: \"VERSION_MISMATCH\"|...). The actual contract type is string with no schema constraint or validator, making typos and casing drift undetectable.",
+      "best_evidence": "\"public required string Reason { get; init; } // 'user_abort' | 'timeout' | 'agent_abort'\" \u2014 comment-only constraint on a string field.",
+      "recommended_fix": "Replace these fields with enums (consistent with the existing enum serialization policy) or add explicit message-envelope validators and schema constraints for each allowed token set, covered by build-breaking tests.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-011",
+      "title": "Hash canonicalization does not define array ordering, making hashes non-deterministic",
+      "severity": "high",
+      "category": "testability",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "Feature-tree hash determinism depends on unspecified array ordering"
+        }
+      ],
+      "core_problem": "Section 13 specifies sorted object keys for canonicalization but says nothing about ordering of arrays (FeatureTree, Parameters, ActiveSelection, etc.). Logically equivalent trees emitted in different sibling or parameter orders will produce different hashes, undermining state-change detection and any downstream hash-chain logic.",
+      "best_evidence": "\"sorted object keys\" specified in Section 13, but no array ordering rule defined for IReadOnlyList<FeatureNode> or IReadOnlyList<FeatureParameter>.",
+      "recommended_fix": "Define canonical ordering for every hashed list (e.g., FeatureNodes ordered by FeatureId lexicographically, Parameters ordered by Name). Add property-based tests covering reordered-but-logically-equivalent inputs asserting hash equality.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-012",
+      "title": "G29 decimal format can emit scientific notation, contradicting the no-scientific-notation rule",
+      "severity": "medium",
+      "category": "contradiction",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "Decimal canonicalization rule is self-contradictory"
+        }
+      ],
+      "core_problem": "Section 13 specifies G29 format for decimal serialization in hash canonicalization and simultaneously states 'no scientific notation.' G29 is not fixed-precision and can emit exponent notation for very large or very small values, making these rules mutually contradictory. Hash outputs can diverge across implementations or edge cases.",
+      "best_evidence": "\"'G29' format for decimal, no scientific notation\" \u2014 G29 can produce e.g. '1.23456789012345678901234567890E+28'.",
+      "recommended_fix": "Replace G29 with an explicit fixed-point format that never emits scientific notation (e.g., always emit full integer and fractional digits with invariant culture), and add tests for extreme-scale decimal values to verify no exponent notation appears.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-013",
+      "title": "ToolRegistry does not define or enforce tool-name uniqueness",
+      "severity": "medium",
+      "category": "governance",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "ToolRegistry does not define duplicate tool-name handling"
+        }
+      ],
+      "core_problem": "The spec defines input/result pairing completeness but never states that each tool name must map to exactly one input type and exactly one result type. Duplicate [ToolName] annotations can create ambiguous lookups, nondeterministic schema generation, or wrong type resolution at runtime.",
+      "best_evidence": "\"ToolRegistryCompletenessTests asserts every registered input has a matching result and vice versa\" \u2014 pairing is tested but uniqueness is not.",
+      "recommended_fix": "Define one-to-one uniqueness for tool names as a protocol invariant and add a build-breaking test that fails if multiple input or result types share the same tool name.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-014",
+      "title": "ScreenshotResult assumes shared filesystem, breaking remote deployment",
+      "severity": "high",
+      "category": "feasibility",
+      "merged_from": [
+        {
+          "oracle": "Grok",
+          "title": "Brittle co-location assumption for ScreenshotResult"
+        }
+      ],
+      "core_problem": "The wire protocol is defined over WebSocket (which supports remote endpoints), but ScreenshotResult transmits only a FilePath and Sha256Hash, implicitly requiring a shared filesystem between add-in and orchestrator. This breaks if the orchestrator runs on a different machine, in a container, or as a cloud function, and imposes an unstated deployment constraint that contradicts the process-boundary premise.",
+      "best_evidence": "\"Screenshot bytes do NOT travel over the wire. The add-in writes the PNG to a shared directory and returns a path + hash.\" \u2014 FilePath is an absolute path in a shared screenshot dir.",
+      "recommended_fix": "Either (a) explicitly declare co-located deployment as a hard architectural invariant in Section 0 and document the shared-directory contract here rather than deferring to SPEC-02, or (b) transmit image bytes (base64 or binary WebSocket message) within the wire contract to support remote deployments.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-015",
+      "title": "Spec claims 'pure data definitions' but embeds behavioral rules and enforcement logic",
+      "severity": "medium",
+      "category": "scope",
+      "merged_from": [
+        {
+          "oracle": "Grok",
+          "title": "Scope contradiction on 'pure data definitions'"
+        }
+      ],
+      "core_problem": "Section 0 states 'This spec has zero state transitions \u2014 it is pure data definitions,' but the document embeds epoch rejection rules (Section 9), handshake sequencing with WebSocket close behavior (Section 10), per-tool timeout values (Section 12), and validation policy splits (Section 14) \u2014 all of which dictate consumer state machine behavior. This creates overlap with SPEC-03/SPEC-04.",
+      "best_evidence": "\"This spec has zero state transitions \u2014 it is pure data definitions.\" vs. \"A message with an AddinSessionId other than the current epoch is rejected...\" and \"Mismatch \u2192 orchestrator sends ClientProtocolErrorMessage... then closes the WebSocket.\"",
+      "recommended_fix": "Either revise the scope claim to accurately reflect that behavioral rules are included, or extract all enforcement/rejection/timeout logic to SPEC-03 and restrict this spec to type shapes, JSON policy, and discriminator values only.",
+      "conflict_flag": false,
+      "weak_signal": true
+    },
+    {
+      "issue_id": "R1-ISSUE-016",
+      "title": "Reflection-based completeness tests create fragile CI dependency",
+      "severity": "low",
+      "category": "testability",
+      "merged_from": [
+        {
+          "oracle": "Grok",
+          "title": "Complexity inflation via reflection-based completeness tests"
+        }
+      ],
+      "core_problem": "Protocol correctness depends on runtime assembly scanning and attribute presence. Any rename, split, or addition of a tool outside the exact reflection contract breaks CI. This is a valid engineering concern but is a design preference rather than a correctness defect.",
+      "best_evidence": "\"reflects all concrete implementations of each polymorphic interface in the Protocol assembly and fails the build if any concrete type lacks a [JsonDerivedType] attribute\"",
+      "recommended_fix": "Consider replacing with a Roslyn source generator or explicit static registration list that produces derived-type attributes and registry from a single source of truth, reducing fragility.",
+      "conflict_flag": false,
+      "weak_signal": true
+    }
+  ],
+  "dropped_findings": []
+}

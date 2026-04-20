@@ -1,0 +1,269 @@
+{
+  "oracle_name": "Sonnet",
+  "role": "referee",
+  "normalized_issues": [
+    {
+      "issue_id": "R1-ISSUE-001",
+      "title": "DHF write granularity contradicts per-turn ledger granularity",
+      "severity": "critical",
+      "category": "contradiction",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "DHF write granularity contradicts turn granularity"
+        },
+        {
+          "oracle": "Codex",
+          "title": "DHF append trigger contradicts the stated per-turn ledger granularity"
+        }
+      ],
+      "core_problem": "Seam C states 'Every terminal lifecycle transition produces a DHF write,' but the Glossary defines the DHF-entry granularity as one per turn, and a turn may contain 0+ tool calls (each with its own terminal lifecycle transition). These two rules are mutually exclusive without an aggregation or disambiguation rule.",
+      "best_evidence": "Seam C: 'Every terminal lifecycle transition produces a DHF write.' Glossary: 'Turn: One user utterance + the agent's response, possibly containing 0+ tool calls. Turns are the DHF-entry granularity.'",
+      "recommended_fix": "Choose one canonical persistence unit. If DHF is per turn, define how multiple tool-call outcomes are aggregated into one append and what the hash-chain covers. If DHF is per tool call, update the Glossary, viewer contract, and acceptance-test expectations accordingly. Either way, update Seam C to be unambiguous.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-002",
+      "title": "Timeout/cancel semantics are unimplementable for synchronous STA COM calls and create CAD-state/DHF divergence",
+      "severity": "critical",
+      "category": "feasibility",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "Timeout/quarantine logic does not account for irreversible COM side effects"
+        },
+        {
+          "oracle": "Codex",
+          "title": "Timeout/cancel semantics are not implementable as written for synchronous STA COM calls"
+        }
+      ],
+      "core_problem": "Once a synchronous COM call is dispatched on the STA thread, SPEC-03 cannot reliably cancel or interrupt it. A call marked TimedOut or Cancelled by the orchestrator may continue mutating the SolidWorks model. The Quarantine rule discards late completions, but the CAD state has already changed, breaking undo-group guarantees, DHF audit integrity, and downstream command assumptions.",
+      "best_evidence": "Seam B: 'SPEC-02 provides a synchronous method surface; SPEC-03 wraps each call in its own timeout and cancel semantics.' Glossary: 'Quarantine: A late message received after a terminal lifecycle state is logged and discarded; it never updates session state, never contributes to DHF, never triggers retries.'",
+      "recommended_fix": "Define the exact cancellation boundary: pre-dispatch only, cooperative cancellation points inside SPEC-02, or a mandatory post-timeout recovery/lockout flow before subsequent turns. For mutating calls, add a mandatory post-timeout state-refresh or rollback step, or explicitly remove timeout/cancel guarantees for in-flight synchronous COM execution and document the operational consequence.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-003",
+      "title": "SPEC-03 dependency on SPEC-04 is inconsistent across the document",
+      "severity": "high",
+      "category": "contradiction",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "SPEC-03 dependency on SPEC-04 is contradicted by the module map"
+        },
+        {
+          "oracle": "Fran",
+          "title": "SPEC-05 is both declared to depend on SPEC-04 and forbidden from touching it"
+        }
+      ],
+      "core_problem": "Two related but distinct inconsistencies exist. (1) The Module Map lists SPEC-03's dependency as 'SPEC-01' only, but Seam C and Section 5 both state SPEC-03 depends on SPEC-04 (it emits a DhfTurnContext defined there). (2) SPEC-05 is listed as depending on SPEC-04 in the Module Map and Section 5, yet Seam D says 'The agent never touches the DHF' and Seam E labels the relationship 'indirect via SPEC-03.' These contradictions make build ordering, architecture tests, and review sequencing unenforceable.",
+      "best_evidence": "Module Map: 'SPEC-03 | Depends On | SPEC-01'. Seam C: 'The lifecycle layer emits a DhfTurnContext (defined in SPEC-04).' Section 5: 'SPEC-03 ... depends on SPEC-01, 02, 04.' Seam D: 'The agent never touches the ... DHF.' Module Map: 'SPEC-05 ... Depends On SPEC-01, SPEC-03, SPEC-04.'",
+      "recommended_fix": "Correct the Module Map to list SPEC-04 as a dependency of SPEC-03. For SPEC-05, decide whether it has a direct compile-time reference to SPEC-04 (e.g., for read-only query types) or only an indirect runtime relationship via SPEC-03, and make Seam E, the Module Map, and Section 5 consistent with that decision.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-004",
+      "title": "No-DTO-outside-Protocol rule is violated by DhfTurnContext defined in SPEC-04",
+      "severity": "high",
+      "category": "contradiction",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "The DTO ownership rule conflicts with DhfTurnContext being defined outside the Protocol module"
+        },
+        {
+          "oracle": "Fran",
+          "title": "The no-DTO-outside-Protocol rule is contradicted by DhfTurnContext"
+        }
+      ],
+      "core_problem": "Seam A declares 'no DTO types exist outside BSVoiceCAD.Protocol.* namespaces,' but Seam C introduces DhfTurnContext as a cross-module data carrier defined in SPEC-04. This makes the architecture rule either overstated or immediately violated, rendering NetArchTest enforcement ambiguous.",
+      "best_evidence": "Seam A: 'Architecture rule: no DTO types exist outside BSVoiceCAD.Protocol.* namespaces.' Seam C: 'The lifecycle layer emits a DhfTurnContext (defined in SPEC-04) and hands it to DhfLedger.AppendTurnAsync.'",
+      "recommended_fix": "Either (a) narrow the rule to cross-process wire DTOs only and explicitly permit internal module-boundary models like DhfTurnContext, or (b) move all cross-module contract types into SPEC-01/Protocol and update Seam C accordingly. Document the distinction clearly so NetArchTest rules can be written unambiguously.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-005",
+      "title": "Shared BSVoiceCAD.Orchestrator.Agent namespace claimed by both SPEC-03 and SPEC-05",
+      "severity": "high",
+      "category": "contradiction",
+      "merged_from": [
+        {
+          "oracle": "Grok",
+          "title": "Overlapping ownership of BSVoiceCAD.Orchestrator.Agent namespace"
+        }
+      ],
+      "core_problem": "The Module Map assigns BSVoiceCAD.Orchestrator.Agent to both SPEC-03 (Tool-Call Lifecycle) and SPEC-05 (Agent Loop + Input). Shared namespace ownership creates governance conflicts during parallel implementation and makes NetArchTest seam rules unenforceable.",
+      "best_evidence": "Module Map row SPEC-03: 'BSVoiceCAD.Orchestrator.Agent + BSVoiceCAD.Addin.Bridge'. Module Map row SPEC-05: 'BSVoiceCAD.Orchestrator.Agent + BSVoiceCAD.Orchestrator.Input'.",
+      "recommended_fix": "Partition the Agent namespace into distinct sub-namespaces owned by exactly one spec (e.g., BSVoiceCAD.Orchestrator.Agent.Lifecycle for SPEC-03 and BSVoiceCAD.Orchestrator.Agent.Loop for SPEC-05). Update the Module Map and all seam descriptions to reference the partitioned namespaces.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-006",
+      "title": "DHF session closure contract omits ungraceful termination paths",
+      "severity": "high",
+      "category": "operational_risk",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "DHF session termination has no crash/disconnect/restart contract"
+        },
+        {
+          "oracle": "Fran",
+          "title": "DHF session closure omits ungraceful termination paths"
+        }
+      ],
+      "core_problem": "The DHF Session glossary entry defines closure only for clean replacement (new AddinSessionId) or clean orchestrator shutdown. It is silent on add-in crash, SolidWorks exit, orchestrator kill, WebSocket disconnect, or partial restart. Sessions can remain logically open indefinitely, making viewer/integrity logic and restart behavior undefined.",
+      "best_evidence": "Glossary: 'DHF Session: One row in dhf.sessions. Opens on first AddinReadyMessage for a given AddinSessionId. Closes when a different AddinSessionId arrives or on orchestrator shutdown.'",
+      "recommended_fix": "Define disconnect detection (heartbeat/timeout), who is responsible for closing a dangling session, how the closure reason is recorded in the ledger, and how reconnects with the same or a new AddinSessionId are reconciled. This contract should live in SPEC-04 with a reference here.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-007",
+      "title": "Stretch feature (Whisper.net CUDA / voice) listed as mandatory day-0 validation dependency",
+      "severity": "high",
+      "category": "scope",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "Day-0 validation includes a stretch dependency that the scope says can be descoped"
+        },
+        {
+          "oracle": "Fran",
+          "title": "A stretch feature is treated as a mandatory build-validation dependency"
+        }
+      ],
+      "core_problem": "Section 3 explicitly lists 'voice' as descope-eligible stretch work, but Section 7 includes 'Whisper.net CUDA' in the mandatory day-0 validation list without qualification. This creates a hidden schedule dependency on a descopable feature.",
+      "best_evidence": "Section 3: 'voice ... all stretch.' Section 7: 'Day-0 validation on SolidWorks 2025 SP3+, Anthropic.SDK, Whisper.net CUDA, Postgres 16'.",
+      "recommended_fix": "Remove Whisper.net CUDA from the mandatory day-0 validation list, or add an explicit conditional qualifier ('only if voice remains in scope'). Consider splitting Section 7 into mandatory and conditional validation tracks.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-008",
+      "title": "NetArchTest seam rules placed in lower-numbered spec test projects require upward assembly references",
+      "severity": "high",
+      "category": "feasibility",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "Placing cross-module NetArchTest rules in lower-numbered spec tests inverts the claimed build graph"
+        }
+      ],
+      "core_problem": "Section 2 states seam violations are detected by NetArchTest rules 'living in the test project of the lower-numbered spec.' To verify that higher-numbered assemblies do not violate seams, those test projects must reference the higher-numbered assemblies, creating upward references that contradict the stated leaf-module model and prevent independent build/review of lower-numbered specs.",
+      "best_evidence": "Section 2 intro: 'Violations are detected by NetArchTest rules living in the test project of the lower-numbered spec.'",
+      "recommended_fix": "Move all cross-seam architecture validation rules to a dedicated integration/architecture test project that is explicitly permitted to reference all module assemblies. Lower-numbered spec test projects should only test their own module's internal rules.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-009",
+      "title": "Cross-process transport mechanism between .NET 4.8 add-in and .NET 8 orchestrator is unspecified",
+      "severity": "high",
+      "category": "omission",
+      "merged_from": [
+        {
+          "oracle": "Grok",
+          "title": "Omission of concrete cross-process transport mechanism"
+        }
+      ],
+      "core_problem": "The document references WebSocket and STA queue in passing but never names the actual IPC transport, serialization protocol, or error-mapping semantics between the .NET Framework 4.8 SolidWorks add-in and the .NET 8 orchestrator. Without this, the synchronous dispatch described in Seam B and the one-directional seams are unimplementable and untestable.",
+      "best_evidence": "Seam B: 'SPEC-02 provides a synchronous method surface; SPEC-03 wraps each call in its own timeout and cancel semantics.' Seam D: 'The agent never touches the WebSocket, never touches the STA queue.' SDR-TL-001: '.NET Framework 4.8 (SW COM requirement), orchestrator .NET 8.'",
+      "recommended_fix": "Add an explicit transport definition to SPEC-01 (e.g., named pipes, gRPC, JSON-RPC over stdio, or WebSocket with a defined framing protocol) including error semantics, threading guarantees, and reconnect behavior. Reference it from every cross-process seam.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-010",
+      "title": "Mandatory acceptance tests ACC-01/02/03/04/08/10/12 are cited without top-level definitions or cross-references",
+      "severity": "medium",
+      "category": "testability",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "Top-level mandatory acceptance tests are referenced without top-level definitions"
+        }
+      ],
+      "core_problem": "Section 3 declares specific ACC IDs as never-descopable scope gates, but Section 0 explicitly excludes test names from this document and provides no cross-reference to where those IDs are defined. The top-level scope gate is unusable without knowing what pass/fail criteria the IDs represent.",
+      "best_evidence": "Section 3: 'Never descoped: ... ACC-01/02/03/04/08/10/12 acceptance tests.' Section 0: 'Non-goals for this document: ... test names ... Those live in per-module specs.'",
+      "recommended_fix": "Add a one-line canonical reference for each ACC ID (e.g., 'ACC-01: defined in SPEC-02 \u00a7X') or replace the opaque IDs with named capabilities meaningful at the orchestration level. A lookup table in an appendix would suffice.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-011",
+      "title": "AddinSessionId UUID derivation algorithm is underspecified",
+      "severity": "medium",
+      "category": "omission",
+      "merged_from": [
+        {
+          "oracle": "Codex",
+          "title": "AddinSessionId generation is underspecified for uniqueness and testability"
+        }
+      ],
+      "core_problem": "The Glossary defines AddinSessionId as 'UUID generated fresh on each add-in load, deterministically from (machineGuid, swProcessId, loadTimestamp)' but omits the UUID version/hash algorithm, timestamp precision and timezone normalization, and fallback behavior when machineGuid is unavailable. Collisions or environment-specific differences would corrupt the DHF session epoch and StateVersion reset behavior.",
+      "best_evidence": "Glossary: 'AddinSessionId: UUID generated fresh on each add-in load, deterministically from (machineGuid, swProcessId, loadTimestamp).'",
+      "recommended_fix": "Specify the UUID derivation algorithm (e.g., UUID v5 with a fixed namespace UUID, SHA-256 of concatenated inputs), required timestamp precision and UTC normalization, the source of machineGuid, and fallback behavior when it is unavailable. This detail belongs in SPEC-02 with a reference here.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-012",
+      "title": "Opus 4.7 'internal self-verification at xhigh effort' claimed as consensus mechanism with no observable contract",
+      "severity": "medium",
+      "category": "testability",
+      "merged_from": [
+        {
+          "oracle": "Fran",
+          "title": "The claimed 'model-level consensus mechanism' has no observable contract"
+        }
+      ],
+      "core_problem": "SDR-TL-008 asserts that Opus 4.7's internal self-verification at xhigh effort serves as the model-level consensus mechanism, but defines no observable inputs, outputs, logs, or failure criteria. Reviewers and testers cannot verify when consensus was invoked, whether it succeeded, or how it should affect ambiguity handling and DHF records.",
+      "best_evidence": "SDR-TL-008: 'Opus 4.7's internal self-verification at xhigh effort is the model-level consensus mechanism; the DHF provides external traceability including ambiguity events.'",
+      "recommended_fix": "Either remove the consensus claim and treat the design as single-model inference with no special verification contract, or define an explicit validation contract with measurable outputs (e.g., required DHF fields, confidence thresholds, logging of extended-thinking token counts) that can be tested.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-013",
+      "title": "Document scope exceeds its stated 'names nothing else' boundary",
+      "severity": "low",
+      "category": "scope",
+      "merged_from": [
+        {
+          "oracle": "Grok",
+          "title": "Document violates its own 'names nothing else' boundary"
+        }
+      ],
+      "core_problem": "Section 0 states the document 'names the modules, names the seams, and names nothing else,' but Sections 3\u20137 introduce mandatory scope lists, SDRs, regulatory framing, review ordering, a detailed glossary, and build blockers. While this content is useful, it contradicts the stated scope boundary.",
+      "best_evidence": "Section 0: 'This document names the modules, names the seams, and names nothing else.' Sections 3\u20137 contain SDRs, scope gates, glossary, review order, and build-readiness content.",
+      "recommended_fix": "Either rewrite Section 0 to accurately describe the document's actual scope (integration contract + cross-cutting decisions + glossary), or extract Sections 3\u20137 into a separate ADR/decision log and keep SPEC-00 to seams only. The former is lower-risk given the content is genuinely useful here.",
+      "conflict_flag": false,
+      "weak_signal": false
+    },
+    {
+      "issue_id": "R1-ISSUE-014",
+      "title": "Brittle dependency on unverified Opus 4.7 vision and self-verification capabilities",
+      "severity": "low",
+      "category": "feasibility",
+      "merged_from": [
+        {
+          "oracle": "Grok",
+          "title": "Brittle dependency on undefined Opus 4.7 model behaviors"
+        }
+      ],
+      "core_problem": "Core seams and DHF schema assume specific model capabilities (structured vision output, reliable self-verification at xhigh effort) that are asserted but not contractually guaranteed by the model provider. If these behaviors are inconsistent, the ambiguity_resolution turn type and vision context enrichment may not function as designed.",
+      "best_evidence": "SDR-TL-008: 'Opus 4.7's internal self-verification at xhigh effort is the model-level consensus mechanism.' Glossary: 'Vision Context: Structured observations extracted by Opus 4.7 from a recent SolidWorks viewport screenshot.'",
+      "recommended_fix": "Define explicit fallback behavior when vision output is unstructured or self-verification is unavailable. Decouple the architecture from any specific model version by specifying the required output contract (schema) rather than the mechanism.",
+      "conflict_flag": false,
+      "weak_signal": true
+    }
+  ],
+  "dropped_findings": []
+}

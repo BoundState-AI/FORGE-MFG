@@ -1,0 +1,68 @@
+{
+  "oracle_name": "GrokContrarian",
+  "role": "Contrarian Reviewer",
+  "document_type": "Technical Specification",
+  "overall_verdict": "major_revision",
+  "findings": [
+    {
+      "title": "Thread class defaulting remains brittle despite R1-ISSUE-010 fix",
+      "severity": "high",
+      "category": "ambiguity",
+      "location": "\u00a75.2 (Deterministic Grammar Rules), R1-ISSUE-010, SDR-07-008, \u00a75.2 PATTERN class defaulting paragraph",
+      "evidence": "\"If class is omitted AND context is ambiguous or absent: DO NOT default. Return queries for BOTH 2A and 2B candidates.\"",
+      "problem": "Relies on bouncer's LLM-derived parsed_intent.action being accurate for 'internal' vs 'external' signals on voice-mangled input; no fallback grammar or deterministic antecedent resolution when bouncer fails to tag action.",
+      "why_it_matters": "Frequent ambiguity escalations for common utterances like \"add a 6-32 thread\" undermine the deterministic planner claim and inflate downstream Sonnet synthesis load.",
+      "proposed_fix": "Add explicit antecedent tracking or keyword sets for context in planner independent of parsed_intent; document measured ambiguity rate on real voice corpus.",
+      "confidence": 0.75
+    },
+    {
+      "title": "Medical domain in v1 scope contradicts deferred tuning and generic prompt",
+      "severity": "high",
+      "category": "scope",
+      "location": "\u00a71 (v1 domain scope paragraph and Out of scope paragraph), \u00a74.2 bouncer prompt (domains list and medical examples absent), R1-ISSUE-005",
+      "evidence": "\"v1 domain scope: threads, materials, fasteners, gdnt, sw_api, medical\" vs \"medical-specific NLP tuning beyond the generic bouncer persona (v1.5 customer-specific tuning is deferred)\"",
+      "problem": "Bouncer persona is aerospace/toolmaker-centric with no medical examples or rejection criteria; mandatory scope includes medical but grammar in \u00a75.7 is minimal alias-only.",
+      "why_it_matters": "Creates immediate correctness gap for one of six v1 domains in hackathon demo; opposite assumption (medical requires distinct persona) was dismissed without evidence.",
+      "proposed_fix": "Either remove medical from v1 mandatory scope or add medical-specific bouncer instructions and grammar rules before hackathon.",
+      "confidence": 0.85
+    },
+    {
+      "title": "Critical path decoration write creates unsafe latency and availability coupling",
+      "severity": "critical",
+      "category": "operational_risk",
+      "location": "\u00a73.1 STAGE 5, \u00a73.2 Latency Budget (decoration write row), \u00a73.3 Failure Modes (Decoration write failure), R1-ISSUE-002, SDR-07-006",
+      "evidence": "\"the pipeline does NOT report success to the agent loop until the decoration is persisted\" and \"budget of 1.4 seconds end-to-end\"",
+      "problem": "Awaited DHF write (SPEC-04 owned) now blocks real-time voice CAD on every resolution; single Postgres contention or SPEC-04 migration regression fails entire pipeline.",
+      "why_it_matters": "Violates real-time UX for voice interface; couples vocabulary layer availability to audit system in way that prior fire-and-forget design explicitly avoided. No circuit-breaker or async-with-guarantee pattern.",
+      "proposed_fix": "Restore fire-and-forget with background retry + compensation transaction; move citation to tool-call metadata instead of blocking DHF row.",
+      "confidence": 0.8
+    },
+    {
+      "title": "Complexity inflation from per-domain parallel synthesis and multi-resolution types",
+      "severity": "high",
+      "category": "scope",
+      "location": "\u00a73.1 (STAGE 4 note and PipelineResult), \u00a76.1 (Task.WhenAll), \u00a76.4 (new DomainResolution + PipelineOutcome enum), R1-ISSUE-001, Changed Sections \u00a76.4",
+      "evidence": "Introduction of PipelineResult, per-domain synthesis, DomainResolution wrapper, 6-valued PipelineOutcome after Round 1",
+      "problem": "Changed from singular resolution to complex aggregate increases test surface (11.5 end-to-end tests now cover partial/aggregate states) and error handling paths without quantified benefit over unified synthesis call.",
+      "why_it_matters": "Indicates scope drift; multi-domain utterances were previously handled simply. Opposite framing (single LLM call with multi-domain JSON schema) would reduce latency, tokens, and failure isolation complexity.",
+      "proposed_fix": "Revert to single synthesis call returning map of domains unless parallel p95 latency data justifies the added types and orchestration.",
+      "confidence": 0.7
+    },
+    {
+      "title": "Adversarial voice injection evasion not addressed in updated threat model",
+      "severity": "medium",
+      "category": "security",
+      "location": "\u00a74.5 (Threat model and Defense layers), \u00a74.3 (pre-cache injection scan), R1-ISSUE-016, bouncer prompt \u00a74.2",
+      "evidence": "\"Phonetic obfuscation of injection patterns (homophone substitution to evade keyword detection)\" listed but only substring/regex blocklist before cache",
+      "problem": "Whisper transcription of spoken jailbreaks (e.g. \"ai guy ignore all previous\" sounding like engineering terms) bypasses deterministic scan; cached acceptance risk remains if bouncer prompt drift occurs.",
+      "why_it_matters": "Voice channel invalidates text-based injection assumptions; redacted logging does not help real-time blocking. System claims defense-in-depth but defers phonetic table to v1.5.",
+      "proposed_fix": "Add post-Whisper phonetic normalization stage or expand blocklist to common spoken variants; make cache key include scan result hash.",
+      "confidence": 0.65
+    }
+  ],
+  "top_3_must_fix": [
+    "Critical path decoration write creates unsafe latency and availability coupling (\u00a73.1 STAGE 5, R1-ISSUE-002)",
+    "Medical domain in v1 scope contradicts deferred tuning and generic prompt (\u00a71, R1-ISSUE-005)",
+    "Thread class defaulting remains brittle despite R1-ISSUE-010 fix (\u00a75.2)"
+  ]
+}
