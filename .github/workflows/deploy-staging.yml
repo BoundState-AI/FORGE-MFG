@@ -154,7 +154,25 @@ jobs:
           path: /tmp
       - name: Load image
         run: docker load --input /tmp/${{ matrix.service }}.tar
-      - name: Trivy scan (CRITICAL/HIGH gate)
+      # Visible per-CVE table to stdout.  Non-gating; exists so a
+      # failing gate below produces an investigable log without relying
+      # on the GitHub code-scanning UI (which requires Advanced Security
+      # on private repos — not enabled for FORGE-MFG).  Prior SARIF-only
+      # scans were silent on failure, forcing blind Dockerfile churn.
+      - name: Trivy scan (table — visible log)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: forge-mfg-${{ matrix.service }}:${{ env.IMAGE_TAG }}
+          format: table
+          severity: CRITICAL,HIGH
+          exit-code: "0"
+          ignore-unfixed: true
+
+      # SARIF output for the workflow artifact.  `output:` suppresses
+      # stdout (the table step above handles visibility), and
+      # `exit-code: "1"` makes this the gate that halts the DAG on a
+      # CRITICAL/HIGH finding with a fix available.
+      - name: Trivy scan (SARIF gate + artifact)
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: forge-mfg-${{ matrix.service }}:${{ env.IMAGE_TAG }}
@@ -163,11 +181,23 @@ jobs:
           severity: CRITICAL,HIGH
           exit-code: "1"
           ignore-unfixed: true
-      - uses: github/codeql-action/upload-sarif@v3
+
+      # Upload SARIF as a workflow artifact instead of to GitHub
+      # code scanning.  Code-scanning upload requires GitHub Advanced
+      # Security (paid add-on, not enabled on this private repo) and
+      # was erroring with "Advanced Security must be enabled for this
+      # repository to use code scanning."  The artifact path preserves
+      # the SARIF for compliance evidence with 90-day retention; if
+      # GHAS is enabled later, re-adding codeql-action/upload-sarif is
+      # a one-step diff.
+      - name: Upload SARIF artifact
         if: always()
+        uses: actions/upload-artifact@v4
         with:
-          sarif_file: trivy-${{ matrix.service }}.sarif
-          category: trivy-${{ matrix.service }}
+          name: trivy-${{ matrix.service }}-sarif
+          path: trivy-${{ matrix.service }}.sarif
+          retention-days: 90
+          if-no-files-found: warn
 
   deploy-bootstrap:
     name: Deploy bootstrap stack (ECR)
