@@ -22,6 +22,10 @@ Purpose:  Acceptance proof that the deploy artifacts (staging,
               .github/workflows/rollback-production.yml (added in
               6A-3B); rollback workflow must also use OIDC and
               carry no inline credentials.
+            ACC-13-05 — same scan applied to
+              .github/workflows/perf-verification.yml (added in
+              6A-3C2); staging perf workflow must use OIDC and
+              carry no inline credentials.
 
 BoundState AI 2026
 Version: 0.1.0
@@ -387,6 +391,14 @@ _ROLLBACK_WORKFLOW_PATH = (
     / "rollback-production.yml"
 )
 
+# 6A-3C2 staging perf workflow — covered by ACC-13-05 below.
+_PERF_WORKFLOW_PATH = (
+    Path(__file__).parents[2]
+    / ".github"
+    / "workflows"
+    / "perf-verification.yml"
+)
+
 
 def _scan_workflow_for_plaintext(path: Path) -> list[tuple[str, str]]:
     """Run the deny-list scan against a workflow YAML at `path`.
@@ -505,3 +517,39 @@ def test_acc_13_rollback_workflow_contains_no_plaintext_credentials() -> None:
 def test_acc_13_rollback_workflow_uses_oidc_not_long_lived_keys() -> None:
     """ACC-13-04: production rollback workflow uses OIDC."""
     _assert_workflow_uses_oidc(_ROLLBACK_WORKFLOW_PATH)
+
+
+def test_acc_13_perf_workflow_contains_no_plaintext_credentials() -> None:
+    """ACC-13-05 (6A-3C2): the staging perf-verification workflow
+    must use `${{ secrets.* }}` or AWS OIDC for credential
+    material; no inline AWS keys, DB URLs with passwords, or PEM
+    headers anywhere."""
+    offenders = _scan_workflow_for_plaintext(_PERF_WORKFLOW_PATH)
+    assert not offenders, (
+        "perf-verification.yml contains plaintext credential material:\n"
+        + "\n".join(
+            f"  - {kind}: {sample}" for kind, sample in offenders
+        )
+    )
+
+    workflow_str = _PERF_WORKFLOW_PATH.read_text(encoding="utf-8")
+    for required_secret in (
+        "AWS_STAGING_DEPLOY_ROLE_ARN",
+        "STAGING_BASE_URL",
+        "STAGING_COGNITO_USER_POOL_ID",
+        "STAGING_COGNITO_APP_CLIENT_ID",
+        "STAGING_TEST_USERNAME",
+        "STAGING_TEST_PASSWORD",
+    ):
+        token = f"secrets.{required_secret}"
+        assert token in workflow_str, (
+            f"perf-verification.yml no longer references "
+            f"{required_secret!r} via secrets context — either the "
+            f"secret was renamed (update this test) or someone "
+            f"hardcoded it (fail)"
+        )
+
+
+def test_acc_13_perf_workflow_uses_oidc_not_long_lived_keys() -> None:
+    """ACC-13-05 (6A-3C2): staging perf workflow uses OIDC."""
+    _assert_workflow_uses_oidc(_PERF_WORKFLOW_PATH)

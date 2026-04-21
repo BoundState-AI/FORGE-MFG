@@ -1,0 +1,14 @@
+task_id,source,run_index,seconds,operator,date,notes
+# Fill one row per (task_id, source, run_index).  See ACC_03_operator_timing_README.md.
+# Minimum 5 runs per (task_id, source).  Comment rows (first cell starts with '#') are ignored.
+# task_id    | source  | run_index | seconds | operator      | date        | notes
+# T01_create_wo,legacy,1,180,opA,2026-05-01,paper traveller step-by-step
+# T01_create_wo,legacy,2,172,opA,2026-05-01,
+# T01_create_wo,legacy,3,190,opB,2026-05-01,
+# T01_create_wo,legacy,4,185,opA,2026-05-02,
+# T01_create_wo,legacy,5,175,opB,2026-05-02,
+# T01_create_wo,forge,1,120,opA,2026-05-03,first FORGE run w/ seeded staging
+# T01_create_wo,forge,2,110,opA,2026-05-03,
+# T01_create_wo,forge,3,125,opB,2026-05-03,
+# T01_create_wo,forge,4,118,opA,2026-05-04,
+# T01_create_wo,forge,5,112,opB,2026-05-04,

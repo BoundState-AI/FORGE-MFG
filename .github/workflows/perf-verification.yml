@@ -1,0 +1,284 @@
+# Module:   Staging Performance Verification (6A-3C2)
+# Purpose:  Run a real k6 read-path load pack against the deployed
+#           staging environment, capture normalized perf evidence as
+#           a durable artifact, and fail the workflow on threshold
+#           breach.  Staging-only; production perf is not part of
+#           any in-flight slice.
+# Rev:      0.1.0
+#
+# BoundState Proprietary
+# Co-Authored-By: Dr. Joseph Wilde, BoundState AI
+# Co-Authored-By: Claude "Beth" (Opus 4.7)
+#
+# Hard contract (pinned by tests/unit/test_perf_workflow_contract.py):
+#   - workflow_dispatch only
+#   - environment: staging on every AWS-touching job
+#   - OIDC only; no static AWS keys
+#   - runs against the staging ALB, not production
+#   - k6 pack covers READ paths only (no POST/PUT/PATCH/DELETE)
+#   - single-program X-Program-Id header (not `*`) on every
+#     authenticated read — dashboard/summary rejects `*`, and the
+#     other reads use a specific program id for load-shape realism
+#   - k6 install + token mint + k6 run + summarize + upload-artifact
+#     all live in ONE job so binary, masked env, and workspace files
+#     are available where they need to be ($GITHUB_ENV does not
+#     persist across jobs — this is the lesson the 6A-3C1 review
+#     drilled home)
+#   - summarize + upload-artifact both `if: always()` so evidence is
+#     produced even when the load run fails thresholds
+#   - threshold breach propagates to workflow exit code
+#
+# Workflow job shape (only 2 top-level jobs):
+#   1. preflight — input validation + staging secret presence
+#   2. perf      — single job that installs k6, mints the staging
+#                  test token, runs the pack, summarizes, uploads
+#                  evidence, and fails on threshold breach
+
+name: Perf Verification (staging)
+
+on:
+  workflow_dispatch:
+    inputs:
+      seed_wo_id:
+        description: >-
+          UUID of an existing staging work order the detail-read
+          probe will target.  Operator supplies this so the
+          workflow does not hardcode fragile ids.  Must be a
+          standard 8-4-4-4-12 UUID.
+        required: true
+        type: string
+      seed_program_id:
+        description: >-
+          UUID of the staging program that owns seed_wo_id and is
+          the single X-Program-Id scope for every authenticated
+          read.  /api/dashboard/summary rejects `*` — a specific
+          program id is required.  Operator can find a valid id
+          via /api/users/me with the staging test token (see
+          docs/ops/6A_3C2_perf_and_operator_timing.md §8).
+        required: true
+        type: string
+      perf_label:
+        description: >-
+          Operator label baked into the artifact name (e.g.
+          q2-2026-read-pack).  Must start with a letter; only
+          ASCII letters, digits, and hyphens; no consecutive or
+          trailing hyphens; max 24 chars.
+        required: true
+        type: string
+
+permissions:
+  id-token: write          # OIDC
+  contents: read
+
+concurrency:
+  group: perf-verification
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-gov-west-1
+
+jobs:
+  # -------------------------------------------------------------------
+  # 1. preflight — input validation + staging secret presence check.
+  #    Produces non-secret job outputs (sanitized label) consumed by
+  #    the perf job.  Does NOT mint tokens or install binaries —
+  #    those belong inside the perf job where they are actually used.
+  # -------------------------------------------------------------------
+  preflight:
+    name: Preflight (input validation + staging secret check)
+    runs-on: ubuntu-latest
+    environment: staging
+    outputs:
+      perf_label: ${{ steps.sanitize.outputs.perf_label }}
+    steps:
+      - name: Sanitize perf_label + validate UUID inputs
+        id: sanitize
+        env:
+          LABEL_INPUT:       ${{ inputs.perf_label }}
+          SEED_WO_ID:        ${{ inputs.seed_wo_id }}
+          SEED_PROGRAM_ID:   ${{ inputs.seed_program_id }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$LABEL_INPUT" =~ ^[A-Za-z][A-Za-z0-9-]{0,23}$ ]]; then
+            echo "::error::perf_label must match ^[A-Za-z][A-Za-z0-9-]{0,23}$"
+            exit 1
+          fi
+          if [[ "$LABEL_INPUT" == *--* ]]; then
+            echo "::error::perf_label may not contain consecutive hyphens"
+            exit 1
+          fi
+          if [[ "$LABEL_INPUT" == *- ]]; then
+            echo "::error::perf_label may not end with a hyphen"
+            exit 1
+          fi
+          UUID_RE='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+          if ! [[ "$SEED_WO_ID" =~ $UUID_RE ]]; then
+            echo "::error::seed_wo_id must be a UUID (8-4-4-4-12 hex)"
+            exit 1
+          fi
+          if ! [[ "$SEED_PROGRAM_ID" =~ $UUID_RE ]]; then
+            echo "::error::seed_program_id must be a UUID (8-4-4-4-12 hex)"
+            exit 1
+          fi
+          echo "perf_label=$LABEL_INPUT" >> "$GITHUB_OUTPUT"
+
+      - name: Assert required staging secrets are present
+        env:
+          AWS_STAGING_DEPLOY_ROLE_ARN:    ${{ secrets.AWS_STAGING_DEPLOY_ROLE_ARN }}
+          STAGING_BASE_URL:               ${{ secrets.STAGING_BASE_URL }}
+          STAGING_COGNITO_USER_POOL_ID:   ${{ secrets.STAGING_COGNITO_USER_POOL_ID }}
+          STAGING_COGNITO_APP_CLIENT_ID:  ${{ secrets.STAGING_COGNITO_APP_CLIENT_ID }}
+          STAGING_TEST_USERNAME:          ${{ secrets.STAGING_TEST_USERNAME }}
+          STAGING_TEST_PASSWORD:          ${{ secrets.STAGING_TEST_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for name in AWS_STAGING_DEPLOY_ROLE_ARN STAGING_BASE_URL \
+                      STAGING_COGNITO_USER_POOL_ID \
+                      STAGING_COGNITO_APP_CLIENT_ID \
+                      STAGING_TEST_USERNAME STAGING_TEST_PASSWORD; do
+            # shellcheck disable=SC2086
+            if [ -z "${!name:-}" ]; then
+              echo "::error::required staging secret $name is empty"
+              exit 1
+            fi
+          done
+
+  # -------------------------------------------------------------------
+  # 2. perf — single job.  k6 install, token mint, load run,
+  #    summarize, artifact upload, threshold gate ALL live here
+  #    because a job boundary cannot share an installed binary, a
+  #    masked $GITHUB_ENV variable, or a workspace file.
+  # -------------------------------------------------------------------
+  perf:
+    name: k6 read-path load pack against staging
+    needs: preflight
+    runs-on: ubuntu-latest
+    environment: staging
+    env:
+      STAGING_BASE_URL:              ${{ secrets.STAGING_BASE_URL }}
+      STAGING_COGNITO_USER_POOL_ID:  ${{ secrets.STAGING_COGNITO_USER_POOL_ID }}
+      STAGING_COGNITO_APP_CLIENT_ID: ${{ secrets.STAGING_COGNITO_APP_CLIENT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ".[dev]"
+
+      # Install k6 via the official Grafana APT repository.  Single
+      # binary; no Node/npm runtime.  Verify the install printed a
+      # concrete version string so a silent failure is caught early.
+      - name: Install k6 (Grafana APT)
+        run: |
+          set -euo pipefail
+          sudo gpg -k
+          sudo gpg --no-default-keyring \
+            --keyring /usr/share/keyrings/k6-archive-keyring.gpg \
+            --keyserver hkp://keyserver.ubuntu.com:80 \
+            --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" \
+            | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update
+          sudo apt-get install -y k6
+          k6 version
+
+      - name: Configure AWS credentials via OIDC (staging role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_STAGING_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Mint the staging test token in THIS job so it stays in one
+      # runner's masked env for the subsequent k6 step.  Same
+      # AdminInitiateAuth pattern as staging smoke.
+      - name: Mint staging test token (same-job handoff)
+        env:
+          STAGING_TEST_USERNAME: ${{ secrets.STAGING_TEST_USERNAME }}
+          STAGING_TEST_PASSWORD: ${{ secrets.STAGING_TEST_PASSWORD }}
+        run: |
+          set -euo pipefail
+          TOKEN=$(aws cognito-idp admin-initiate-auth \
+            --user-pool-id "$STAGING_COGNITO_USER_POOL_ID" \
+            --client-id "$STAGING_COGNITO_APP_CLIENT_ID" \
+            --auth-flow ADMIN_USER_PASSWORD_AUTH \
+            --auth-parameters "USERNAME=$STAGING_TEST_USERNAME,PASSWORD=$STAGING_TEST_PASSWORD" \
+            --query "AuthenticationResult.AccessToken" \
+            --output text)
+          if [ -z "$TOKEN" ] || [ "$TOKEN" = "None" ]; then
+            echo "::error::failed to mint staging test token"
+            exit 1
+          fi
+          echo "::add-mask::$TOKEN"
+          echo "STAGING_TEST_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+
+      # Run the k6 pack.  `set +e` is needed because a threshold
+      # breach returns exit 99 and we want the subsequent summarize
+      # + upload-artifact steps to still run.  The captured exit
+      # code feeds the final threshold gate.
+      - name: Run k6 read-path pack
+        id: k6
+        env:
+          SEED_WO_ID:      ${{ inputs.seed_wo_id }}
+          SEED_PROGRAM_ID: ${{ inputs.seed_program_id }}
+        run: |
+          set +e
+          k6 run tests/perf/k6/read_paths.js \
+            --summary-export k6-summary.json \
+            --out json=k6-events.json \
+            -e BASE_URL="$STAGING_BASE_URL" \
+            -e TOKEN="$STAGING_TEST_TOKEN" \
+            -e SEED_WO_ID="$SEED_WO_ID" \
+            -e SEED_PROGRAM_ID="$SEED_PROGRAM_ID"
+          EXIT=$?
+          set -e
+          echo "k6_exit=$EXIT" >> "$GITHUB_OUTPUT"
+
+      - name: Summarize k6 results
+        id: summarize
+        if: always()
+        run: |
+          set +e
+          python -m scripts.perf.summarize_k6 \
+            --input-json k6-summary.json \
+            --perf-label "${{ needs.preflight.outputs.perf_label }}" \
+            --workflow-run-id "${{ github.run_id }}" \
+            --workflow-run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --base-url "$STAGING_BASE_URL" \
+            --seed-wo-id "${{ inputs.seed_wo_id }}" \
+            --seed-program-id "${{ inputs.seed_program_id }}" \
+            --output-dir perf-report
+          EXIT=$?
+          set -e
+          echo "summarize_exit=$EXIT" >> "$GITHUB_OUTPUT"
+
+      - name: Upload perf evidence artifact (365-day retention)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-verification-${{ needs.preflight.outputs.perf_label }}-${{ github.run_id }}
+          path: |
+            perf-report/
+            k6-summary.json
+            k6-events.json
+          retention-days: 365
+          if-no-files-found: warn
+
+      - name: Threshold gate
+        if: always()
+        env:
+          K6_EXIT:         ${{ steps.k6.outputs.k6_exit }}
+          SUMMARIZE_EXIT:  ${{ steps.summarize.outputs.summarize_exit }}
+        run: |
+          set -euo pipefail
+          # k6 exits 99 on threshold breach; non-zero summarize exit
+          # means the verdict was "fail".  Either is a workflow
+          # failure.  A successful run has both at 0.
+          if [ "${K6_EXIT:-1}" != "0" ]; then
+            echo "::error::k6 exited non-zero (exit=$K6_EXIT); threshold breach or runtime failure — see artifact"
+            exit 1
+          fi
+          if [ "${SUMMARIZE_EXIT:-1}" != "0" ]; then
+            echo "::error::summarizer verdict is fail (exit=$SUMMARIZE_EXIT) — see artifact"
+            exit 1
+          fi
+          echo "perf run passed every threshold"
