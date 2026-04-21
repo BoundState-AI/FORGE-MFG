@@ -66,6 +66,14 @@ RUN apt-get update \
         libpq5 \
     && rm -rf /var/lib/apt/lists/*
 
+# Upgrade Python packaging tooling.  The base python:3.11-slim tag
+# ships with stale `setuptools` + `wheel` (and their vendored
+# jaraco.context / wheel copies) that fail a CRITICAL/HIGH Trivy gate
+# on CVE-2026-23949 (jaraco.context path traversal) and CVE-2026-24049
+# (wheel privilege escalation).  Upgrading here pulls the patched
+# versions into site-packages in the runtime image.
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+
 # Copy installed wheels + entry-point scripts from build stage.
 # /install -> /usr/local puts site-packages on the default sys.path
 # and scripts (gunicorn, alembic) on PATH for the default PYTHONPATH.
