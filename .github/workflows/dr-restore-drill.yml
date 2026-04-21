@@ -1,0 +1,883 @@
+# Module:   DR Restore Drill Workflow (6A-3C1)
+# Purpose:  Quarterly DR drill per spec §9.3.12 / ACC-14:
+#           restore from cross-region backup (DR Backup vault),
+#           verify data integrity against the restored drill DB,
+#           measure actual recovery time against the 4-hour RTO
+#           target, and persist durable evidence as a workflow
+#           artifact.  Does NOT touch any live production resource.
+# Rev:      0.1.0
+#
+# BoundState Proprietary
+# Co-Authored-By: Dr. Joseph Wilde, BoundState AI
+# Co-Authored-By: Claude "Beth" (Opus 4.7)
+#
+# Hard contract (pinned by tests/unit/test_dr_restore_workflow_contract.py):
+#   - workflow_dispatch only
+#   - environment: production on every AWS-touching job
+#   - OIDC only; no static AWS keys
+#   - runs in us-gov-east-1 throughout
+#   - no cdk deploy of any live-prod stack
+#   - no docker pull/tag/push against any ECR repo
+#   - no alembic invocation
+#   - restore uses AWS Backup start-restore-job (not rds restore)
+#   - start-restore-job --iam-role-arn is the Backup SERVICE role
+#     (AWS_BACKUP_RESTORE_ROLE_ARN), NOT the OIDC deploy role
+#   - source ResourceArn comes from PrimaryRdsArn CFN output, not
+#     a hardcoded ARN pattern
+#   - drill DB password is reset to an ephemeral value BEFORE the
+#     integrity checks run, inside the SAME job, so the secret never
+#     crosses a job boundary ($GITHUB_ENV does not persist across
+#     jobs; keeping the reset as a standalone job would orphan the
+#     password and verify would trip on an unbound variable under
+#     `set -u`).  This also decouples the drill from prod Secrets
+#     Manager rotation state.
+#   - verify uses SSM port-forward via an ephemeral bastion in the
+#     DR VPC's isolated subnet; the Session Manager plugin is
+#     installed + verified on the runner before the first session
+#   - report job is `if: always()` and its artifact upload is
+#     unconditional — the drill evidence artifact is produced even
+#     when verify or any earlier setup fails, so the operator has
+#     a durable record of what happened every time
+#   - cleanup runs `if: always()` so a failed verify doesn't leak
+#     the drill DB, bastion, or drill-scoped security groups
+
+name: DR Restore Drill
+
+on:
+  workflow_dispatch:
+    inputs:
+      recovery_point_arn:
+        description: >-
+          Optional explicit AWS Backup recovery point ARN to restore
+          from.  If empty, the drill auto-selects the most recent
+          COMPLETED RDS recovery point whose ResourceArn matches the
+          production primary RDS ARN (resolved from the CFN output
+          PrimaryRdsArn).
+        required: false
+        type: string
+        default: ""
+      drill_label:
+        description: >-
+          Operator label baked into the drill instance id + report
+          artifact (e.g. q2-2026).  Must start with a letter; only
+          ASCII letters, digits, and hyphens; no consecutive or
+          trailing hyphens; max 24 chars.
+        required: true
+        type: string
+      cleanup:
+        description: >-
+          When true (default) the drill DB, bastion, and drill-scoped
+          SGs are torn down after the report is sealed.  Set false
+          only for an interactive diagnostic drill; retained
+          resources accrue cost.
+        required: false
+        type: boolean
+        default: true
+      rto_target_minutes:
+        description: >-
+          Override the spec §9.3.12 default 4-hour RTO target (240
+          min).  Operators can tighten this for a dress-rehearsal
+          drill; it may never be loosened in the ops doc.
+        required: false
+        type: number
+        default: 240
+
+permissions:
+  id-token: write          # OIDC
+  contents: read
+
+concurrency:
+  group: dr-restore-drill
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-gov-east-1        # drill runs entirely in DR region
+  PRIMARY_REGION: us-gov-west-1    # only for resolving PrimaryRdsArn
+  DR_VAULT_NAME: forge-mfg-production-backup-vault-dr
+
+jobs:
+  # -------------------------------------------------------------------
+  # 1. preflight — input sanitize, resolve stack outputs, pick RP
+  # -------------------------------------------------------------------
+  preflight:
+    name: Preflight + recovery-point selection
+    runs-on: ubuntu-latest
+    environment: production
+    outputs:
+      drill_label:          ${{ steps.sanitize.outputs.drill_label }}
+      drill_instance_id:    ${{ steps.sanitize.outputs.drill_instance_id }}
+      primary_rds_arn:      ${{ steps.primary_rds.outputs.primary_rds_arn }}
+      dr_vpc_id:            ${{ steps.dr_net.outputs.vpc_id }}
+      dr_primary_subnet:    ${{ steps.dr_net.outputs.primary_subnet }}
+      dr_subnet_group:      ${{ steps.dr_net.outputs.subnet_group }}
+      recovery_point_arn:   ${{ steps.select.outputs.recovery_point_arn }}
+      recovery_point_date:  ${{ steps.select.outputs.creation_date }}
+      backup_plan_id:       ${{ steps.select.outputs.backup_plan_id }}
+      t0_drill_start:       ${{ steps.t0.outputs.ts }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ".[dev]"
+
+      - name: Sanitize drill_label (RDS identifier rules)
+        id: sanitize
+        env:
+          LABEL_INPUT: ${{ inputs.drill_label }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$LABEL_INPUT" =~ ^[A-Za-z][A-Za-z0-9-]{0,23}$ ]]; then
+            echo "::error::drill_label must match ^[A-Za-z][A-Za-z0-9-]{0,23}$"
+            exit 1
+          fi
+          if [[ "$LABEL_INPUT" == *--* ]]; then
+            echo "::error::drill_label may not contain consecutive hyphens"
+            exit 1
+          fi
+          if [[ "$LABEL_INPUT" == *- ]]; then
+            echo "::error::drill_label may not end with a hyphen"
+            exit 1
+          fi
+          TS=$(date -u +%Y%m%d-%H%M%S)
+          DRILL_ID="forge-mfg-drill-${LABEL_INPUT}-${TS}"
+          if [ "${#DRILL_ID}" -gt 63 ]; then
+            echo "::error::computed drill instance id exceeds 63 chars"
+            exit 1
+          fi
+          echo "drill_label=$LABEL_INPUT" >> "$GITHUB_OUTPUT"
+          echo "drill_instance_id=$DRILL_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS credentials via OIDC (production role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_PRODUCTION_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Resolve primary RDS ARN from production stack output
+        id: primary_rds
+        run: |
+          set -euo pipefail
+          ARN=$(aws cloudformation describe-stacks \
+            --region "$PRIMARY_REGION" \
+            --stack-name forge-mfg-production-primary \
+            --query "Stacks[0].Outputs[?OutputKey=='PrimaryRdsArn'].OutputValue | [0]" \
+            --output text 2>/dev/null || echo "")
+          if [ -z "$ARN" ] || [ "$ARN" = "None" ]; then
+            echo "::error::PrimaryRdsArn output missing; drill needs the production primary stack deployed (see docs/ops/6A_3C1 §17 for first-run story)"
+            exit 1
+          fi
+          echo "primary_rds_arn=$ARN" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve DR network outputs (VPC + subnets + subnet group)
+        id: dr_net
+        run: |
+          set -euo pipefail
+          VPC_ID=$(aws cloudformation describe-stacks \
+            --region "$AWS_REGION" \
+            --stack-name forge-mfg-production-dr-replica-network \
+            --query "Stacks[0].Outputs[?OutputKey=='DrVpcId'].OutputValue | [0]" \
+            --output text)
+          SUBNETS=$(aws cloudformation describe-stacks \
+            --region "$AWS_REGION" \
+            --stack-name forge-mfg-production-dr-replica-network \
+            --query "Stacks[0].Outputs[?OutputKey=='DrPrivateSubnetIds'].OutputValue | [0]" \
+            --output text)
+          SUBNET_GROUP=$(aws cloudformation describe-stacks \
+            --region "$AWS_REGION" \
+            --stack-name forge-mfg-production-dr-replica \
+            --query "Stacks[0].Outputs[?OutputKey=='DrReplicaSubnetGroupName'].OutputValue | [0]" \
+            --output text)
+          for v in "$VPC_ID" "$SUBNETS" "$SUBNET_GROUP"; do
+            if [ -z "$v" ] || [ "$v" = "None" ]; then
+              echo "::error::missing DR network output; drill cannot proceed"
+              exit 1
+            fi
+          done
+          PRIMARY_SUBNET="${SUBNETS%%,*}"
+          echo "vpc_id=$VPC_ID" >> "$GITHUB_OUTPUT"
+          echo "primary_subnet=$PRIMARY_SUBNET" >> "$GITHUB_OUTPUT"
+          echo "subnet_group=$SUBNET_GROUP" >> "$GITHUB_OUTPUT"
+
+      - name: Select recovery point
+        id: select
+        env:
+          RP_ARN_INPUT:    ${{ inputs.recovery_point_arn }}
+          PRIMARY_RDS_ARN: ${{ steps.primary_rds.outputs.primary_rds_arn }}
+        run: |
+          set -euo pipefail
+          if [ -n "$RP_ARN_INPUT" ]; then
+            # Operator-supplied path: describe + verify.
+            aws backup describe-recovery-point \
+              --backup-vault-name "$DR_VAULT_NAME" \
+              --recovery-point-arn "$RP_ARN_INPUT" \
+              --region "$AWS_REGION" \
+              --output json > rp.json
+            STATUS=$(python -c "import json,sys; print(json.load(open('rp.json')).get('Status',''))")
+            RTYPE=$(python -c "import json,sys; print(json.load(open('rp.json')).get('ResourceType',''))")
+            RARN=$(python -c "import json,sys; print(json.load(open('rp.json')).get('ResourceArn',''))")
+            CREATED=$(python -c "import json,sys; print(json.load(open('rp.json')).get('CreationDate',''))")
+            PLAN_ID=$(python -c "import json,sys; print(json.load(open('rp.json')).get('BackupPlanId',''))")
+            if [ "$STATUS" != "COMPLETED" ]; then
+              echo "::error::supplied recovery point is not COMPLETED (Status=$STATUS)"; exit 1
+            fi
+            if [ "$RTYPE" != "RDS" ]; then
+              echo "::error::supplied recovery point is not an RDS resource (ResourceType=$RTYPE)"; exit 1
+            fi
+            if [ "$RARN" != "$PRIMARY_RDS_ARN" ]; then
+              echo "::error::supplied recovery point ResourceArn $RARN does not match production primary $PRIMARY_RDS_ARN"; exit 1
+            fi
+            echo "recovery_point_arn=$RP_ARN_INPUT" >> "$GITHUB_OUTPUT"
+            echo "creation_date=$CREATED" >> "$GITHUB_OUTPUT"
+            echo "backup_plan_id=$PLAN_ID" >> "$GITHUB_OUTPUT"
+          else
+            # Auto-select path: list + filter + select-latest.
+            aws backup list-recovery-points-by-backup-vault \
+              --backup-vault-name "$DR_VAULT_NAME" \
+              --by-resource-type RDS \
+              --region "$AWS_REGION" \
+              --output json > rps.json
+            python -m scripts.dr.restore_drill select \
+              --candidates-json rps.json \
+              --expected-resource-arn "$PRIMARY_RDS_ARN" \
+              > selection.json
+            RP_ARN=$(python -c "import json; print(json.load(open('selection.json'))['recovery_point_arn'])")
+            CREATED=$(python -c "import json; print(json.load(open('selection.json'))['creation_date'])")
+            PLAN_ID=$(python -c "import json; print(json.load(open('selection.json'))['backup_plan_id'] or '')")
+            echo "recovery_point_arn=$RP_ARN" >> "$GITHUB_OUTPUT"
+            echo "creation_date=$CREATED" >> "$GITHUB_OUTPUT"
+            echo "backup_plan_id=$PLAN_ID" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Emit T0 (drill_start)
+        id: t0
+        run: |
+          TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          echo "ts=$TS" >> "$GITHUB_OUTPUT"
+
+  # -------------------------------------------------------------------
+  # 2. restore — aws backup start-restore-job into the DR VPC.
+  #    `--iam-role-arn` is the Backup SERVICE role; the deploy role
+  #    only invokes the API.
+  # -------------------------------------------------------------------
+  restore:
+    name: Restore drill DB via AWS Backup
+    needs: preflight
+    runs-on: ubuntu-latest
+    environment: production
+    outputs:
+      t1_restore_requested: ${{ steps.start.outputs.ts }}
+      t2_restore_available: ${{ steps.wait.outputs.ts }}
+      drill_db_endpoint:    ${{ steps.endpoint.outputs.endpoint }}
+      drill_db_sg_id:       ${{ steps.sg.outputs.sg_id }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure AWS credentials via OIDC (production role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_PRODUCTION_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Create drill-scoped SG in DR VPC
+        id: sg
+        env:
+          DRILL_ID:   ${{ needs.preflight.outputs.drill_instance_id }}
+          DR_VPC_ID:  ${{ needs.preflight.outputs.dr_vpc_id }}
+        run: |
+          set -euo pipefail
+          SG_ID=$(aws ec2 create-security-group \
+            --group-name "${DRILL_ID}-sg" \
+            --description "Drill DB SG (ephemeral, torn down on cleanup)" \
+            --vpc-id "$DR_VPC_ID" \
+            --region "$AWS_REGION" \
+            --query "GroupId" --output text)
+          aws ec2 create-tags --resources "$SG_ID" \
+            --tags Key=forge:trigger,Value=dr-restore-drill \
+                   Key=forge:drill_label,Value="${{ needs.preflight.outputs.drill_label }}" \
+            --region "$AWS_REGION"
+          echo "sg_id=$SG_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Get recovery-point restore metadata
+        id: meta
+        env:
+          RP_ARN: ${{ needs.preflight.outputs.recovery_point_arn }}
+        run: |
+          set -euo pipefail
+          aws backup get-recovery-point-restore-metadata \
+            --backup-vault-name "$DR_VAULT_NAME" \
+            --recovery-point-arn "$RP_ARN" \
+            --region "$AWS_REGION" \
+            --output json > meta.json
+
+      - name: Build restore metadata override
+        id: override
+        env:
+          DRILL_ID:       ${{ needs.preflight.outputs.drill_instance_id }}
+          SUBNET_GROUP:   ${{ needs.preflight.outputs.dr_subnet_group }}
+          DRILL_SG_ID:    ${{ steps.sg.outputs.sg_id }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, os
+          with open("meta.json") as f:
+              meta = json.load(f).get("RestoreMetadata", {})
+          # Narrow override set — only the fields the drill MUST
+          # override.  Everything else inherits from the source.
+          override = dict(meta)
+          override["DBInstanceIdentifier"] = os.environ["DRILL_ID"]
+          override["DBInstanceClass"] = "db.r6g.large"
+          override["DBSubnetGroupName"] = os.environ["SUBNET_GROUP"]
+          override["VpcSecurityGroupIds"] = os.environ["DRILL_SG_ID"]
+          override["PubliclyAccessible"] = "false"
+          override["MultiAZ"] = "false"
+          override["DeletionProtection"] = "false"
+          with open("override.json", "w") as f:
+              json.dump(override, f)
+          PY
+          echo "override_path=override.json" >> "$GITHUB_OUTPUT"
+
+      - name: Start restore job (Backup service role is the executor)
+        id: start
+        env:
+          RP_ARN:                 ${{ needs.preflight.outputs.recovery_point_arn }}
+          AWS_BACKUP_RESTORE_ROLE_ARN: ${{ secrets.AWS_BACKUP_RESTORE_ROLE_ARN }}
+        run: |
+          set -euo pipefail
+          OVERRIDE=$(cat override.json)
+          TS_START=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          echo "ts=$TS_START" >> "$GITHUB_OUTPUT"
+          JOB_ID=$(aws backup start-restore-job \
+            --recovery-point-arn "$RP_ARN" \
+            --iam-role-arn "$AWS_BACKUP_RESTORE_ROLE_ARN" \
+            --resource-type RDS \
+            --metadata "$OVERRIDE" \
+            --region "$AWS_REGION" \
+            --query "RestoreJobId" --output text)
+          echo "job_id=$JOB_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for restore to complete
+        id: wait
+        env:
+          JOB_ID: ${{ steps.start.outputs.job_id }}
+        run: |
+          set -euo pipefail
+          # Poll every 30s for up to 3h (the 4h RTO target is the
+          # outer bound — we do not want to tie up the runner any
+          # longer than that).  Exit non-zero if the job enters a
+          # terminal non-COMPLETED state.
+          DEADLINE=$((SECONDS + 10800))
+          while [ "$SECONDS" -lt "$DEADLINE" ]; do
+            STATE=$(aws backup describe-restore-job \
+              --restore-job-id "$JOB_ID" \
+              --region "$AWS_REGION" \
+              --query "Status" --output text)
+            case "$STATE" in
+              COMPLETED) break ;;
+              ABORTED|FAILED) echo "::error::restore job entered $STATE"; exit 1 ;;
+              *) sleep 30 ;;
+            esac
+          done
+          if [ "$STATE" != "COMPLETED" ]; then
+            echo "::error::restore job did not complete within 3h window"; exit 1
+          fi
+          TS_DONE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          echo "ts=$TS_DONE" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve drill DB endpoint
+        id: endpoint
+        env:
+          DRILL_ID: ${{ needs.preflight.outputs.drill_instance_id }}
+        run: |
+          set -euo pipefail
+          # The drill instance finishes the restore in `pending-reboot`
+          # or `available`; wait for `available` explicitly before
+          # reading the endpoint.
+          aws rds wait db-instance-available \
+            --db-instance-identifier "$DRILL_ID" \
+            --region "$AWS_REGION"
+          ENDPOINT=$(aws rds describe-db-instances \
+            --db-instance-identifier "$DRILL_ID" \
+            --region "$AWS_REGION" \
+            --query "DBInstances[0].Endpoint.Address" --output text)
+          echo "endpoint=$ENDPOINT" >> "$GITHUB_OUTPUT"
+
+  # -------------------------------------------------------------------
+  # 3. bastion-up — ephemeral EC2 in the DR VPC's isolated subnet.
+  #    Instance profile is pre-provisioned (DR_DRILL_BASTION_INSTANCE_
+  #    PROFILE_ARN); the workflow does NOT create IAM.
+  #
+  #    Note: the prior `reset-password` job was folded into the verify
+  #    job below.  $GITHUB_ENV exports do NOT persist across jobs, so
+  #    keeping the ephemeral drill-DB password in a separate job would
+  #    have made it unreachable from verify.  Password reset now runs
+  #    as the first step inside verify, keeping the secret purely in
+  #    one runner's process memory for the duration of the job.
+  # -------------------------------------------------------------------
+  bastion-up:
+    name: Launch drill bastion (SSM-registered, DR VPC)
+    needs: [preflight, restore]
+    runs-on: ubuntu-latest
+    environment: production
+    outputs:
+      bastion_instance_id: ${{ steps.launch.outputs.instance_id }}
+      bastion_sg_id:       ${{ steps.sg.outputs.sg_id }}
+    steps:
+      - name: Configure AWS credentials via OIDC (production role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_PRODUCTION_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Create bastion SG (ingress-less; egress to drill DB SG)
+        id: sg
+        env:
+          DRILL_ID:     ${{ needs.preflight.outputs.drill_instance_id }}
+          DR_VPC_ID:    ${{ needs.preflight.outputs.dr_vpc_id }}
+          DRILL_SG_ID:  ${{ needs.restore.outputs.drill_db_sg_id }}
+        run: |
+          set -euo pipefail
+          SG_ID=$(aws ec2 create-security-group \
+            --group-name "${DRILL_ID}-bastion-sg" \
+            --description "Drill bastion SG (ephemeral)" \
+            --vpc-id "$DR_VPC_ID" \
+            --region "$AWS_REGION" \
+            --query "GroupId" --output text)
+          aws ec2 create-tags --resources "$SG_ID" \
+            --tags Key=forge:trigger,Value=dr-restore-drill \
+                   Key=forge:drill_label,Value="${{ needs.preflight.outputs.drill_label }}" \
+            --region "$AWS_REGION"
+          # Allow bastion → drill DB :5432
+          aws ec2 authorize-security-group-egress \
+            --group-id "$SG_ID" \
+            --ip-permissions "IpProtocol=tcp,FromPort=5432,ToPort=5432,UserIdGroupPairs=[{GroupId=$DRILL_SG_ID}]" \
+            --region "$AWS_REGION" >/dev/null
+          # Allow bastion → SSM endpoints :443 (endpoints accept any
+          # SG within the VPC per dr_replica.py ingress rule).
+          aws ec2 authorize-security-group-egress \
+            --group-id "$SG_ID" \
+            --ip-permissions "IpProtocol=tcp,FromPort=443,ToPort=443,CidrIp=$(aws ec2 describe-vpcs --vpc-ids $DR_VPC_ID --region $AWS_REGION --query 'Vpcs[0].CidrBlock' --output text)" \
+            --region "$AWS_REGION" >/dev/null
+          # Mirror the egress back on the drill DB SG so the DB
+          # accepts 5432 from the bastion.
+          aws ec2 authorize-security-group-ingress \
+            --group-id "$DRILL_SG_ID" \
+            --ip-permissions "IpProtocol=tcp,FromPort=5432,ToPort=5432,UserIdGroupPairs=[{GroupId=$SG_ID}]" \
+            --region "$AWS_REGION" >/dev/null
+          echo "sg_id=$SG_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve latest Amazon Linux 2023 AMI
+        id: ami
+        run: |
+          set -euo pipefail
+          AMI_ID=$(aws ec2 describe-images \
+            --owners amazon \
+            --filters "Name=name,Values=al2023-ami-*-x86_64" \
+                      "Name=state,Values=available" \
+            --region "$AWS_REGION" \
+            --query "sort_by(Images,&CreationDate)[-1].ImageId" \
+            --output text)
+          echo "ami_id=$AMI_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Launch bastion EC2
+        id: launch
+        env:
+          DRILL_ID:       ${{ needs.preflight.outputs.drill_instance_id }}
+          SUBNET_ID:      ${{ needs.preflight.outputs.dr_primary_subnet }}
+          AMI_ID:         ${{ steps.ami.outputs.ami_id }}
+          BASTION_SG_ID:  ${{ steps.sg.outputs.sg_id }}
+          BASTION_PROFILE_ARN: ${{ secrets.DR_DRILL_BASTION_INSTANCE_PROFILE_ARN }}
+        run: |
+          set -euo pipefail
+          INSTANCE_ID=$(aws ec2 run-instances \
+            --image-id "$AMI_ID" \
+            --instance-type t3.nano \
+            --iam-instance-profile "Arn=$BASTION_PROFILE_ARN" \
+            --subnet-id "$SUBNET_ID" \
+            --security-group-ids "$BASTION_SG_ID" \
+            --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${DRILL_ID}-bastion},{Key=forge:trigger,Value=dr-restore-drill},{Key=forge:drill_label,Value=${{ needs.preflight.outputs.drill_label }}}]" \
+            --region "$AWS_REGION" \
+            --query "Instances[0].InstanceId" --output text)
+          echo "instance_id=$INSTANCE_ID" >> "$GITHUB_OUTPUT"
+          aws ec2 wait instance-running \
+            --instance-ids "$INSTANCE_ID" \
+            --region "$AWS_REGION"
+
+      - name: Wait for SSM agent online on bastion
+        env:
+          INSTANCE_ID: ${{ steps.launch.outputs.instance_id }}
+        run: |
+          set -euo pipefail
+          DEADLINE=$((SECONDS + 600))
+          while [ "$SECONDS" -lt "$DEADLINE" ]; do
+            PING=$(aws ssm describe-instance-information \
+              --filters "Key=InstanceIds,Values=$INSTANCE_ID" \
+              --region "$AWS_REGION" \
+              --query "InstanceInformationList[0].PingStatus" \
+              --output text 2>/dev/null || echo "")
+            if [ "$PING" = "Online" ]; then break; fi
+            sleep 15
+          done
+          if [ "$PING" != "Online" ]; then
+            echo "::error::bastion SSM agent did not report Online within 10min"
+            exit 1
+          fi
+
+  # -------------------------------------------------------------------
+  # 4. verify — reset drill DB password (inline, same job), install
+  #    Session Manager plugin, start SSM port-forward, run integrity
+  #    checks.  Password reset lives inside this job because
+  #    $GITHUB_ENV exports do not persist across jobs.
+  # -------------------------------------------------------------------
+  verify:
+    name: Integrity checks via SSM port-forward
+    needs: [preflight, restore, bastion-up]
+    runs-on: ubuntu-latest
+    environment: production
+    outputs:
+      t3_verify_start: ${{ steps.t3.outputs.ts }}
+      t4_verify_end:   ${{ steps.t4.outputs.ts }}
+      verification_json_b64: ${{ steps.verify.outputs.payload_b64 }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ".[dev]"
+
+      # ubuntu-latest does not ship the Session Manager plugin by
+      # default.  aws ssm start-session with the port-forward
+      # document wraps a WebSocket tunnel that needs the plugin to
+      # translate between local sockets and the session protocol.
+      - name: Install + verify Session Manager plugin
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_64bit/session-manager-plugin.deb" \
+            -o /tmp/session-manager-plugin.deb
+          sudo dpkg -i /tmp/session-manager-plugin.deb
+          session-manager-plugin --version
+
+      - name: Configure AWS credentials via OIDC (production role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_PRODUCTION_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Password reset lives INSIDE the verify job (not a standalone
+      # upstream job) because $GITHUB_ENV exports do not persist
+      # across jobs.  With the reset step here, the ephemeral
+      # password stays in the same runner's shell environment all
+      # the way through the integrity-check step.  Moving this
+      # out-of-job would require a secure side channel (SSM
+      # SecureString or a temp Secrets Manager secret), which is
+      # more surface than a drill needs.
+      - name: Reset drill DB master password (ephemeral)
+        id: reset
+        env:
+          DRILL_ID: ${{ needs.preflight.outputs.drill_instance_id }}
+        run: |
+          set -euo pipefail
+          PW=$(openssl rand -base64 32 | tr -d '=+/' | cut -c1-32)
+          echo "::add-mask::$PW"
+          aws rds modify-db-instance \
+            --db-instance-identifier "$DRILL_ID" \
+            --master-user-password "$PW" \
+            --apply-immediately \
+            --region "$AWS_REGION" > /dev/null
+          # Modify re-enters configuring; wait for available again.
+          aws rds wait db-instance-available \
+            --db-instance-identifier "$DRILL_ID" \
+            --region "$AWS_REGION"
+          MASTER_USER=$(aws rds describe-db-instances \
+            --db-instance-identifier "$DRILL_ID" \
+            --region "$AWS_REGION" \
+            --query "DBInstances[0].MasterUsername" --output text)
+          # Export to $GITHUB_ENV so the subsequent steps in THIS
+          # job can read them.  Both values stay inside the runner
+          # process; neither crosses the job boundary.
+          echo "FORGE_DRILL_DB_PASSWORD=$PW" >> "$GITHUB_ENV"
+          echo "FORGE_DRILL_DB_USER=$MASTER_USER" >> "$GITHUB_ENV"
+
+      - name: Emit T3 (verify_start)
+        id: t3
+        run: echo "ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - name: Start SSM port-forward session in background
+        env:
+          BASTION_ID: ${{ needs.bastion-up.outputs.bastion_instance_id }}
+          DRILL_DB_ENDPOINT: ${{ needs.restore.outputs.drill_db_endpoint }}
+        run: |
+          set -euo pipefail
+          aws ssm start-session \
+            --target "$BASTION_ID" \
+            --document-name AWS-StartPortForwardingSessionToRemoteHost \
+            --parameters "host=$DRILL_DB_ENDPOINT,portNumber=5432,localPortNumber=5432" \
+            --region "$AWS_REGION" &
+          SESSION_PID=$!
+          echo "session_pid=$SESSION_PID" >> "$GITHUB_ENV"
+          # Give the plugin a moment to open the local listener.
+          sleep 10
+
+      - name: Run integrity checks against drill DB
+        id: verify
+        run: |
+          set -euo pipefail
+          # FORGE_DRILL_DB_USER + FORGE_DRILL_DB_PASSWORD were
+          # exported to $GITHUB_ENV by the Reset step above; both
+          # live in this same job so they are guaranteed to be
+          # bound here.
+          export FORGE_DRILL_DB_URL="postgresql+asyncpg://${FORGE_DRILL_DB_USER}:${FORGE_DRILL_DB_PASSWORD}@127.0.0.1:5432/forge?ssl=require"
+          # run verify; capture JSON output
+          python -m scripts.dr.restore_drill verify \
+            --drill-db-url "$FORGE_DRILL_DB_URL" \
+            --output-json verify.json || true
+          # Base64-encode the JSON so it can ride a step output even
+          # if checks produce special characters in detail strings.
+          B64=$(base64 -w 0 verify.json)
+          echo "payload_b64=$B64" >> "$GITHUB_OUTPUT"
+
+      - name: Stop SSM port-forward
+        if: always()
+        run: |
+          if [ -n "${session_pid:-}" ]; then
+            kill "$session_pid" 2>/dev/null || true
+          fi
+
+      - name: Emit T4 (verify_end)
+        id: t4
+        if: always()
+        run: echo "ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+  # -------------------------------------------------------------------
+  # 6. report — assemble durable evidence + upload artifact.
+  #
+  # `if: always()` is the contract: the drill report artifact must
+  # be produced regardless of whether upstream jobs passed, failed,
+  # or were skipped.  Without this, a hard failure in verify or any
+  # earlier setup would skip the report entirely and the operator
+  # would have no durable evidence of what went wrong.
+  #
+  # The input-builder is defensive — it tolerates missing upstream
+  # outputs (e.g. when restore failed before emitting T2) by
+  # substituting empty strings and a failure-shaped verification
+  # stub.  The report's overall_verdict will resolve to "fail" in
+  # those cases, which is truthful: a drill that did not complete
+  # its restore has not proven recovery.
+  # -------------------------------------------------------------------
+  report:
+    name: Assemble + upload drill report
+    needs: [preflight, restore, bastion-up, verify]
+    if: always()
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ".[dev]"
+
+      - name: Build report input JSON (defensive on missing upstream)
+        env:
+          # All upstream outputs are read as empty strings when the
+          # upstream job was skipped or failed before emitting them.
+          # The Python builder substitutes safe defaults and a
+          # failure-shaped verification stub so the report is still
+          # well-formed JSON the artifact-upload step can grab.
+          VERIFY_B64:          ${{ needs.verify.outputs.verification_json_b64 }}
+          DRILL_LABEL:         ${{ needs.preflight.outputs.drill_label }}
+          DRILL_INSTANCE_ID:   ${{ needs.preflight.outputs.drill_instance_id }}
+          RECOVERY_POINT_ARN:  ${{ needs.preflight.outputs.recovery_point_arn }}
+          RECOVERY_POINT_DATE: ${{ needs.preflight.outputs.recovery_point_date }}
+          PRIMARY_RDS_ARN:     ${{ needs.preflight.outputs.primary_rds_arn }}
+          BACKUP_PLAN_ID:      ${{ needs.preflight.outputs.backup_plan_id }}
+          T0:                  ${{ needs.preflight.outputs.t0_drill_start }}
+          T1:                  ${{ needs.restore.outputs.t1_restore_requested }}
+          T2:                  ${{ needs.restore.outputs.t2_restore_available }}
+          T3:                  ${{ needs.verify.outputs.t3_verify_start }}
+          T4:                  ${{ needs.verify.outputs.t4_verify_end }}
+          BASTION_ID:          ${{ needs.bastion-up.outputs.bastion_instance_id }}
+          RP_ARN_INPUT:        ${{ inputs.recovery_point_arn }}
+          RTO_TARGET_MINUTES:  ${{ inputs.rto_target_minutes }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import base64
+          import json
+          import os
+
+          def _env_or_empty(name: str) -> str:
+              return os.environ.get(name, "") or ""
+
+          # Decode verify payload if it's present; otherwise fall
+          # back to a failure-shaped stub so the report is still
+          # well-formed.  A drill that never ran verify is a drill
+          # that did not prove recovery — the stub reflects that.
+          verify_b64 = _env_or_empty("VERIFY_B64")
+          if verify_b64:
+              try:
+                  verification = json.loads(
+                      base64.b64decode(verify_b64).decode("utf-8"),
+                  )
+              except Exception as exc:
+                  verification = {
+                      "verdict": "fail",
+                      "checks": [],
+                      "decode_error": f"{type(exc).__name__}: {exc}",
+                  }
+          else:
+              verification = {
+                  "verdict": "fail",
+                  "checks": [],
+                  "note": (
+                      "verify job did not produce a verification "
+                      "payload; upstream failure or skip"
+                  ),
+              }
+
+          # Timings default to a canonical zero-ISO when missing so
+          # the report builder's _parse_iso does not crash.  The
+          # resulting durations will be 0 or negative, which the
+          # overall_verdict surfaces as fail.
+          ZERO = "1970-01-01T00:00:00Z"
+
+          def _ts(name: str) -> str:
+              val = _env_or_empty(name)
+              return val if val else ZERO
+
+          payload = {
+              "drill_label": _env_or_empty("DRILL_LABEL") or "unknown",
+              "workflow_run_id": os.environ.get("GITHUB_RUN_ID", ""),
+              "workflow_run_url": (
+                  f"{os.environ.get('GITHUB_SERVER_URL', '')}/"
+                  f"{os.environ.get('GITHUB_REPOSITORY', '')}/"
+                  f"actions/runs/{os.environ.get('GITHUB_RUN_ID', '')}"
+              ),
+              "source": {
+                  "selection_mode": (
+                      "operator_supplied"
+                      if _env_or_empty("RP_ARN_INPUT")
+                      else "auto_latest_completed_rds"
+                  ),
+                  "recovery_point_arn": _env_or_empty("RECOVERY_POINT_ARN"),
+                  "recovery_point_creation_date": _env_or_empty(
+                      "RECOVERY_POINT_DATE",
+                  ),
+                  "source_resource_arn": _env_or_empty("PRIMARY_RDS_ARN"),
+                  "backup_plan_id": _env_or_empty("BACKUP_PLAN_ID"),
+                  "dr_vault_name": "forge-mfg-production-backup-vault-dr",
+                  "dr_vault_region": "us-gov-east-1",
+              },
+              "timings": {
+                  "drill_start":       _ts("T0"),
+                  "restore_requested": _ts("T1"),
+                  "restore_available": _ts("T2"),
+                  "verify_start":      _ts("T3"),
+                  "verify_end":        _ts("T4"),
+              },
+              "verification": verification,
+              "rto_target_minutes": int(
+                  _env_or_empty("RTO_TARGET_MINUTES") or "240",
+              ),
+              "drill_instance_identifier": _env_or_empty(
+                  "DRILL_INSTANCE_ID",
+              ),
+              "bastion_instance_id": _env_or_empty("BASTION_ID"),
+          }
+          with open("report_input.json", "w") as f:
+              json.dump(payload, f, indent=2)
+          PY
+
+      - name: Assemble + write report.json + report.md
+        id: assemble
+        run: |
+          set +e
+          python -m scripts.dr.restore_drill report \
+            --input-json report_input.json \
+            --output-dir drill-report
+          EXIT=$?
+          set -e
+          # Preserve exit code but still upload the artifact below.
+          echo "report_exit=$EXIT" >> "$GITHUB_OUTPUT"
+
+      - name: Upload drill report artifact (365-day retention)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dr-restore-drill-${{ needs.preflight.outputs.drill_label }}-${{ github.run_id }}
+          path: drill-report/
+          retention-days: 365
+          if-no-files-found: warn
+
+      - name: Fail job if report verdict is fail
+        if: steps.assemble.outputs.report_exit != '0'
+        run: |
+          echo "::error::drill report indicates fail (RTO or verification breach or upstream failure)"
+          exit 1
+
+  # -------------------------------------------------------------------
+  # 6. cleanup — always runs; tears down the drill DB + bastion + SGs.
+  # -------------------------------------------------------------------
+  cleanup:
+    name: Tear down drill resources
+    needs: [preflight, restore, bastion-up, report]
+    if: always()
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Configure AWS credentials via OIDC (production role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_PRODUCTION_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terminate bastion (always, regardless of cleanup input)
+        if: needs.bastion-up.outputs.bastion_instance_id != ''
+        run: |
+          set -euo pipefail
+          aws ec2 terminate-instances \
+            --instance-ids "${{ needs.bastion-up.outputs.bastion_instance_id }}" \
+            --region "$AWS_REGION" >/dev/null || true
+          aws ec2 wait instance-terminated \
+            --instance-ids "${{ needs.bastion-up.outputs.bastion_instance_id }}" \
+            --region "$AWS_REGION" || true
+
+      - name: Delete drill DB (if cleanup enabled)
+        if: inputs.cleanup == true && needs.preflight.outputs.drill_instance_id != ''
+        run: |
+          set -euo pipefail
+          aws rds delete-db-instance \
+            --db-instance-identifier "${{ needs.preflight.outputs.drill_instance_id }}" \
+            --skip-final-snapshot \
+            --delete-automated-backups \
+            --region "$AWS_REGION" >/dev/null || true
+
+      - name: Delete drill-scoped SGs (if cleanup enabled)
+        if: inputs.cleanup == true
+        run: |
+          set -euo pipefail
+          for SG_ID in \
+              "${{ needs.bastion-up.outputs.bastion_sg_id }}" \
+              "${{ needs.restore.outputs.drill_db_sg_id }}"; do
+            if [ -n "$SG_ID" ]; then
+              # SG deletion will fail if ENIs still hold refs; retry
+              # a few times as the bastion ENI detaches.
+              for i in 1 2 3 4 5; do
+                if aws ec2 delete-security-group \
+                    --group-id "$SG_ID" \
+                    --region "$AWS_REGION" 2>/dev/null; then
+                  break
+                fi
+                sleep 30
+              done
+            fi
+          done
+
+      - name: Record cleanup outcome
+        if: always()
+        run: |
+          if [ "${{ inputs.cleanup }}" = "true" ]; then
+            echo "cleanup_outcome=deleted"
+          else
+            echo "cleanup_outcome=retained_by_operator"
+            echo "::warning::drill DB + SGs retained per cleanup=false input; bastion is always terminated regardless"
+          fi

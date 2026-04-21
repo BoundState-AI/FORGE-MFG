@@ -94,6 +94,79 @@ class ForgeMfgGovCloudDrReplicaStack(cdk.Stack):
             allow_all_outbound=False,
         )
 
+        # 6A-3C1: SSM interface endpoints in the DR VPC.  The DR
+        # restore drill launches an ephemeral bastion in the VPC's
+        # private-isolated subnets (no NAT), then opens an SSM
+        # port-forwarding session from the GitHub Actions runner
+        # to the restored drill DB via that bastion.  Without these
+        # three interface endpoints, the bastion cannot reach SSM
+        # and `aws ssm start-session` hangs indefinitely.
+        #
+        # Three endpoints are the documented SSM-on-private-subnet
+        # requirement:
+        #   - ssm           — control-plane API (RegisterInstance etc.)
+        #   - ssmmessages   — Session Manager data channel
+        #   - ec2messages   — heartbeat + legacy message path
+        #
+        # We deliberately place these on the dr-replica stack (not
+        # dr-replica-network) because the endpoints need the
+        # replica SG as a peer — keeping them scoped to the same
+        # stack that owns the SG avoids a cross-stack reference
+        # cycle, and the drill-bastion SG is workflow-scoped
+        # (created at drill time) so it peers with these endpoints
+        # via SG-id ingress at drill time.
+        endpoint_sg = ec2.SecurityGroup(
+            self, "DrSsmEndpointSg",
+            vpc=vpc,
+            description=(
+                "SSM interface endpoints — 443 ingress from drill "
+                "bastion SGs at drill time; no egress required."
+            ),
+            allow_all_outbound=False,
+        )
+        # The drill bastion SGs are created by the drill workflow,
+        # not here, so the ingress rule on these endpoints is
+        # "any SG in the VPC can reach 443" during the drill.  The
+        # endpoints are VPC-private and reachable only from within
+        # the VPC anyway; loosening SG ingress to VPC CIDR is
+        # the honest trade-off for not hardcoding a
+        # workflow-created SG id into infra.
+        endpoint_sg.add_ingress_rule(
+            peer=ec2.Peer.ipv4(vpc.vpc_cidr_block),
+            connection=ec2.Port.tcp(443),
+            description="SSM/HTTPS from any resource in DR VPC",
+        )
+        self.ssm_endpoint = ec2.InterfaceVpcEndpoint(
+            self, "DrSsmEndpoint",
+            vpc=vpc,
+            service=ec2.InterfaceVpcEndpointAwsService.SSM,
+            subnets=ec2.SubnetSelection(
+                subnet_type=ec2.SubnetType.PRIVATE_ISOLATED,
+            ),
+            security_groups=[endpoint_sg],
+            private_dns_enabled=True,
+        )
+        self.ssmmessages_endpoint = ec2.InterfaceVpcEndpoint(
+            self, "DrSsmMessagesEndpoint",
+            vpc=vpc,
+            service=ec2.InterfaceVpcEndpointAwsService.SSM_MESSAGES,
+            subnets=ec2.SubnetSelection(
+                subnet_type=ec2.SubnetType.PRIVATE_ISOLATED,
+            ),
+            security_groups=[endpoint_sg],
+            private_dns_enabled=True,
+        )
+        self.ec2messages_endpoint = ec2.InterfaceVpcEndpoint(
+            self, "DrEc2MessagesEndpoint",
+            vpc=vpc,
+            service=ec2.InterfaceVpcEndpointAwsService.EC2_MESSAGES,
+            subnets=ec2.SubnetSelection(
+                subnet_type=ec2.SubnetType.PRIVATE_ISOLATED,
+            ),
+            security_groups=[endpoint_sg],
+            private_dns_enabled=True,
+        )
+
         self.replica_identifier = (
             f"{prefix}-dr-replica-{settings.dr_region}"
         )
@@ -136,6 +209,23 @@ class ForgeMfgGovCloudDrReplicaStack(cdk.Stack):
             description=(
                 "DR-region RDS read replica identifier.  Spec "
                 "§9.3.12 warm standby; promoted on DR drill."
+            ),
+        )
+
+        # 6A-3C1: the DR restore drill passes this as
+        # `DBSubnetGroupName` in the AWS Backup restore metadata
+        # override so the restored drill DB lands in the same DR
+        # VPC the bastion uses.  Exposed as an output so the
+        # workflow does not need to reconstruct the deterministic
+        # name pattern.
+        cdk.CfnOutput(
+            self, "DrReplicaSubnetGroupName",
+            value=self.replica_subnet_group.db_subnet_group_name
+            or "",
+            description=(
+                "DR-region RDS DB subnet group name.  Consumed by "
+                "the 6A-3C1 DR restore drill's start-restore-job "
+                "metadata to land the drill DB in the DR VPC."
             ),
         )
 

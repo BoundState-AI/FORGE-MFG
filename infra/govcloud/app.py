@@ -165,6 +165,39 @@ def synth() -> cdk.App:
         ],
     )
 
+    # 6A-3C1: expose the DR VPC id and its isolated subnet ids as
+    # stack outputs so the DR restore drill workflow can resolve the
+    # restore target network without hardcoding names or tag lookups.
+    # Without these outputs, the drill would have to grep for a
+    # deterministic VPC name tag — brittle and easy to silently
+    # diverge.  Emit here (on the helper network stack) rather than
+    # on the dr-replica stack because these resources physically
+    # live in the helper stack.
+    cdk.CfnOutput(
+        dr_replica_scope, "DrVpcId",
+        value=dr_vpc.vpc_id,
+        description=(
+            "DR-region VPC id.  Consumed by the DR restore drill "
+            "workflow (6A-3C1) to launch the drill bastion in the "
+            "same VPC as the restored drill instance."
+        ),
+    )
+    cdk.CfnOutput(
+        dr_replica_scope, "DrPrivateSubnetIds",
+        # Join with comma so the drill workflow can split and pick
+        # a primary subnet without juggling multiple outputs.  The
+        # bastion is single-AZ (t3.nano) so subnet [0] is enough;
+        # the restored RDS instance uses the SubnetGroup instead.
+        value=cdk.Fn.join(
+            ",",
+            [subnet.subnet_id for subnet in dr_vpc.isolated_subnets],
+        ),
+        description=(
+            "Comma-joined DR-region isolated subnet ids.  Drill "
+            "workflow takes subnet [0] for the bastion ENI."
+        ),
+    )
+
     dr_replica = ForgeMfgGovCloudDrReplicaStack(
         app, settings.stack_name("dr-replica"),
         settings=settings, env=dr_env,

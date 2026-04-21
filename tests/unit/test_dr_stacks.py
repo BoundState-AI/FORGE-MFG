@@ -63,10 +63,23 @@ def _build_dr_foundation() -> (
     return app, stack
 
 
-def _build_dr_replica() -> tuple[cdk.App, ForgeMfgGovCloudDrReplicaStack]:
-    """Build dr-replica alongside a minimal foundation so the
-    replica has a KMS key to consume.  We don't synth the whole
-    three-stack app here — each static assertion is stack-local."""
+def _build_dr_network_and_replica() -> (
+    tuple[
+        cdk.App,
+        cdk.Stack,                         # dr-replica-network helper
+        ForgeMfgGovCloudDrReplicaStack,    # dr-replica
+    ]
+):
+    """Build dr-replica-network + dr-replica so both sets of outputs
+    (the VPC-level outputs on the network stack and the subnet-group
+    output on the replica stack) are synthesizable in one shot.
+
+    This replaces the earlier `_build_dr_replica` helper that inlined
+    the throwaway VPC scope — 6A-3C1 added `DrVpcId` and
+    `DrPrivateSubnetIds` outputs to the helper stack, so the helper
+    stack itself is now part of the contract surface and must be
+    returned explicitly for Template assertions.
+    """
     app = cdk.App()
     settings = _settings()
     dr_env = cdk.Environment(
@@ -76,12 +89,12 @@ def _build_dr_replica() -> tuple[cdk.App, ForgeMfgGovCloudDrReplicaStack]:
         app, settings.stack_name("dr-foundation"),
         settings=settings, env=dr_env,
     )
-    # Provide a throwaway VPC for the replica subnet group.
     vpc_scope = cdk.Stack(
         app, settings.stack_name("dr-replica-network"), env=dr_env,
     )
     vpc = ec2.Vpc(
-        vpc_scope, "DrVpc",
+        vpc_scope, "DrReplicaVpc",
+        vpc_name=f"{settings.resource_prefix()}-dr",
         max_azs=2,
         nat_gateways=0,
         subnet_configuration=[
@@ -91,6 +104,23 @@ def _build_dr_replica() -> tuple[cdk.App, ForgeMfgGovCloudDrReplicaStack]:
                 cidr_mask=24,
             ),
         ],
+    )
+    # Mirror the outputs that app.py emits on this helper stack in
+    # production so the template synthesis covers them here too.
+    # We inline rather than import from app.py because importing
+    # app.py triggers a full multi-stack synth that the other tests
+    # in this file do not need.
+    cdk.CfnOutput(
+        vpc_scope, "DrVpcId",
+        value=vpc.vpc_id,
+        description="DR-region VPC id (6A-3C1 drill target).",
+    )
+    cdk.CfnOutput(
+        vpc_scope, "DrPrivateSubnetIds",
+        value=cdk.Fn.join(
+            ",", [s.subnet_id for s in vpc.isolated_subnets],
+        ),
+        description="Comma-joined DR isolated subnet ids.",
     )
     replica = ForgeMfgGovCloudDrReplicaStack(
         app, settings.stack_name("dr-replica"),
@@ -103,6 +133,15 @@ def _build_dr_replica() -> tuple[cdk.App, ForgeMfgGovCloudDrReplicaStack]:
         vpc=vpc,
     )
     replica.add_dependency(vpc_scope)
+    return app, vpc_scope, replica
+
+
+def _build_dr_replica() -> tuple[cdk.App, ForgeMfgGovCloudDrReplicaStack]:
+    """Back-compat shim for legacy tests that only need the replica
+    stack.  New tests should prefer `_build_dr_network_and_replica`
+    so both the network helper stack and the replica stack are in
+    scope."""
+    app, _network, replica = _build_dr_network_and_replica()
     return app, replica
 
 
@@ -230,3 +269,99 @@ def test_dr_replica_no_cloudfront() -> None:
     tpl = Template.from_stack(stack)
     json_str = json.dumps(tpl.to_json())
     assert "AWS::CloudFront" not in json_str
+
+
+# ---------------------------------------------------------------------
+# 6A-3C1 contract — outputs + SSM VPC endpoints needed by the DR
+# restore drill workflow.
+# ---------------------------------------------------------------------
+
+def test_dr_replica_network_stack_exports_vpc_id_output() -> None:
+    """DR restore drill (6A-3C1) resolves the DR VPC via this output.
+    Hardcoding the VPC name tag in the workflow would silently diverge
+    if the VPC is renamed; the CFN output pins the contract."""
+    _, network, _ = _build_dr_network_and_replica()
+    tpl = Template.from_stack(network)
+    outputs = tpl.find_outputs("DrVpcId")
+    assert outputs, (
+        "dr-replica-network stack must emit a DrVpcId CfnOutput for "
+        "the 6A-3C1 drill workflow to resolve the DR VPC"
+    )
+
+
+def test_dr_replica_network_stack_exports_private_subnet_ids_output() -> None:
+    """Drill bastion lands in [0] of the comma-joined subnet list."""
+    _, network, _ = _build_dr_network_and_replica()
+    tpl = Template.from_stack(network)
+    outputs = tpl.find_outputs("DrPrivateSubnetIds")
+    assert outputs, (
+        "dr-replica-network stack must emit a DrPrivateSubnetIds "
+        "CfnOutput (comma-joined isolated subnet ids) so the drill "
+        "bastion knows which subnet to attach its ENI to"
+    )
+
+
+def test_dr_replica_stack_exports_subnet_group_name_output() -> None:
+    """Drill restore metadata override uses this as the
+    DBSubnetGroupName so the restored drill DB lands in the DR VPC
+    alongside the bastion."""
+    _, stack = _build_dr_replica()
+    tpl = Template.from_stack(stack)
+    outputs = tpl.find_outputs("DrReplicaSubnetGroupName")
+    assert outputs, (
+        "dr-replica stack must emit a DrReplicaSubnetGroupName "
+        "CfnOutput for the 6A-3C1 drill workflow to reference in "
+        "the AWS Backup start-restore-job metadata"
+    )
+
+
+def test_dr_replica_stack_provisions_three_ssm_interface_endpoints() -> None:
+    """Without ssm/ssmmessages/ec2messages interface endpoints, the
+    drill bastion in the private-isolated DR subnet cannot reach
+    SSM and `aws ssm start-session` would hang.  Spec §9.3.12 DR
+    drill + 6A-3C1 workflow depend on these three endpoints being
+    present in the DR VPC."""
+    _, stack = _build_dr_replica()
+    tpl = Template.from_stack(stack)
+    endpoints = tpl.find_resources("AWS::EC2::VPCEndpoint")
+    service_names: list[str] = []
+    for _logical, resource in endpoints.items():
+        props = resource["Properties"]
+        svc = props.get("ServiceName")
+        # ServiceName renders as a CFN intrinsic Fn::Join for
+        # interface endpoints — reduce it to a readable string.
+        if isinstance(svc, dict):
+            joined = svc.get("Fn::Join") or []
+            if len(joined) == 2 and isinstance(joined[1], list):
+                service_names.append("".join(
+                    p for p in joined[1] if isinstance(p, str)
+                ))
+        elif isinstance(svc, str):
+            service_names.append(svc)
+
+    required_suffixes = (".ssm", ".ssmmessages", ".ec2messages")
+    for suffix in required_suffixes:
+        assert any(name.endswith(suffix) for name in service_names), (
+            f"dr-replica stack must provision an SSM interface "
+            f"endpoint with ServiceName suffix {suffix!r} for the "
+            f"DR restore drill; found services: {service_names!r}"
+        )
+
+
+def test_dr_replica_stack_ssm_endpoints_use_private_isolated_subnets() -> None:
+    """The endpoints must land in the same isolated subnets the
+    bastion uses — otherwise DNS resolution from the bastion lands
+    on an ENI the bastion cannot reach."""
+    _, stack = _build_dr_replica()
+    tpl = Template.from_stack(stack)
+    endpoints = tpl.find_resources("AWS::EC2::VPCEndpoint")
+    assert endpoints, "expected at least one SSM VPC endpoint"
+    for _logical, resource in endpoints.items():
+        props = resource["Properties"]
+        assert props.get("VpcEndpointType") == "Interface", (
+            "SSM endpoints must be Interface type (not Gateway)"
+        )
+        assert props.get("PrivateDnsEnabled") is True, (
+            "PrivateDnsEnabled is required so the bastion's aws CLI "
+            "resolves ssm.<region>.amazonaws.com to the endpoint ENI"
+        )
