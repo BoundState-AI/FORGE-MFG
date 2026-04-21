@@ -135,7 +135,19 @@ async def _fetch_jwks(
     else:
         cached = _jwks_cache.get(jwks_url)
         if cached is not None:
-            return cached
+            # CI may not have cachetools stubs available, which leaves
+            # TTLCache.get() typed as Any even though the cache itself
+            # is annotated. Validate the runtime shape here so the
+            # return type stays concrete under both typed and untyped
+            # cachetools installs.
+            if not isinstance(cached, list):
+                raise PyJWTError("JWKS cache entry has invalid shape")
+            validated: list[dict[str, Any]] = []
+            for item in cached:
+                if not isinstance(item, dict):
+                    raise PyJWTError("JWKS cache entry has invalid shape")
+                validated.append(item)
+            return validated
 
     async with httpx.AsyncClient(timeout=10.0) as client:
         resp = await client.get(jwks_url)
