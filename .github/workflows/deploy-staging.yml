@@ -54,6 +54,11 @@ permissions:
   id-token: write          # OIDC assume-role on AWS
   security-events: write   # Trivy SARIF upload
   contents: read
+  actions: read            # codeql-action/upload-sarif@v3 reads workflow-run
+                           # metadata for SARIF fingerprinting.  Without this
+                           # the upload step errors "Resource not accessible
+                           # by integration" even when the SARIF file itself
+                           # is well-formed.
 
 concurrency:
   group: deploy-staging

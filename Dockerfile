@@ -1,38 +1,80 @@
-FROM python:3.11-slim AS build
+# Module:   FORGE-MFG API Dockerfile
+# Purpose:  Multi-stage build.  Build stage installs gcc + libpq-dev
+#           to compile psycopg2 from source; runtime stage ships only
+#           the installed wheels + libpq5 runtime linkage.  This keeps
+#           the production image narrow (no compiler toolchain in the
+#           running container) and cuts the Trivy CRITICAL/HIGH
+#           vulnerability surface that the staging scan gate enforces.
+# Rev:      0.2.0
+#
+# BoundState Proprietary
+# Co-Authored-By: Dr. Joseph Wilde, BoundState AI
+# Co-Authored-By: Claude "Beth" (Opus 4.7)
+#
+# Why source-build psycopg2 (not psycopg2-binary): the -binary wheel
+# statically links libpq and can diverge from the system libpq in
+# subtle SSL/locale ways that are hard to diagnose on GovCloud.
+# Source builds link against the libpq5 we control in the runtime
+# stage, so TLS verify-full behavior matches what we deploy.
 
+# ── Build stage ─────────────────────────────────────────────────────
+FROM python:3.11-slim AS build
 WORKDIR /app
 
 # Build-stage system deps.
-#   curl      — retained for healthcheck parity if the runtime stage ever
-#               collapses into this one; cheap to keep.
-#   gcc       — required to compile psycopg2 from source.  We pin the
-#               source build (not psycopg2-binary) because the -binary
-#               wheel statically links libpq and can diverge from the
-#               system libpq in subtle SSL/locale ways that are hard to
-#               diagnose on GovCloud.  Source builds against the libpq
-#               we control below.
-#   libc6-dev — Debian slim omits the C standard library headers
-#               (for example stdlib.h).  psycopg2's source build pulls
-#               in Python.h, which includes those libc headers; without
-#               them Railway fails during `pip install .` with
-#               `fatal error: stdlib.h: No such file or directory`.
-#   libpq-dev — PostgreSQL client headers, needed for psycopg2's
-#               C extension build step.
+#   gcc       — required to compile psycopg2 from source.
+#   libc6-dev — Debian slim omits libc headers; psycopg2's source
+#               build pulls in Python.h which transitively includes
+#               stdlib.h.
+#   libpq-dev — PostgreSQL client headers for the psycopg2 C
+#               extension's link step.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
     gcc \
     libc6-dev \
     libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy source first — pip install needs the package present for hatchling
-# to resolve the build. Splitting pyproject.toml alone does not work with
-# editable-style or source-tree builds.
+# Source layout needed for hatchling-based source install.  Splitting
+# pyproject.toml alone does not work; hatchling walks the package tree.
 COPY pyproject.toml ./
 COPY forge/ forge/
 COPY migrations/ migrations/
 
-RUN pip install --no-cache-dir .
+# Install into an isolated prefix so the runtime stage can lift a
+# clean copy without inheriting pip's cache or the build-time
+# compiler toolchain.  `--prefix=/install` places site-packages under
+# /install/lib/pythonX.Y/site-packages and entry-point scripts under
+# /install/bin.
+RUN pip install --no-cache-dir --prefix=/install .
+
+# ── Runtime stage ───────────────────────────────────────────────────
+FROM python:3.11-slim AS runtime
+WORKDIR /app
+
+# Runtime-only system deps.
+#   curl   — healthcheck.
+#   libpq5 — runtime library psycopg2's C extension links against.
+#            No -dev, no compiler, no build headers.
+# `apt-get upgrade` pulls current security patches so the image does
+# not ship with whatever CVEs the slim base tag had on its own build
+# day — this is the difference between passing today's Trivy gate and
+# shipping a month-stale base.
+RUN apt-get update \
+    && apt-get upgrade -y \
+    && apt-get install -y --no-install-recommends \
+        curl \
+        libpq5 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy installed wheels + entry-point scripts from build stage.
+# /install -> /usr/local puts site-packages on the default sys.path
+# and scripts (gunicorn, alembic) on PATH for the default PYTHONPATH.
+COPY --from=build /install /usr/local
+
+# Migrations are runtime assets — alembic operates against the live
+# DB during deploy/rollback, and troubleshooting can invoke them from
+# inside a task-exec shell.
+COPY migrations/ migrations/
 
 EXPOSE 8000
 
