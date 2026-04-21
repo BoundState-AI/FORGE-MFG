@@ -54,6 +54,10 @@ jobs:
       # synthesize in-memory during CI.  [infra] adds aws-cdk-lib
       # + constructs only; runtime images still exclude them.
       - run: pip install ".[dev,infra]"
+      - name: Bootstrap test schema
+        run: alembic upgrade head
+        env:
+          FORGE_DATABASE_URL: postgresql+asyncpg://forge:forge@localhost:5432/forge_test
       - run: pytest tests/unit/ -v --tb=short
         env:
           FORGE_ENV: test

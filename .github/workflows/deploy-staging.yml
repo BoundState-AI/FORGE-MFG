@@ -89,6 +89,10 @@ jobs:
       - run: pip install ".[dev,infra]"
       - run: ruff check forge/ infra/ tests/ scripts/
       - run: mypy forge/ infra/
+      - name: Bootstrap test schema
+        run: alembic upgrade head
+        env:
+          FORGE_DATABASE_URL: postgresql+asyncpg://forge:forge@localhost:5432/forge_test
       - run: pytest tests/unit/ -q
         env:
           FORGE_ENV: test
