@@ -41,7 +41,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import jwt
@@ -140,7 +140,8 @@ async def _fetch_jwks(
     async with httpx.AsyncClient(timeout=10.0) as client:
         resp = await client.get(jwks_url)
         resp.raise_for_status()
-        keys: list[dict[str, Any]] = resp.json().get("keys", [])
+        payload = cast(dict[str, Any], resp.json())
+        keys = cast(list[dict[str, Any]], payload.get("keys", []))
     if not keys:
         raise PyJWTError("JWKS key set is empty")
     _jwks_cache[jwks_url] = keys

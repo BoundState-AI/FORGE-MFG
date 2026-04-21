@@ -85,3 +85,7 @@ module = "forge.models.*"
 disable_error_code = ["name-defined"]
 disallow_untyped_defs = false
 warn_return_any = false
+
+[[tool.mypy.overrides]]
+module = ["boto3", "cachetools"]
+ignore_missing_imports = true
