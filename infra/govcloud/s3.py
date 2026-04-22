@@ -64,6 +64,7 @@ class S3Buckets:
     # mint their own.
     alb_access_logs: s3.IBucket
     waf_logs: s3.IBucket
+    config_logs: s3.IBucket
     cloudtrail_logs: s3.IBucket
 
 
@@ -81,6 +82,7 @@ class S3Module(Construct):
         super().__init__(scope, construct_id)
         self._settings = settings
         prefix = settings.resource_prefix()
+        is_production = settings.env == "production"
 
         # ── App data buckets ──────────────────────────────────────
         # Evidence + docs: versioning ON (spec §9.3.12), CMK-DATA
@@ -89,25 +91,43 @@ class S3Module(Construct):
         # without retention pressure today.
         self.evidence = s3.Bucket(
             self, "EvidenceBucket",
-            bucket_name=f"{prefix}-evidence",
+            bucket_name=(
+                f"{prefix}-evidence"
+                if is_production
+                else None
+            ),
             encryption=s3.BucketEncryption.KMS,
             encryption_key=keys.data,
             bucket_key_enabled=True,
             versioned=True,
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
             enforce_ssl=True,
-            removal_policy=cdk.RemovalPolicy.RETAIN,
+            removal_policy=(
+                cdk.RemovalPolicy.RETAIN
+                if is_production
+                else cdk.RemovalPolicy.DESTROY
+            ),
+            auto_delete_objects=not is_production,
         )
         self.documents = s3.Bucket(
             self, "DocumentsBucket",
-            bucket_name=f"{prefix}-documents",
+            bucket_name=(
+                f"{prefix}-documents"
+                if is_production
+                else None
+            ),
             encryption=s3.BucketEncryption.KMS,
             encryption_key=keys.data,
             bucket_key_enabled=True,
             versioned=True,
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
             enforce_ssl=True,
-            removal_policy=cdk.RemovalPolicy.RETAIN,
+            removal_policy=(
+                cdk.RemovalPolicy.RETAIN
+                if is_production
+                else cdk.RemovalPolicy.DESTROY
+            ),
+            auto_delete_objects=not is_production,
         )
 
         # ── Audit WORM bucket ─────────────────────────────────────
@@ -116,7 +136,11 @@ class S3Module(Construct):
         # creation and cannot be enabled retroactively.
         self.audit_worm = s3.Bucket(
             self, "AuditWormBucket",
-            bucket_name=f"{prefix}-audit-worm",
+            bucket_name=(
+                f"{prefix}-audit-worm"
+                if is_production
+                else None
+            ),
             encryption=s3.BucketEncryption.KMS,
             encryption_key=keys.data,
             bucket_key_enabled=True,
@@ -307,7 +331,6 @@ class S3Module(Construct):
         # encrypted with CMK-LOGS.
         self.alb_access_logs = s3.Bucket(
             self, "AlbAccessLogsBucket",
-            bucket_name=f"{prefix}-alb-access-logs",
             # ALB access-log delivery uses a dedicated AWS-managed
             # ELB log delivery account; SSE-S3 (AES256) is required
             # because the ELB delivery account lacks a key grant on
@@ -319,32 +342,126 @@ class S3Module(Construct):
             versioned=True,
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
             enforce_ssl=True,
-            removal_policy=cdk.RemovalPolicy.RETAIN,
+            removal_policy=(
+                cdk.RemovalPolicy.RETAIN
+                if is_production
+                else cdk.RemovalPolicy.DESTROY
+            ),
+            auto_delete_objects=not is_production,
             lifecycle_rules=[s3.LifecycleRule(
                 id="ExpireOldAccessLogs",
                 enabled=True,
                 expiration=Duration.days(400),
             )],
         )
+        # AWS WAF requires S3 log destination bucket names to start
+        # with `aws-waf-logs-`; otherwise PutLoggingConfiguration is
+        # rejected even if the bucket ARN shape is otherwise valid.
+        waf_logs_bucket_name = "-".join(
+            part
+            for part in (
+                "aws-waf-logs",
+                prefix,
+                settings.account,
+                settings.region if is_production else "gw1",
+            )
+            if part
+        )
         self.waf_logs = s3.Bucket(
             self, "WafLogsBucket",
-            bucket_name=f"{prefix}-waf-logs",
+            bucket_name=waf_logs_bucket_name,
             encryption=s3.BucketEncryption.KMS,
             encryption_key=keys.logs,
             bucket_key_enabled=True,
             versioned=True,
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
             enforce_ssl=True,
-            removal_policy=cdk.RemovalPolicy.RETAIN,
+            removal_policy=(
+                cdk.RemovalPolicy.RETAIN
+                if is_production
+                else cdk.RemovalPolicy.DESTROY
+            ),
+            auto_delete_objects=not is_production,
             lifecycle_rules=[s3.LifecycleRule(
                 id="ExpireOldWafLogs",
                 enabled=True,
                 expiration=Duration.days(400),
             )],
         )
+        config_source_arn_pattern = (
+            f"arn:aws-us-gov:config:{settings.region}:"
+            f"{settings.account or '*'}:*"
+        )
+        self.config_logs = s3.Bucket(
+            self, "ConfigLogsBucket",
+            encryption=s3.BucketEncryption.KMS,
+            encryption_key=keys.logs,
+            bucket_key_enabled=True,
+            versioned=True,
+            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
+            enforce_ssl=True,
+            removal_policy=(
+                cdk.RemovalPolicy.RETAIN
+                if is_production
+                else cdk.RemovalPolicy.DESTROY
+            ),
+            auto_delete_objects=not is_production,
+            lifecycle_rules=[s3.LifecycleRule(
+                id="ExpireOldConfigLogs",
+                enabled=True,
+                expiration=Duration.days(400),
+            )],
+        )
+        self.config_logs.add_to_resource_policy(iam.PolicyStatement(
+            sid="AllowConfigBucketAclCheck",
+            effect=iam.Effect.ALLOW,
+            principals=[iam.ServicePrincipal("config.amazonaws.com")],
+            actions=["s3:GetBucketAcl"],
+            resources=[self.config_logs.bucket_arn],
+            conditions={
+                "ArnLike": {
+                    "aws:SourceArn": config_source_arn_pattern,
+                },
+            },
+        ))
+        self.config_logs.add_to_resource_policy(iam.PolicyStatement(
+            sid="AllowConfigBucketExistenceCheck",
+            effect=iam.Effect.ALLOW,
+            principals=[iam.ServicePrincipal("config.amazonaws.com")],
+            actions=["s3:ListBucket"],
+            resources=[self.config_logs.bucket_arn],
+            conditions={
+                "ArnLike": {
+                    "aws:SourceArn": config_source_arn_pattern,
+                },
+            },
+        ))
+        self.config_logs.add_to_resource_policy(iam.PolicyStatement(
+            sid="AllowConfigPutObject",
+            effect=iam.Effect.ALLOW,
+            principals=[iam.ServicePrincipal("config.amazonaws.com")],
+            actions=["s3:PutObject"],
+            resources=[
+                self.config_logs.arn_for_objects(
+                    f"Config/AWSLogs/{settings.account or '*'}/*"
+                ),
+            ],
+            conditions={
+                "StringEquals": {
+                    "s3:x-amz-acl": "bucket-owner-full-control",
+                },
+                "ArnLike": {
+                    "aws:SourceArn": config_source_arn_pattern,
+                },
+            },
+        ))
         self.cloudtrail_logs = s3.Bucket(
             self, "CloudTrailLogsBucket",
-            bucket_name=f"{prefix}-cloudtrail-logs",
+            # Leave the CloudTrail bucket unnamed so CloudFormation
+            # can allocate a fresh unique name on retries.  Once
+            # CloudTrail writes into an Object Lock bucket, that
+            # physical bucket name is effectively burned for future
+            # create retries.
             encryption=s3.BucketEncryption.KMS,
             encryption_key=keys.logs,
             bucket_key_enabled=True,
@@ -360,6 +477,10 @@ class S3Module(Construct):
             enforce_ssl=True,
             removal_policy=cdk.RemovalPolicy.RETAIN,
         )
+        cloudtrail_trail_arn = (
+            f"arn:aws-us-gov:cloudtrail:{settings.region}:"
+            f"{settings.account or '*'}:trail/{prefix}-mgmt-trail"
+        )
 
         # CloudTrail service principal needs PutObject on the trail
         # bucket; CloudTrail also writes the bucket-level ACL check
@@ -372,6 +493,11 @@ class S3Module(Construct):
             principals=[iam.ServicePrincipal("cloudtrail.amazonaws.com")],
             actions=["s3:GetBucketAcl"],
             resources=[self.cloudtrail_logs.bucket_arn],
+            conditions={
+                "StringEquals": {
+                    "aws:SourceArn": cloudtrail_trail_arn,
+                },
+            },
         ))
         self.cloudtrail_logs.add_to_resource_policy(iam.PolicyStatement(
             sid="AllowCloudTrailPutObject",
@@ -379,11 +505,14 @@ class S3Module(Construct):
             principals=[iam.ServicePrincipal("cloudtrail.amazonaws.com")],
             actions=["s3:PutObject"],
             resources=[
-                self.cloudtrail_logs.arn_for_objects("AWSLogs/*"),
+                self.cloudtrail_logs.arn_for_objects(
+                    f"CloudTrail/AWSLogs/{settings.account or '*'}/*"
+                ),
             ],
             conditions={
                 "StringEquals": {
                     "s3:x-amz-acl": "bucket-owner-full-control",
+                    "aws:SourceArn": cloudtrail_trail_arn,
                 },
             },
         ))
@@ -396,5 +525,6 @@ class S3Module(Construct):
             audit_worm=self.audit_worm,
             alb_access_logs=self.alb_access_logs,
             waf_logs=self.waf_logs,
+            config_logs=self.config_logs,
             cloudtrail_logs=self.cloudtrail_logs,
         )

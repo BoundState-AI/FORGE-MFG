@@ -86,7 +86,7 @@ def _create_service_security_group(
     )
     db_security_group.add_ingress_rule(
         sg, ec2.Port.tcp(5432),
-        "ECS services -> RDS Proxy",
+        "ECS services to RDS Proxy",
     )
     return sg
 
@@ -205,7 +205,7 @@ class ForgeMfgGovCloudStack(cdk.Stack):
 
         self.config_rules = ConfigModule(
             self, "ConfigRules",
-            settings=settings, buckets=buckets,
+            settings=settings, keys=keys, buckets=buckets,
         )
         self.config_rules.export()
 

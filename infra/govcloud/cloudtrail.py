@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import aws_cdk as cdk
 from aws_cdk import aws_cloudtrail as cloudtrail
 from aws_cdk import aws_ec2 as ec2
 from aws_cdk import aws_logs as logs
@@ -59,6 +60,7 @@ class CloudTrailModule(Construct):
         super().__init__(scope, construct_id)
         self._settings = settings
         prefix = settings.resource_prefix()
+        is_production = settings.env == "production"
 
         # Management trail: every region, log-file integrity
         # validation, encryption via CMK-LOGS, delivery to the
@@ -84,9 +86,18 @@ class CloudTrailModule(Construct):
         # all subnets."  Default L2 behavior emits REJECT+ACCEPT.
         self.vpc_flow_log_group = logs.LogGroup(
             self, "VpcFlowLogGroup",
-            log_group_name=f"/forge-mfg/{settings.env}/vpc-flow",
+            log_group_name=(
+                f"/forge-mfg/{settings.env}/vpc-flow"
+                if is_production
+                else None
+            ),
             retention=logs.RetentionDays.SIX_MONTHS,
             encryption_key=keys.logs,
+            removal_policy=(
+                cdk.RemovalPolicy.RETAIN
+                if is_production
+                else cdk.RemovalPolicy.DESTROY
+            ),
         )
         ec2.FlowLog(
             self, "VpcFlowLog",

@@ -130,6 +130,12 @@ jobs:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
           tags: forge-mfg-${{ matrix.service }}:${{ env.IMAGE_TAG }}
+          build-args: |
+            VITE_API_BASE_URL=
+            VITE_COGNITO_DOMAIN=https://forge-mfg-staging-auth.auth-fips.${{ env.AWS_REGION }}.amazoncognito.com
+            VITE_COGNITO_USER_POOL_ID=${{ secrets.STAGING_COGNITO_USER_POOL_ID }}
+            VITE_COGNITO_APP_CLIENT_ID=${{ secrets.STAGING_COGNITO_APP_CLIENT_ID }}
+            VITE_COGNITO_REGION=${{ env.AWS_REGION }}
           push: false
           load: true
           outputs: type=docker,dest=/tmp/${{ matrix.service }}.tar
@@ -218,6 +224,19 @@ jobs:
         with:
           role-to-assume: ${{ secrets.AWS_STAGING_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
+      # Modern CDK synthesis requires the environment-level
+      # `CDKToolkit` stack (and its `/cdk-bootstrap/hnb659fds/version`
+      # SSM parameter) to exist before ANY `cdk deploy` can run —
+      # even our own first-ship "bootstrap" stack that only creates
+      # ECR repos.  Bootstrap both primary + DR regions here so a
+      # fresh GovCloud account can execute the staging workflow from
+      # zero state without an out-of-band `cdk bootstrap` run.
+      - name: cdk bootstrap toolkit (primary + dr)
+        run: |
+          cdk bootstrap \
+            aws://${{ secrets.STAGING_ACCOUNT_ID }}/${{ env.AWS_REGION }} \
+            aws://${{ secrets.STAGING_ACCOUNT_ID }}/${{ env.DR_REGION }} \
+            --cloudformation-execution-policies arn:aws-us-gov:iam::aws:policy/AdministratorAccess
       # Idempotent — CloudFormation no-op after first successful
       # deploy.  Resolves the fresh-staging bootstrap chicken-and-egg
       # (6A-2 review finding 2) because `docker push` later in this

@@ -88,6 +88,7 @@ class CognitoModule(Construct):
         super().__init__(scope, construct_id)
         self._settings = settings
         prefix = settings.resource_prefix()
+        is_production = settings.env == "production"
 
         # MFA: required everywhere except local dev.  6A-1 only
         # provisions staging / production user pools, so MFA is
@@ -95,7 +96,11 @@ class CognitoModule(Construct):
         # spec §9.3.7 (no SMS-based MFA listed).
         self.user_pool = cognito.UserPool(
             self, "UserPool",
-            user_pool_name=f"{prefix}-users",
+            user_pool_name=(
+                f"{prefix}-users"
+                if is_production
+                else None
+            ),
             self_sign_up_enabled=False,  # admin-provisioned only
             sign_in_aliases=cognito.SignInAliases(
                 username=True, email=True,
@@ -141,7 +146,11 @@ class CognitoModule(Construct):
             standard_threat_protection_mode=(
                 cognito.StandardThreatProtectionMode.FULL_FUNCTION
             ),
-            removal_policy=cdk.RemovalPolicy.RETAIN,
+            removal_policy=(
+                cdk.RemovalPolicy.RETAIN
+                if settings.env == "production"
+                else cdk.RemovalPolicy.DESTROY
+            ),
         )
 
         # Pre Token Generation V2 trigger.  Two wiring paths:
@@ -170,14 +179,24 @@ class CognitoModule(Construct):
                 self, "PreTokenGenLogGroup",
                 log_group_name=(
                     f"/aws/lambda/{prefix}-pre-token-gen"
+                    if is_production
+                    else None
                 ),
                 retention=logs.RetentionDays.ONE_MONTH,
                 encryption_key=keys.logs,
-                removal_policy=cdk.RemovalPolicy.RETAIN,
+                removal_policy=(
+                    cdk.RemovalPolicy.RETAIN
+                    if is_production
+                    else cdk.RemovalPolicy.DESTROY
+                ),
             )
             pre_token_fn = _lambda.Function(
                 self, "PreTokenGenFn",
-                function_name=f"{prefix}-pre-token-gen",
+                function_name=(
+                    f"{prefix}-pre-token-gen"
+                    if is_production
+                    else None
+                ),
                 runtime=_lambda.Runtime.PYTHON_3_12,
                 code=_lambda.Code.from_asset(
                     str(_PRE_TOKEN_GEN_ASSET_DIR),

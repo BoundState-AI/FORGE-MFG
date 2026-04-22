@@ -114,6 +114,11 @@ class KmsModule(Construct):
             enable_key_rotation=True,
             removal_policy=cdk.RemovalPolicy.RETAIN,
         )
+        cloudtrail_trail_arn = (
+            f"arn:aws-us-gov:cloudtrail:{settings.region}:"
+            f"{settings.account or '*'}:trail/"
+            f"{settings.resource_prefix()}-mgmt-trail"
+        )
 
         # Baseline grant: CloudWatch Logs in the primary region needs
         # to encrypt log group payloads with CMK-LOGS.  The grant is
@@ -143,6 +148,66 @@ class KmsModule(Construct):
                     "kms:EncryptionContext:aws:logs:arn": (
                         f"arn:aws-us-gov:logs:{settings.region}:"
                         f"{settings.account or '*'}:log-group:*"
+                    ),
+                },
+            },
+        ))
+        # CloudTrail trail logs are delivered to an SSE-KMS S3 bucket
+        # with S3 Bucket Keys enabled, so CloudTrail needs explicit
+        # key-policy access to generate data keys, describe the key,
+        # and decrypt on the bucket-key path.
+        self.logs.add_to_resource_policy(iam.PolicyStatement(
+            sid="AllowCloudTrailEncryptLogs",
+            effect=iam.Effect.ALLOW,
+            principals=[iam.ServicePrincipal("cloudtrail.amazonaws.com")],
+            actions=["kms:GenerateDataKey*"],
+            resources=["*"],
+            conditions={
+                "StringEquals": {
+                    "aws:SourceArn": cloudtrail_trail_arn,
+                },
+                "StringLike": {
+                    "kms:EncryptionContext:aws:cloudtrail:arn": (
+                        f"arn:aws-us-gov:cloudtrail:*:"
+                        f"{settings.account or '*'}:trail/*"
+                    ),
+                },
+            },
+        ))
+        self.logs.add_to_resource_policy(iam.PolicyStatement(
+            sid="AllowCloudTrailDescribeKey",
+            effect=iam.Effect.ALLOW,
+            principals=[iam.ServicePrincipal("cloudtrail.amazonaws.com")],
+            actions=["kms:DescribeKey"],
+            resources=["*"],
+            conditions={
+                "StringEquals": {
+                    "aws:SourceArn": cloudtrail_trail_arn,
+                },
+            },
+        ))
+        self.logs.add_to_resource_policy(iam.PolicyStatement(
+            sid="AllowCloudTrailDecryptForBucketKey",
+            effect=iam.Effect.ALLOW,
+            principals=[iam.ServicePrincipal("cloudtrail.amazonaws.com")],
+            actions=["kms:Decrypt"],
+            resources=["*"],
+        ))
+        self.logs.add_to_resource_policy(iam.PolicyStatement(
+            sid="AllowConfigUseOfLogsKey",
+            effect=iam.Effect.ALLOW,
+            principals=[iam.ServicePrincipal("config.amazonaws.com")],
+            actions=[
+                "kms:Decrypt",
+                "kms:GenerateDataKey",
+                "kms:DescribeKey",
+            ],
+            resources=["*"],
+            conditions={
+                "ArnLike": {
+                    "aws:SourceArn": (
+                        f"arn:aws-us-gov:config:{settings.region}:"
+                        f"{settings.account or '*'}:*"
                     ),
                 },
             },

@@ -248,21 +248,22 @@ def test_audit_worm_bucket_object_lock_compliance() -> None:
     """
     _, stack = _build_stack()
     tpl = Template.from_stack(stack)
-    tpl.has_resource_properties(
-        "AWS::S3::Bucket",
-        {
-            "BucketName": Match.string_like_regexp(r".*-audit-worm$"),
-            "ObjectLockEnabled": True,
-            "ObjectLockConfiguration": Match.object_like({
-                "ObjectLockEnabled": "Enabled",
-                "Rule": Match.object_like({
-                    "DefaultRetention": Match.object_like({
-                        "Mode": "COMPLIANCE",
-                    }),
-                }),
-            }),
-            "VersioningConfiguration": {"Status": "Enabled"},
-        },
+    buckets = tpl.find_resources("AWS::S3::Bucket")
+    worm_buckets = [
+        resource
+        for resource in buckets.values()
+        if "ReplicationConfiguration" in resource.get("Properties", {})
+    ]
+    assert len(worm_buckets) == 1, (
+        f"expected exactly one audit WORM bucket, got {len(worm_buckets)}"
+    )
+    worm = worm_buckets[0]["Properties"]
+    assert worm["ObjectLockEnabled"] is True
+    assert worm["VersioningConfiguration"] == {"Status": "Enabled"}
+    assert worm["ObjectLockConfiguration"]["ObjectLockEnabled"] == "Enabled"
+    assert (
+        worm["ObjectLockConfiguration"]["Rule"]["DefaultRetention"]["Mode"]
+        == "COMPLIANCE"
     )
 
 
@@ -515,7 +516,7 @@ def test_audit_worm_bucket_has_replication_configuration() -> None:
     buckets = tpl.find_resources("AWS::S3::Bucket")
     worm_buckets = {
         k: v for k, v in buckets.items()
-        if v["Properties"].get("BucketName", "").endswith("-audit-worm")
+        if "ReplicationConfiguration" in v.get("Properties", {})
     }
     assert len(worm_buckets) == 1, (
         f"expected exactly one audit WORM bucket, got {list(worm_buckets)}"
@@ -630,6 +631,52 @@ def test_config_recorder_present() -> None:
     tpl.resource_count_is(
         "AWS::Config::DeliveryChannel", 1,
     )
+
+
+def test_config_delivery_channel_ordering_contract() -> None:
+    """Config bootstrap must not deadlock.
+
+    The delivery channel cannot be forced to wait for recorder
+    CREATE_COMPLETE, because CloudFormation starts the recorder once
+    the channel is available. Managed rules should wait until both
+    resources exist.
+    """
+    _, stack = _build_stack()
+    resources = Template.from_stack(stack).to_json()["Resources"]
+    recorder_ids = {
+        logical_id
+        for logical_id, resource in resources.items()
+        if resource["Type"] == "AWS::Config::ConfigurationRecorder"
+    }
+    channel_ids = {
+        logical_id
+        for logical_id, resource in resources.items()
+        if resource["Type"] == "AWS::Config::DeliveryChannel"
+    }
+    assert len(recorder_ids) == 1
+    assert len(channel_ids) == 1
+
+    def _depends_on(resource: dict[str, object]) -> set[str]:
+        depends = resource.get("DependsOn", [])
+        if isinstance(depends, str):
+            return {depends}
+        if isinstance(depends, list):
+            return {str(item) for item in depends}
+        return set()
+
+    channel = next(
+        resource
+        for resource in resources.values()
+        if resource["Type"] == "AWS::Config::DeliveryChannel"
+    )
+    assert _depends_on(channel).isdisjoint(recorder_ids)
+
+    for resource in resources.values():
+        if resource["Type"] != "AWS::Config::ConfigRule":
+            continue
+        depends = _depends_on(resource)
+        assert recorder_ids <= depends
+        assert channel_ids <= depends
 
 
 # ----------------------------------------------------------------------

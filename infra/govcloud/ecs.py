@@ -156,6 +156,7 @@ class EcsModule(Construct):
         super().__init__(scope, construct_id)
         self._settings = settings
         prefix = settings.resource_prefix()
+        is_production = settings.env == "production"
         # Pinned image tag — comes from `EnvSettings.image_tag` which
         # is populated from `--context forge:image_tag=<sha>` in the
         # deploy workflow.  `latest` at synth time is a local-dev
@@ -200,24 +201,48 @@ class EcsModule(Construct):
         # retention is owned by CloudTrail + audit WORM, not these.
         api_log_group = logs.LogGroup(
             self, "ApiLogGroup",
-            log_group_name=f"/forge-mfg/{settings.env}/api",
+            log_group_name=(
+                f"/forge-mfg/{settings.env}/api"
+                if is_production
+                else None
+            ),
             retention=logs.RetentionDays.THREE_MONTHS,
             encryption_key=keys.logs,
-            removal_policy=cdk.RemovalPolicy.RETAIN,
+            removal_policy=(
+                cdk.RemovalPolicy.RETAIN
+                if is_production
+                else cdk.RemovalPolicy.DESTROY
+            ),
         )
         frontend_log_group = logs.LogGroup(
             self, "FrontendLogGroup",
-            log_group_name=f"/forge-mfg/{settings.env}/frontend",
+            log_group_name=(
+                f"/forge-mfg/{settings.env}/frontend"
+                if is_production
+                else None
+            ),
             retention=logs.RetentionDays.THREE_MONTHS,
             encryption_key=keys.logs,
-            removal_policy=cdk.RemovalPolicy.RETAIN,
+            removal_policy=(
+                cdk.RemovalPolicy.RETAIN
+                if is_production
+                else cdk.RemovalPolicy.DESTROY
+            ),
         )
         worker_log_group = logs.LogGroup(
             self, "WorkerLogGroup",
-            log_group_name=f"/forge-mfg/{settings.env}/worker",
+            log_group_name=(
+                f"/forge-mfg/{settings.env}/worker"
+                if is_production
+                else None
+            ),
             retention=logs.RetentionDays.THREE_MONTHS,
             encryption_key=keys.logs,
-            removal_policy=cdk.RemovalPolicy.RETAIN,
+            removal_policy=(
+                cdk.RemovalPolicy.RETAIN
+                if is_production
+                else cdk.RemovalPolicy.DESTROY
+            ),
         )
 
         # ── Task roles (separate per service per spec §9.3.7) ────
@@ -231,7 +256,7 @@ class EcsModule(Construct):
             assumed_by=iam.ServicePrincipal("ecs-tasks.amazonaws.com"),
             description=(
                 "FORGE-MFG frontend Fargate task role.  Static "
-                "nginx serving only — no data-plane grants."
+                "nginx serving only - no data-plane grants."
             ),
         )
         self.worker_task_role = iam.Role(
@@ -458,6 +483,7 @@ class EcsModule(Construct):
             # Plain env: non-secret config only (spec §9.3.2).
             environment={
                 "FORGE_ENV": settings.env,
+                "FORGE_AUTH_MODE": "cognito",
                 "AWS_REGION": settings.region,
                 "COGNITO_USER_POOL_ID": cognito_pool.user_pool.user_pool_id,
                 "COGNITO_APP_CLIENT_ID": (
@@ -598,6 +624,7 @@ class EcsModule(Construct):
             ),
             environment={
                 "FORGE_ENV": settings.env,
+                "FORGE_AUTH_MODE": "cognito",
                 "AWS_REGION": settings.region,
                 "RDS_PROXY_ENDPOINT": rds.proxy.endpoint,
                 "EVIDENCE_BUCKET": buckets.evidence.bucket_name,

@@ -22,9 +22,7 @@ Why auto-remediation is narrow:
 
 What 6A-1 owns:
   - Recorder + delivery channel (writes to the s3.py-owned
-    CloudTrail bucket under a `Config/` prefix — the trail bucket
-    is already CloudTrail-scoped, but a subpath is standard
-    practice for consolidated audit storage).
+    non-WORM Config bucket under a `Config/` prefix).
   - Managed rules (names listed below).
   - The SG-over-exposure remediation hook contract.
 
@@ -44,24 +42,29 @@ from aws_cdk import aws_config as config
 from aws_cdk import aws_iam as iam
 from constructs import Construct
 
+from infra.govcloud.kms import KmsKeys
 from infra.govcloud.s3 import S3Buckets
 from infra.govcloud.settings import EnvSettings
 
+# Use literal AWS Config identifiers here instead of the jsii-backed
+# `ManagedRuleIdentifiers.*` constants.  On Windows, resolving those
+# constants at module import can fail before synth even starts if the
+# jsii kernel subprocess dies early.  The literal identifiers are the
+# stable AWS contract surface.
+#
+# GovCloud support note:
+# `ENCRYPTED_VOLUMES` is not available in us-gov-west-1 / us-gov-east-1,
+# so we intentionally omit it and rely on the RDS + S3 encryption rules
+# for this stack's at-rest encryption coverage.
 _MANAGED_RULES: list[str] = [
-    # Managed rule IDs are canonical across AWS + GovCloud; using
-    # the CDK enum keeps this review-stable even if AWS renames a
-    # rule's description.  Rule set covers the spec §9.3.4 list:
-    # "security group changes, IAM policy changes, encryption
-    # settings, S3 bucket policy changes".
-    config.ManagedRuleIdentifiers.EC2_SECURITY_GROUPS_INCOMING_SSH_DISABLED,
-    config.ManagedRuleIdentifiers.IAM_POLICY_NO_STATEMENTS_WITH_ADMIN_ACCESS,
-    config.ManagedRuleIdentifiers.IAM_USER_MFA_ENABLED,
-    config.ManagedRuleIdentifiers.EBS_ENCRYPTED_VOLUMES,
-    config.ManagedRuleIdentifiers.RDS_STORAGE_ENCRYPTED,
-    config.ManagedRuleIdentifiers.S3_BUCKET_PUBLIC_READ_PROHIBITED,
-    config.ManagedRuleIdentifiers.S3_BUCKET_PUBLIC_WRITE_PROHIBITED,
-    config.ManagedRuleIdentifiers.S3_BUCKET_SERVER_SIDE_ENCRYPTION_ENABLED,
-    config.ManagedRuleIdentifiers.S3_BUCKET_SSL_REQUESTS_ONLY,
+    "INCOMING_SSH_DISABLED",
+    "IAM_POLICY_NO_STATEMENTS_WITH_ADMIN_ACCESS",
+    "IAM_USER_MFA_ENABLED",
+    "RDS_STORAGE_ENCRYPTED",
+    "S3_BUCKET_PUBLIC_READ_PROHIBITED",
+    "S3_BUCKET_PUBLIC_WRITE_PROHIBITED",
+    "S3_BUCKET_SERVER_SIDE_ENCRYPTION_ENABLED",
+    "S3_BUCKET_SSL_REQUESTS_ONLY",
 ]
 
 
@@ -82,6 +85,7 @@ class ConfigModule(Construct):
         construct_id: str,
         *,
         settings: EnvSettings,
+        keys: KmsKeys,
         buckets: S3Buckets,
     ) -> None:
         super().__init__(scope, construct_id)
@@ -100,11 +104,23 @@ class ConfigModule(Construct):
                 ),
             ],
         )
-        # Config needs s3:PutObject on its delivery bucket.  We
-        # reuse the s3.py-owned CloudTrail bucket under a `Config/`
-        # prefix so audit-artifact storage stays in one bucket —
-        # cheaper to lifecycle-tag, easier to audit.
-        buckets.cloudtrail_logs.grant_put(self.service_role)
+        # Config delivery cannot target an Object Lock bucket, so it
+        # writes into a dedicated non-WORM S3 bucket owned by s3.py.
+        # The recorder role needs ListBucket for HeadBucket and
+        # PutObject for same-account delivery.
+        self.service_role.add_to_policy(iam.PolicyStatement(
+            actions=["s3:ListBucket"],
+            resources=[buckets.config_logs.bucket_arn],
+        ))
+        buckets.config_logs.grant_put(self.service_role)
+        self.service_role.add_to_policy(iam.PolicyStatement(
+            actions=[
+                "kms:Decrypt",
+                "kms:GenerateDataKey",
+                "kms:DescribeKey",
+            ],
+            resources=[keys.logs.key_arn],
+        ))
 
         self.recorder = config.CfnConfigurationRecorder(
             self, "Recorder",
@@ -118,15 +134,26 @@ class ConfigModule(Construct):
         self.channel = config.CfnDeliveryChannel(
             self, "DeliveryChannel",
             name=f"{prefix}-channel",
-            s3_bucket_name=buckets.cloudtrail_logs.bucket_name,
+            s3_bucket_name=buckets.config_logs.bucket_name,
             s3_key_prefix="Config",
+            s3_kms_key_arn=keys.logs.key_arn,
             config_snapshot_delivery_properties=(
                 config.CfnDeliveryChannel.ConfigSnapshotDeliveryPropertiesProperty(
                     delivery_frequency="TwentyFour_Hours",
                 )
             ),
         )
-        self.channel.add_dependency(self.recorder)
+        # AWS Config bootstrapping is sensitive to ordering:
+        # the recorder must already exist before the delivery
+        # channel call, but making the delivery channel wait for
+        # the recorder to reach CREATE_COMPLETE deadlocks because
+        # CloudFormation starts the recorder once the channel is
+        # available.  Let recorder + channel create in parallel,
+        # but wait until the bucket policy exists before asking
+        # AWS Config to validate the delivery channel target.
+        bucket_policy = getattr(buckets.config_logs, "policy", None)
+        if bucket_policy is not None:
+            self.channel.node.add_dependency(bucket_policy)
 
         # Managed rules.  `ManagedRuleIdentifiers.*` resolves to a
         # bare string in current CDK; the construct id is derived
@@ -139,6 +166,7 @@ class ConfigModule(Construct):
                 identifier=rule_id,
             )
             rule.node.add_dependency(self.recorder)
+            rule.node.add_dependency(self.channel)
             rule_names.append(rule_id)
         self._rule_names = rule_names
 

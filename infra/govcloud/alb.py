@@ -101,7 +101,7 @@ class AlbModule(Construct):
         )
         self.security_group.add_ingress_rule(
             ec2.Peer.any_ipv4(), ec2.Port.tcp(80),
-            "HTTP -> redirect to HTTPS",
+            "HTTP redirect to HTTPS",
         )
         self.security_group.add_ingress_rule(
             ec2.Peer.any_ipv4(), ec2.Port.tcp(443),

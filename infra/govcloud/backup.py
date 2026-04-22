@@ -83,15 +83,24 @@ class BackupModule(Construct):
         super().__init__(scope, construct_id)
         self._settings = settings
         prefix = settings.resource_prefix()
+        is_production = settings.env == "production"
 
         # Vault: CMK-DATA encrypted, removal RETAIN even on staging
         # (vault deletion fails if any recovery point still exists,
         # which is the right safety bias).
         self.vault = backup.BackupVault(
             self, "Vault",
-            backup_vault_name=f"{prefix}-backup-vault",
+            backup_vault_name=(
+                f"{prefix}-backup-vault"
+                if is_production
+                else f"{prefix}-backup-vault-staging"
+            ),
             encryption_key=keys.data,
-            removal_policy=cdk.RemovalPolicy.RETAIN,
+            removal_policy=(
+                cdk.RemovalPolicy.RETAIN
+                if is_production
+                else cdk.RemovalPolicy.DESTROY
+            ),
         )
 
         # Intended dr_region copy vault — declared via CfnOutput;

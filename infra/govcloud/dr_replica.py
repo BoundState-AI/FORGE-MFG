@@ -89,7 +89,7 @@ class ForgeMfgGovCloudDrReplicaStack(cdk.Stack):
             self, "DrReplicaSecurityGroup",
             vpc=vpc,
             description=(
-                "FORGE-MFG DR read replica ingress — peer SGs only."
+                "FORGE-MFG DR read replica ingress - peer SGs only."
             ),
             allow_all_outbound=False,
         )
@@ -119,7 +119,7 @@ class ForgeMfgGovCloudDrReplicaStack(cdk.Stack):
             self, "DrSsmEndpointSg",
             vpc=vpc,
             description=(
-                "SSM interface endpoints — 443 ingress from drill "
+                "SSM interface endpoints - 443 ingress from drill "
                 "bastion SGs at drill time; no egress required."
             ),
             allow_all_outbound=False,

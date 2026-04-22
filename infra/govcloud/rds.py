@@ -81,6 +81,7 @@ class RdsModule(Construct):
         super().__init__(scope, construct_id)
         self._settings = settings
         prefix = settings.resource_prefix()
+        is_production = settings.env == "production"
 
         # DB subnet group — restricted to private isolated subnets.
         # No NAT egress is required; RDS Proxy fronts client traffic
@@ -96,7 +97,7 @@ class RdsModule(Construct):
             self, "DbSecurityGroup",
             vpc=vpc,
             description=(
-                "FORGE-MFG RDS PostgreSQL ingress — peer SGs only "
+                "FORGE-MFG RDS PostgreSQL ingress - peer SGs only "
                 "(ECS task SG + RDS Proxy SG)."
             ),
             allow_all_outbound=False,
@@ -107,7 +108,11 @@ class RdsModule(Construct):
         # rotated.  The secret ARN flows into ECS via valueFrom.
         self.credentials_secret = sm.Secret(
             self, "DbMasterSecret",
-            secret_name=f"{prefix}/rds/master",
+            secret_name=(
+                f"{prefix}/rds/master"
+                if is_production
+                else None
+            ),
             description=(
                 "FORGE-MFG RDS master credentials.  Spec §9.3.2 "
                 "forbids plaintext; ECS reads via valueFrom."
@@ -127,7 +132,7 @@ class RdsModule(Construct):
         parameter_group = rds.ParameterGroup(
             self, "Pg16Params",
             engine=rds.DatabaseInstanceEngine.postgres(
-                version=rds.PostgresEngineVersion.VER_16_3,
+                version=rds.PostgresEngineVersion.VER_16_12,
             ),
             parameters={
                 # Spec §9.3.1: TLS required on all asyncpg connections.
@@ -141,7 +146,7 @@ class RdsModule(Construct):
         self.instance = rds.DatabaseInstance(
             self, "PrimaryDb",
             engine=rds.DatabaseInstanceEngine.postgres(
-                version=rds.PostgresEngineVersion.VER_16_3,
+                version=rds.PostgresEngineVersion.VER_16_12,
             ),
             instance_type=ec2.InstanceType.of(
                 ec2.InstanceClass.MEMORY6_GRAVITON,
@@ -164,8 +169,12 @@ class RdsModule(Construct):
             backup_retention=Duration.days(30),
             preferred_backup_window="04:00-05:00",
             preferred_maintenance_window="Sun:05:00-Sun:06:00",
-            deletion_protection=True,
-            removal_policy=cdk.RemovalPolicy.RETAIN,
+            deletion_protection=is_production,
+            removal_policy=(
+                cdk.RemovalPolicy.RETAIN
+                if is_production
+                else cdk.RemovalPolicy.DESTROY
+            ),
             iam_authentication=True,
             cloudwatch_logs_exports=["postgresql"],
             enable_performance_insights=True,
@@ -179,7 +188,11 @@ class RdsModule(Construct):
         # IAM-auth-only without an architecture change.
         self.proxy = rds.DatabaseProxy(
             self, "DbProxy",
-            db_proxy_name=f"{prefix}-rds-proxy",
+            db_proxy_name=(
+                f"{prefix}-rds-proxy"
+                if is_production
+                else None
+            ),
             proxy_target=rds.ProxyTarget.from_instance(self.instance),
             secrets=[self.credentials_secret],
             vpc=vpc,

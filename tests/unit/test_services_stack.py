@@ -242,7 +242,38 @@ def test_worker_cmd_override_preserved() -> None:
 
 
 # ----------------------------------------------------------------------
-# 7. No CloudFront anywhere (re-assert across stacks).
+# 7. Runtime auth mode is explicit for non-HTTP worker startup.
+# ----------------------------------------------------------------------
+
+def test_api_and_worker_set_forge_auth_mode_cognito() -> None:
+    """Staging/prod tasks must boot with auth_mode=cognito.
+
+    Why: the Settings validator rejects staging/production with
+    auth_mode=local.  The API task can infer cognito from its pool/app
+    env vars, but the worker has no Cognito-specific vars and must be
+    told explicitly or it crashes before the poll loop starts.
+    """
+    _, _, services = _build()
+    tpl = Template.from_stack(services)
+    task_defs = tpl.find_resources("AWS::ECS::TaskDefinition")
+    seen: dict[str, str] = {}
+    for resource in task_defs.values():
+        for container in resource["Properties"]["ContainerDefinitions"]:
+            env = {
+                entry["Name"]: entry["Value"]
+                for entry in container.get("Environment", [])
+            }
+            name = container["Name"]
+            if name in {"api", "worker"}:
+                seen[name] = env.get("FORGE_AUTH_MODE", "")
+    assert seen == {"api": "cognito", "worker": "cognito"}, (
+        f"expected explicit FORGE_AUTH_MODE=cognito on api+worker; "
+        f"got {seen}"
+    )
+
+
+# ----------------------------------------------------------------------
+# 8. No CloudFront anywhere (re-assert across stacks).
 # ----------------------------------------------------------------------
 
 def test_no_cloudfront_in_services() -> None:
@@ -252,7 +283,7 @@ def test_no_cloudfront_in_services() -> None:
 
 
 # ----------------------------------------------------------------------
-# 8. ALB target groups — services wires tasks to primary's TGs.
+# 9. ALB target groups — services wires tasks to primary's TGs.
 # ----------------------------------------------------------------------
 
 def test_alb_target_group_targets_defined_in_services_stack() -> None:

@@ -7,7 +7,6 @@
   "context": {
     "@aws-cdk/aws-iam:minimizePolicies": true,
     "@aws-cdk/aws-s3:createDefaultLoggingPolicy": true,
-    "aws:cdk:partition": "aws-us-gov",
     "forge:envs": {
       "staging": {
         "description": "GovCloud staging environment; mirrors production posture with relaxed origins only where spec §9.3.9 allows.",

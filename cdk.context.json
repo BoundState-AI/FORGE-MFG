@@ -1,0 +1,12 @@
+{
+  "availability-zones:account=574823419003:region=us-gov-west-1": [
+    "us-gov-west-1a",
+    "us-gov-west-1b",
+    "us-gov-west-1c"
+  ],
+  "availability-zones:account=574823419003:region=us-gov-east-1": [
+    "us-gov-east-1a",
+    "us-gov-east-1b",
+    "us-gov-east-1c"
+  ]
+}
