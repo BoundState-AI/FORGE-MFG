@@ -23,10 +23,36 @@ Why this design:
 
 from __future__ import annotations
 
+import json
+import os
 from functools import lru_cache
+from urllib.parse import quote
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_DEFAULT_DATABASE_URL = "postgresql+asyncpg://forge:forge@localhost:5432/forge"
+
+
+def _env_or_none(name: str) -> str | None:
+    """Return a stripped env value or None when unset/blank."""
+    value = os.getenv(name)
+    if value is None:
+        return None
+    value = value.strip()
+    return value or None
+
+
+def _parse_env_bool(*, name: str, raw: str) -> bool:
+    """Parse a permissive bool string from a deploy-time env var."""
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(
+        f"{name} must be a boolean-like string, got {raw!r}",
+    )
 
 
 class Settings(BaseSettings):
@@ -57,7 +83,7 @@ class Settings(BaseSettings):
 
     # --- Database (async SQLAlchemy URL for asyncpg) ---
     database_url: str = Field(
-        default="postgresql+asyncpg://forge:forge@localhost:5432/forge",
+        default=_DEFAULT_DATABASE_URL,
         description="Async SQLAlchemy database URL",
     )
 
@@ -153,6 +179,116 @@ class Settings(BaseSettings):
     worm_backoff_base_seconds: float = 5.0
     worm_backoff_cap_seconds: float = 300.0
     worm_max_attempts: int = 10
+
+    @model_validator(mode="after")
+    def _hydrate_from_deploy_contract(self) -> Settings:
+        """Honor the ECS deploy contract's legacy non-FORGE env vars.
+
+        The services stack docs pin names like `COGNITO_USER_POOL_ID`,
+        `DATABASE_URL_SECRET_JSON`, and `EVIDENCE_BUCKET`.  The app
+        config still prefers `FORGE_*` vars, but in ECS these legacy
+        names are what actually arrive in the container, so hydrate the
+        corresponding settings fields from them when the explicit
+        `FORGE_*` variants were not provided.
+        """
+        if not self.cognito_user_pool_id:
+            pool_id = _env_or_none("COGNITO_USER_POOL_ID")
+            if pool_id:
+                self.cognito_user_pool_id = pool_id
+
+        if not self.cognito_app_client_id:
+            app_client_id = _env_or_none("COGNITO_APP_CLIENT_ID")
+            if app_client_id:
+                self.cognito_app_client_id = app_client_id
+
+        if (
+            not os.getenv("FORGE_COGNITO_REGION")
+            and (aws_region := _env_or_none("AWS_REGION"))
+        ):
+            self.cognito_region = aws_region
+
+        if not self.s3_bucket_evidence:
+            evidence_bucket = _env_or_none("EVIDENCE_BUCKET")
+            if evidence_bucket:
+                self.s3_bucket_evidence = evidence_bucket
+
+        if not self.s3_bucket_documents:
+            documents_bucket = _env_or_none("DOCUMENTS_BUCKET")
+            if documents_bucket:
+                self.s3_bucket_documents = documents_bucket
+
+        if not self.s3_bucket_audit:
+            audit_bucket = _env_or_none("AUDIT_WORM_BUCKET")
+            if audit_bucket:
+                self.s3_bucket_audit = audit_bucket
+
+        if not os.getenv("FORGE_CLOSURE_ENABLED"):
+            closure_enabled = _env_or_none("CLOSURE_ENABLED")
+            if closure_enabled:
+                self.closure_enabled = _parse_env_bool(
+                    name="CLOSURE_ENABLED",
+                    raw=closure_enabled,
+                )
+
+        if (
+            not os.getenv("FORGE_CORS_ORIGINS")
+            and self.cors_origins == ["http://localhost:3000"]
+            and (alb_domain := _env_or_none("ALB_DOMAIN"))
+        ):
+            self.cors_origins = [f"https://{alb_domain}"]
+
+        if (
+            not os.getenv("FORGE_AUTH_MODE")
+            and self.auth_mode == "local"
+            and self.cognito_user_pool_id
+            and self.cognito_app_client_id
+            and self.env in ("staging", "production")
+        ):
+            self.auth_mode = "cognito"
+
+        if (
+            not os.getenv("FORGE_DATABASE_URL")
+            and self.database_url == _DEFAULT_DATABASE_URL
+            and (secret_json := _env_or_none("DATABASE_URL_SECRET_JSON"))
+        ):
+            endpoint = _env_or_none("RDS_PROXY_ENDPOINT")
+            if not endpoint:
+                raise ValueError(
+                    "RDS_PROXY_ENDPOINT is required when "
+                    "DATABASE_URL_SECRET_JSON is set",
+                )
+            try:
+                payload = json.loads(secret_json)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    "DATABASE_URL_SECRET_JSON must be valid JSON",
+                ) from exc
+            if not isinstance(payload, dict):
+                raise ValueError(
+                    "DATABASE_URL_SECRET_JSON must decode to an object",
+                )
+            username = str(payload.get("username") or "").strip()
+            password = str(payload.get("password") or "").strip()
+            host = str(payload.get("host") or endpoint).strip()
+            port = int(payload.get("port") or 5432)
+            database = str(
+                payload.get("dbname")
+                or payload.get("database")
+                or "forge"
+            ).strip()
+            if not username or not password or not host or not database:
+                raise ValueError(
+                    "DATABASE_URL_SECRET_JSON must provide username "
+                    "and password; host/dbname may be supplied in the "
+                    "secret or inferred from RDS_PROXY_ENDPOINT/forge",
+                )
+            self.database_url = (
+                "postgresql+asyncpg://"
+                f"{quote(username, safe='')}:{quote(password, safe='')}"
+                f"@{host}:{port}/{database}?ssl=require"
+            )
+
+        return self
 
     @model_validator(mode="after")
     def _enforce_production_safety(self) -> Settings:
