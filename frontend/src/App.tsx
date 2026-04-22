@@ -18,6 +18,7 @@ import { queryClient } from '@/api/query-client';
 import { Layout } from '@/components/Layout';
 import { AdminLayout } from '@/components/AdminLayout';
 import { AuthGate } from '@/auth/AuthGate';
+import { beginReauth } from '@/auth/reauth';
 
 /* Pages — lazy loaded to keep initial bundle small.
    All pages use default exports so React.lazy works directly. */
@@ -26,6 +27,7 @@ import { LoadingSkeleton } from '@/components/LoadingSkeleton';
 
 const Dashboard = lazy(() => import('@/pages/Dashboard'));
 const WorkOrderList = lazy(() => import('@/pages/WorkOrderList'));
+const WorkOrderNew = lazy(() => import('@/pages/WorkOrderNew'));
 const WorkOrderDetail = lazy(() => import('@/pages/WorkOrderDetail'));
 const OperationPage = lazy(() =>
   import('@/pages/OperationPage').then((m) => ({ default: m.OperationPage })),
@@ -84,6 +86,7 @@ export function App() {
               <Route element={<Layout />}>
                 <Route index element={<Dashboard />} />
                 <Route path="work-orders" element={<WorkOrderList />} />
+                <Route path="work-orders/new" element={<WorkOrderNew />} />
                 <Route path="work-orders/:id" element={<WorkOrderDetail />} />
                 <Route
                   path="work-orders/:woId/ops/:opId"
@@ -122,23 +125,32 @@ export function App() {
  * In local dev with auth_mode=local, this provides a minimal session bootstrap.
  */
 function LoginPlaceholder() {
+  const cognitoEnabled = Boolean(
+    import.meta.env.VITE_COGNITO_DOMAIN &&
+    import.meta.env.VITE_COGNITO_APP_CLIENT_ID,
+  );
   return (
     <div className="page-content" style={{ maxWidth: 400, margin: '80px auto' }}>
       <h1 className="page-title">FORGE-MFG</h1>
       <p style={{ color: 'var(--text-secondary)', marginBottom: 'var(--space-lg)' }}>
-        Sign in to continue. In local development, the backend runs with
-        auth_mode=local (no Cognito required).
+        {cognitoEnabled
+          ? 'Sign in with Cognito to continue.'
+          : 'Sign in to continue. In local development, the backend runs with auth_mode=local (no Cognito required).'}
       </p>
       <button
         className="btn-primary"
         style={{ width: '100%' }}
         onClick={() => {
+          if (cognitoEnabled) {
+            void beginReauth();
+            return;
+          }
           /* Local dev: set a placeholder token and redirect */
           sessionStorage.setItem('forge_access_token', 'local-dev-token');
           window.location.href = '/';
         }}
       >
-        Sign In (Local Dev)
+        {cognitoEnabled ? 'Sign In' : 'Sign In (Local Dev)'}
       </button>
     </div>
   );

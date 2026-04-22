@@ -34,12 +34,19 @@ import { Outlet } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { useAuthStore } from './store';
 import { fetchCurrentUser } from '@/api/endpoints';
+import { ApiError } from '@/api/typed-client';
+import { beginReauth } from './reauth';
 import { LoadingSkeleton } from '@/components/LoadingSkeleton';
 
 export function AuthGate() {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
   const setUser = useAuthStore((s) => s.setUser);
+  const clearAuth = useAuthStore((s) => s.clearAuth);
   const user = useAuthStore((s) => s.user);
+  const cognitoEnabled = Boolean(
+    import.meta.env.VITE_COGNITO_DOMAIN &&
+    import.meta.env.VITE_COGNITO_APP_CLIENT_ID,
+  );
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['users', 'me'],
@@ -55,6 +62,12 @@ export function AuthGate() {
     }
   }, [data, user, setUser]);
 
+  useEffect(() => {
+    if (error instanceof ApiError && error.response.status === 401) {
+      clearAuth();
+    }
+  }, [error, clearAuth]);
+
   /* No token — show inline sign-in prompt.  Production deployments
      replace this onClick handler with ``beginReauth()`` so Cognito
      handles the redirect; local dev sets a placeholder token so the
@@ -64,17 +77,23 @@ export function AuthGate() {
       <div className="page-content" style={{ maxWidth: 400, margin: '80px auto' }}>
         <h1 className="page-title">FORGE-MFG</h1>
         <p style={{ color: 'var(--text-secondary)', marginBottom: 'var(--space-lg)' }}>
-          Sign in to continue.
+          {cognitoEnabled
+            ? 'Sign in with Cognito to continue.'
+            : 'Sign in to continue.'}
         </p>
         <button
           className="btn-primary"
           style={{ width: '100%' }}
           onClick={() => {
+            if (cognitoEnabled) {
+              void beginReauth();
+              return;
+            }
             sessionStorage.setItem('forge_access_token', 'local-dev-token');
             window.location.reload();
           }}
         >
-          Sign In (Local Dev)
+          {cognitoEnabled ? 'Sign In' : 'Sign In (Local Dev)'}
         </button>
       </div>
     );

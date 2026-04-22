@@ -18,6 +18,7 @@ import { useState, useMemo, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
+  createOperation,
   fetchWorkOrder,
   releaseWorkOrder,
   recallWorkOrder,
@@ -25,6 +26,7 @@ import {
   resumeWorkOrder,
   completeWorkOrder,
 } from '@/api/endpoints';
+import { extract422Message } from '@/api/error-detail';
 import { useAuthStore } from '@/auth/store';
 import { StatusBadge } from '@/components/StatusBadge';
 import { LoadingSkeleton } from '@/components/LoadingSkeleton';
@@ -34,6 +36,7 @@ import { ConflictModal } from '@/components/ConflictModal';
 import { CloseWorkOrderPanel } from '@/components/CloseWorkOrderPanel';
 import { AuditTrail } from '@/components/AuditTrail';
 import type {
+  OperationCreate,
   WorkOrderDetailOut,
   WOStatus,
   VersionConflictError,
@@ -87,19 +90,6 @@ function extractConflict(err: unknown): VersionConflictError | null {
   return null;
 }
 
-/** Extracts a 422 detail string from an axios error response. */
-function extract422(err: unknown): string | null {
-  const resp = (err as { response?: { status?: number; data?: { detail?: unknown } } })?.response;
-  if (resp?.status === 422) {
-    const detail = resp.data?.detail;
-    if (typeof detail === 'string') return detail;
-    if (Array.isArray(detail)) {
-      return detail.map((d: { detail?: string; msg?: string }) => d.detail ?? d.msg ?? '').join('; ');
-    }
-  }
-  return null;
-}
-
 /* ── Inline styles ── */
 
 const actionBtnStyle: React.CSSProperties = {
@@ -123,6 +113,21 @@ const tabStyle = (active: boolean): React.CSSProperties => ({
   fontWeight: active ? 600 : 400,
   cursor: 'pointer',
 });
+
+const formFieldStyle: React.CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 'var(--space-xs)',
+};
+
+const inputStyle: React.CSSProperties = {
+  padding: 'var(--space-sm)',
+  borderRadius: 'var(--radius-md)',
+  border: '1px solid var(--border)',
+  backgroundColor: 'var(--bg-surface)',
+  color: 'var(--text-primary)',
+  fontSize: 'var(--font-size-body)',
+};
 
 /* ── Sub-components ── */
 
@@ -183,6 +188,12 @@ export default function WorkOrderDetail() {
   const [forceStopLabor, setForceStopLabor] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [conflictError, setConflictError] = useState<VersionConflictError | null>(null);
+  const [opDescription, setOpDescription] = useState('');
+  const [opSequence, setOpSequence] = useState('');
+  const [opEstimatedHours, setOpEstimatedHours] = useState('0');
+  const [opInspectionHold, setOpInspectionHold] = useState(false);
+  const [opSafetyCritical, setOpSafetyCritical] = useState(false);
+  const [opErrorMsg, setOpErrorMsg] = useState<string | null>(null);
 
   /* ── Queries ── */
 
@@ -247,7 +258,7 @@ export default function WorkOrderDetail() {
         return;
       }
 
-      const detail = extract422(err);
+      const detail = extract422Message(err);
       if (detail) {
         setErrorMsg(detail);
         return;
@@ -255,6 +266,28 @@ export default function WorkOrderDetail() {
 
       setErrorMsg(
         err instanceof Error ? err.message : 'Transition failed.',
+      );
+    },
+  });
+
+  const createOperationMutation = useMutation({
+    mutationFn: async (body: OperationCreate) => {
+      if (!wo) throw new Error('Work order not loaded');
+      return createOperation(wo.id, body);
+    },
+    onSuccess: (_op, body) => {
+      setOpErrorMsg(null);
+      setOpDescription('');
+      setOpSequence(String(body.sequence + 1));
+      setOpEstimatedHours('0');
+      setOpInspectionHold(false);
+      setOpSafetyCritical(false);
+      invalidateAll();
+    },
+    onError: (err: unknown) => {
+      const detail = extract422Message(err);
+      setOpErrorMsg(
+        detail ?? (err instanceof Error ? err.message : 'Failed to add operation.'),
       );
     },
   });
@@ -326,8 +359,46 @@ export default function WorkOrderDetail() {
     () => [...(wo?.operations ?? [])].sort((a, b) => a.sequence - b.sequence),
     [wo?.operations],
   );
+  const nextSequence = ops.length === 0 ? 1 : Math.max(...ops.map((op) => op.sequence)) + 1;
   const allOpsComplete =
     ops.length > 0 && ops.every((op) => op.status === 'complete');
+
+  function handleCreateOperation(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+
+    const description = opDescription.trim();
+    if (!description) {
+      setOpErrorMsg('Operation description is required.');
+      return;
+    }
+
+    const sequence =
+      opSequence.trim().length > 0 ? Number.parseInt(opSequence, 10) : nextSequence;
+    if (!Number.isInteger(sequence) || sequence < 1) {
+      setOpErrorMsg('Sequence must be a whole number greater than zero.');
+      return;
+    }
+
+    const estimatedHours =
+      opEstimatedHours.trim().length > 0 ? Number.parseFloat(opEstimatedHours) : 0;
+    if (!Number.isFinite(estimatedHours) || estimatedHours < 0) {
+      setOpErrorMsg('Estimated hours must be zero or greater.');
+      return;
+    }
+
+    setOpErrorMsg(null);
+    createOperationMutation.mutate({
+      description,
+      sequence,
+      tooling_required: [],
+      inspection_hold: opInspectionHold,
+      safety_critical: opSafetyCritical,
+      sign_off_roles_required: [],
+      estimated_hours: estimatedHours,
+      constraint_type: 'none',
+      constraint_date: null,
+    });
+  }
 
   /* ── Loading ── */
   if (woQuery.isLoading) {
@@ -517,6 +588,141 @@ export default function WorkOrderDetail() {
          page at /work-orders/:id/ops/:opId. */}
       {activeTab === 'operations' && (
         <div style={{ padding: 'var(--space-md) 0' }}>
+          {wo.status === 'draft' && hasRole('engineer') && (
+            <div
+              style={{
+                marginBottom: 'var(--space-lg)',
+                padding: 'var(--space-md)',
+                backgroundColor: 'var(--bg-surface)',
+                borderRadius: 'var(--radius-md)',
+              }}
+            >
+              <div
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'baseline',
+                  gap: 'var(--space-sm)',
+                  flexWrap: 'wrap',
+                  marginBottom: 'var(--space-md)',
+                }}
+              >
+                <div>
+                  <h2
+                    style={{
+                      margin: 0,
+                      marginBottom: 'var(--space-xs)',
+                      fontSize: 'var(--font-size-section)',
+                    }}
+                  >
+                    Add Operation
+                  </h2>
+                  <p style={{ margin: 0, color: 'var(--text-secondary)' }}>
+                    Define the routing steps here before releasing the work order.
+                  </p>
+                </div>
+                <div style={{ color: 'var(--text-secondary)', fontSize: 'var(--font-size-label)' }}>
+                  Suggested next sequence: {nextSequence}
+                </div>
+              </div>
+
+              {opErrorMsg && (
+                <div style={{ marginBottom: 'var(--space-md)' }}>
+                  <ErrorBanner message={opErrorMsg} onDismiss={() => setOpErrorMsg(null)} />
+                </div>
+              )}
+
+              <form
+                onSubmit={handleCreateOperation}
+                style={{
+                  display: 'grid',
+                  gap: 'var(--space-md)',
+                  gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+                }}
+              >
+                <label style={{ ...formFieldStyle, gridColumn: '1 / -1' }}>
+                  <span>Description</span>
+                  <input
+                    value={opDescription}
+                    onChange={(e) => setOpDescription(e.target.value)}
+                    style={inputStyle}
+                    maxLength={1000}
+                    required
+                  />
+                </label>
+
+                <label style={formFieldStyle}>
+                  <span>Sequence</span>
+                  <input
+                    value={opSequence}
+                    onChange={(e) => setOpSequence(e.target.value)}
+                    style={inputStyle}
+                    inputMode="numeric"
+                    placeholder={String(nextSequence)}
+                  />
+                </label>
+
+                <label style={formFieldStyle}>
+                  <span>Estimated Hours</span>
+                  <input
+                    value={opEstimatedHours}
+                    onChange={(e) => setOpEstimatedHours(e.target.value)}
+                    style={inputStyle}
+                    inputMode="decimal"
+                  />
+                </label>
+
+                <label
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 'var(--space-sm)',
+                    color: 'var(--text-primary)',
+                    marginTop: 'var(--space-lg)',
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={opInspectionHold}
+                    onChange={(e) => setOpInspectionHold(e.target.checked)}
+                  />
+                  Inspection hold required
+                </label>
+
+                <label
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 'var(--space-sm)',
+                    color: 'var(--text-primary)',
+                    marginTop: 'var(--space-lg)',
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={opSafetyCritical}
+                    onChange={(e) => setOpSafetyCritical(e.target.checked)}
+                  />
+                  Safety critical
+                </label>
+
+                <div style={{ gridColumn: '1 / -1', display: 'flex', justifyContent: 'flex-start' }}>
+                  <button
+                    type="submit"
+                    disabled={createOperationMutation.isPending}
+                    style={{
+                      ...actionBtnStyle,
+                      opacity: createOperationMutation.isPending ? 0.7 : 1,
+                      cursor: createOperationMutation.isPending ? 'wait' : 'pointer',
+                    }}
+                  >
+                    {createOperationMutation.isPending ? 'Adding Operation...' : 'Add Operation'}
+                  </button>
+                </div>
+              </form>
+            </div>
+          )}
+
           {ops.length === 0 ? (
             <div
               style={{
